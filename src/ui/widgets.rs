@@ -142,7 +142,7 @@ pub fn create_column_constraints(columns: &[Column]) -> Vec<Constraint> {
         .map(|column| {
             match column {
                 Column::Hop => Constraint::Length(3),
-                Column::Host => Constraint::Percentage(30), // Increased to 30% for better hostname readability
+                Column::Host => Constraint::Percentage(40), // Increased to 40% for full hostname display
                 Column::Loss => Constraint::Length(5),
                 Column::Sent => Constraint::Length(3),
                 Column::Last | Column::Avg | Column::Ema | Column::Best | Column::Worst => {
@@ -159,7 +159,7 @@ pub fn create_column_constraints(columns: &[Column]) -> Vec<Constraint> {
                         Constraint::Length(9)
                     }
                 }
-                Column::Graph => Constraint::Percentage(70), // Increased to 70% to use remaining space for RTT history
+                Column::Graph => Constraint::Percentage(60), // Adjusted to 60% to accommodate larger hostname column
             }
         })
         .collect()
@@ -522,9 +522,9 @@ pub fn format_hostname(session: &MtrSession, hop: &HopStats, ui_state: &super::U
         base_hostname
     };
 
-    // With 30% width allocation, allow longer hostnames
-    const MAX_HOSTNAME_LEN: usize = 50; // Increased for 30% width allocation
-    const TRUNCATED_LEN: usize = 47;
+    // With 40% width allocation, allow much longer hostnames
+    const MAX_HOSTNAME_LEN: usize = 80; // Significantly increased for 40% width allocation
+    const TRUNCATED_LEN: usize = 77;
 
     if hostname.len() > MAX_HOSTNAME_LEN {
         format!("{}...", &hostname[..TRUNCATED_LEN])
@@ -554,9 +554,9 @@ pub fn calculate_graph_width(table_area: &ratatui::layout::Rect, columns: &[Colu
             })
             .sum();
 
-        // Remaining space for Host (30%) and Graph (70%) columns
+        // Remaining space for Host (40%) and Graph (60%) columns
         let remaining_width = total_width.saturating_sub(fixed_width);
-        let graph_width = (remaining_width * 70) / 100;
+        let graph_width = (remaining_width * 60) / 100;
 
         // Ensure minimum usable width but no upper cap
         utils::math::max_with_minimum(graph_width, 20)
