@@ -207,7 +207,7 @@ pub fn render_ui(f: &mut Frame, session: &MtrSession, ui_state: &UiState) {
                     format!("  ↳ {} ({:.0}%)", alt_path.addr, percentage)
                 };
 
-                let _alt_rtt = utils::time::duration_to_ms_f64(alt_path.last_rtt.unwrap_or_default());
+
 
                 // Create cells for each column, focusing on key info
                 let mut alt_cells = Vec::new();

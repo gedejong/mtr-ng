@@ -22,6 +22,9 @@ const MAX_MTU: usize = 1500;
 /// Starting sequence number for probe packets
 const INITIAL_SEQUENCE: u16 = 32768;
 
+/// Maximum sequence number before wrapping back to initial
+const MAX_SEQUENCE: u16 = 60999;
+
 /// Types of ICMP responses we care about
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IcmpResponseType {
@@ -50,7 +53,6 @@ struct ProbeInfo {
     hop: usize,
     sent_at: Instant,
     timeout: Duration,
-    sequence_timestamp_ns: u128,  // High-precision send timestamp
 }
 
 impl ProbeInfo {
@@ -172,7 +174,6 @@ impl ProbeEngine {
             hop,
             sent_at: now,
             timeout,
-            sequence_timestamp_ns: crate::utils::time::get_system_timestamp_ns(),
         };
 
         self.pending.insert(seq, probe);
@@ -227,7 +228,7 @@ impl ProbeEngine {
         }
 
         // Handle IPv6 socket if available
-        if let Some(ref _icmp6_socket) = self.icmp6_socket {
+        if self.icmp6_socket.is_some() {
             // Similar async approach for IPv6
             if let Ok(ready) = timeout(Duration::from_micros(1), async {
                 // IPv6 socket readiness check would go here
@@ -299,7 +300,7 @@ impl ProbeEngine {
     fn alloc_seq(&mut self) -> u16 {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
-        if self.next_seq > 60999 {
+        if self.next_seq > MAX_SEQUENCE {
             self.next_seq = INITIAL_SEQUENCE;
         }
         seq

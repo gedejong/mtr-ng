@@ -666,7 +666,7 @@ impl MtrSession {
          mut response_rx: mpsc::UnboundedReceiver<ProbeResponse>,
          mut sent_rx: mpsc::UnboundedReceiver<usize>,
      ) -> Result<()> {
-                    let mut _probe_count = 0;
+
          
          loop {
              tokio::select! {
@@ -703,7 +703,7 @@ impl MtrSession {
                  response_result = response_rx.recv() => {
                      match response_result {
                          Some(response) => {
-                             let should_trigger_update = {
+                             let (should_trigger_update, needs_dns_lookup, _numeric_mode) = {
                                  let mut session = session_arc.lock().unwrap();
                                  let hop_index = response.hop;
                                  
@@ -727,14 +727,51 @@ impl MtrSession {
                                          }
                                      }
                                      
-                                                                            _probe_count += 1;
+
+                                     
+                                     // Check if we need DNS lookup for this response
+                                     let needs_dns = !session.args.numeric && 
+                                         matches!(response.icmp_type, IcmpResponseType::TimeExceeded | IcmpResponseType::EchoReply | IcmpResponseType::DestinationUnreachable);
                                      
                                      // Always trigger update for every response - real-time feel
-                                     session.update_callback.is_some()
+                                     (session.update_callback.is_some(), needs_dns, session.args.numeric)
                                  } else {
-                                     false
+                                     (false, false, true)
                                  }
                              };
+
+                             // Perform DNS lookup if needed (outside the lock to avoid deadlock)
+                             if needs_dns_lookup {
+                                 let session_clone = session_arc.clone();
+                                 let source_addr = response.source_addr;
+                                 let hop_index = response.hop;
+                                 
+                                 // Extract resolver outside the async block to avoid Send issues
+                                 let resolver = {
+                                     let session = session_arc.lock().unwrap();
+                                     session.resolver.clone()
+                                 };
+                                 
+                                 // Spawn DNS lookup task to avoid blocking the UI processor
+                                 tokio::spawn(async move {
+                                     if let Ok(lookup_result) = resolver.reverse_lookup(source_addr).await {
+                                         if let Some(hostname) = lookup_result.iter().next() {
+                                             let hostname_str = hostname.to_string();
+                                             if hostname_str != source_addr.to_string() {
+                                                 debug!("UI: Resolved {} to {}", source_addr, hostname_str);
+                                                 let mut session = session_clone.lock().unwrap();
+                                                 if hop_index < session.hops.len() {
+                                                     session.hops[hop_index].set_hostname_for_addr(source_addr, hostname_str);
+                                                     // Trigger UI update after DNS resolution
+                                                     if let Some(ref callback) = session.update_callback {
+                                                         callback();
+                                                     }
+                                                 }
+                                             }
+                                         }
+                                     }
+                                 });
+                             }
 
                              // Trigger UI update after processing each response (moved outside lock)
                              if should_trigger_update {
