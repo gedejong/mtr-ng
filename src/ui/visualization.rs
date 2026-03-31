@@ -46,21 +46,42 @@ pub mod colors {
         let color = match color_support {
             ColorSupport::None => Color::White,
             ColorSupport::Basic => {
+                // Use standard 16-color ANSI palette based on level
                 let colors = [
-                    Color::Green,
-                    Color::Green,
-                    Color::Cyan,
-                    Color::Yellow,
-                    Color::Yellow,
-                    Color::Magenta,
-                    Color::Magenta,
-                    Color::Red,
-                    Color::Red,
+                    Color::Green,      // Level 0 - Very low RTT
+                    Color::Green,      // Level 1 - Low RTT
+                    Color::Cyan,       // Level 2 - Low-medium RTT  
+                    Color::Blue,       // Level 3 - Medium-low RTT
+                    Color::Yellow,     // Level 4 - Medium RTT
+                    Color::Yellow,     // Level 5 - Medium-high RTT
+                    Color::Magenta,    // Level 6 - High RTT
+                    Color::Red,        // Level 7 - Very high RTT
+                    Color::Red,        // Level 8 - Maximum RTT
                 ];
                 colors[utils::math::safe_array_index(level as f64, colors.len())]
             }
             ColorSupport::Extended => {
-                let colors = [17, 21, 39, 75, 111, 179, 215, 208, 130];
+                // Use a broader range of 256-color palette: blue → cyan → green → yellow → orange → red
+                let colors = [
+                    17,  // Dark blue (low RTT)
+                    21,  // Medium blue
+                    33,  // Bright blue  
+                    39,  // Cyan-blue
+                    51,  // Cyan
+                    87,  // Light cyan
+                    118, // Green-cyan
+                    154, // Green
+                    190, // Light green
+                    226, // Yellow-green
+                    220, // Yellow
+                    214, // Light yellow
+                    208, // Orange-yellow
+                    202, // Orange
+                    196, // Red-orange
+                    160, // Red
+                    124, // Dark red
+                    88,  // Very dark red (high RTT)
+                ];
                 let index = utils::math::safe_array_index(level as f64, colors.len());
                 Color::Indexed(colors[index])
             }
@@ -90,20 +111,46 @@ pub mod colors {
         match color_support {
             ColorSupport::None => Color::White,
             ColorSupport::Basic => {
-                let colors = [
-                    Color::Blue,
-                    Color::Cyan,
-                    Color::Yellow,
-                    Color::Magenta,
-                    Color::Red,
-                ];
-                let index = (ratio * (colors.len() - 1) as f64).round() as usize;
-                colors[utils::math::safe_array_index(index as f64, colors.len())]
+                // Use only standard 16-color ANSI palette
+                let color = if ratio < 0.17 {
+                    Color::Green      // Low RTT (fast)
+                } else if ratio < 0.33 {
+                    Color::Cyan       // Low-medium RTT
+                } else if ratio < 0.50 {
+                    Color::Blue       // Medium RTT
+                } else if ratio < 0.67 {
+                    Color::Yellow     // Medium-high RTT
+                } else if ratio < 0.83 {
+                    Color::Magenta    // High RTT
+                } else {
+                    Color::Red        // Maximum RTT (slow)
+                };
+                color
             }
             ColorSupport::Extended => {
-                let steps = [17, 21, 33, 39, 75, 111, 179, 215];
-                let index = (ratio * (steps.len() - 1) as f64).round() as usize;
-                Color::Indexed(steps[utils::math::safe_array_index(index as f64, steps.len())])
+                // Full 256-color gradient: blue → cyan → green → yellow → orange → red
+                let color_index = if ratio < 0.1 {
+                    21   // Dark blue
+                } else if ratio < 0.2 {
+                    27   // Medium blue
+                } else if ratio < 0.3 {
+                    33   // Light blue
+                } else if ratio < 0.4 {
+                    39   // Cyan-blue
+                } else if ratio < 0.5 {
+                    51   // Cyan
+                } else if ratio < 0.6 {
+                    46   // Green
+                } else if ratio < 0.7 {
+                    226  // Yellow
+                } else if ratio < 0.8 {
+                    214  // Orange-yellow
+                } else if ratio < 0.9 {
+                    208  // Orange
+                } else {
+                    196  // Red
+                };
+                Color::Indexed(color_index)
             }
             ColorSupport::TrueColor => {
                 let (r, g, b) = if ratio < 0.5 {
@@ -166,7 +213,11 @@ pub fn calculate_rtt_ratio(
     }
 
     match scale {
-        SparklineScale::Linear => utils::math::calculate_ratio(rtt_ms as f64, global_max as f64),
+        SparklineScale::Linear => {
+            // Properly normalize based on the actual RTT range (min to max)
+            let normalized = (rtt_ms.saturating_sub(global_min)) as f64 / (global_max - global_min) as f64;
+            normalized.clamp(0.0, 1.0)
+        }
         SparklineScale::Logarithmic => {
             utils::math::calculate_log_ratio(rtt_ms as f64, global_min as f64, global_max as f64)
         }
