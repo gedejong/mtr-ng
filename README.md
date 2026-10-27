@@ -36,17 +36,27 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 
 ## Installation
 
-Homebrew, AUR and the install script are being reworked and don't work at the moment (see `BACKLOG.md`, C4/C5).
+Each [release](https://github.com/edejong-dbc/mtr-ng/releases) after 0.3.0 has binaries for macOS and Linux, x86_64 and ARM, with checksums.
 
-#### Cargo (Rust)
+#### Shell installer (macOS, Linux)
 ```bash
-cargo install --locked mtr-ng
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/edejong-dbc/mtr-ng/releases/latest/download/mtr-ng-installer.sh | sh
 ```
 
-#### Debian/Ubuntu
-Download the `.deb` package from [releases](https://github.com/edejong-dbc/mtr-ng/releases):
+#### Homebrew (macOS, Linux)
+```bash
+brew install edejong-dbc/tap/mtr-ng
+```
+
+#### Debian/Ubuntu (amd64, arm64)
+Download the `.deb` from the release, then:
 ```bash
 sudo dpkg -i mtr-ng_*.deb
+```
+
+#### Cargo
+```bash
+cargo install --locked mtr-ng
 ```
 
 ### From Source
@@ -222,4 +232,11 @@ Contributions welcome! Areas of interest:
 
 ## License
 
-MIT License - see LICENSE file for details.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

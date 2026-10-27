@@ -17,15 +17,16 @@ include = [
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",
-    "/LICENSE",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
     "/install/mtr-ng.1",
 ]
 
-# Read by `cargo deb` in the build-packages job of .github/workflows/release.yml.
+# Read by `cargo deb` in .github/workflows/build-deb.yml.
 [package.metadata.deb]
 maintainer = "Edwin de Jong <edejong@fastmail.fm>"
 copyright = "2024, Edwin de Jong <edejong@fastmail.fm>"
-license-file = ["LICENSE", "4"]
+license-file = ["LICENSE-MIT", "4"]
 extended-description = """
 MTR-NG is a modern implementation of the My Traceroute (MTR) network diagnostic tool.
 It combines the functionality of traceroute and ping in a single tool with beautiful
@@ -38,7 +39,8 @@ priority = "optional"
 assets = [
     ["target/release/mtr-ng", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/mtr-ng/", "644"],
-    ["LICENSE", "usr/share/doc/mtr-ng/", "644"],
+    ["LICENSE-MIT", "usr/share/doc/mtr-ng/", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/mtr-ng/", "644"],
     ["install/mtr-ng.1", "usr/share/man/man1/", "644"],
 ]
 
@@ -67,3 +69,8 @@ path = "src/main.rs"
 
 [dev-dependencies]
 clap_mangen = "0.3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -115,19 +115,9 @@ Runs on pushes to `master` and on pull requests:
 
 Every job uses `--locked`, so `Cargo.lock` must be committed and current.
 
-## Version Management
+## Releases
 
-`scripts/bump-version.sh` edits `Cargo.toml`, commits, pushes, waits for CI and tags a release:
-
-```bash
-./scripts/bump-version.sh 0.3.1
-```
-
-Or by hand: edit the version in `Cargo.toml`, commit, then `git tag vX.Y.Z && git push origin master vX.Y.Z`.
-
-## Release Pipeline (.github/workflows/release.yml)
-
-Triggered by `v*` tags. It checks that the tag matches the `Cargo.toml` version, builds release binaries, builds a `.deb` with `cargo deb` (configured by `[package.metadata.deb]` in `Cargo.toml`), publishes to crates.io and updates the Homebrew tap. Parts of it are broken; see `BACKLOG.md`, C4.
+`scripts/bump-version.sh X.Y.Z` runs the gate, bumps and tags; the tag starts the dist workflow in `.github/workflows/release.yml`. See DISTRIBUTION.md, "Cutting a release".
 
 ## Adding New Features
 

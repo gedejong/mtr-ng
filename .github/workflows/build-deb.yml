@@ -1,0 +1,39 @@
+# Debian packages for amd64 and arm64, built from [package.metadata.deb] in
+# Cargo.toml. release.yml calls this (global-artifacts-jobs in
+# dist-workspace.toml); every artifact named artifacts-* is attached to the
+# GitHub release.
+name: Debian packages
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  deb:
+    strategy:
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked --version 3.8.0
+      - name: Build
+        run: |
+          cargo build --release --locked
+          cargo deb --no-build
+          cd target/debian
+          for deb in *.deb; do sha256sum "$deb" > "$deb.sha256"; done
+          ls -l
+      - uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-deb-${{ matrix.runner }}
+          path: |
+            target/debian/*.deb
+            target/debian/*.deb.sha256

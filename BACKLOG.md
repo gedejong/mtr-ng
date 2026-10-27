@@ -2,7 +2,7 @@
 
 Compiled 2026-10-27 from a full review (networking core, statistics/reporting, TUI, portability/CI, feature research). Line numbers refer to commit `59605fa`.
 
-**Status:** milestones 1-3 are done, except C4 and C7 (decisions pending) and part of C8. Ticked items are fixed; *italic notes* record partial progress.
+**Status:** milestones 1-3 are done, apart from the tail of C8. Ticked items are fixed; *italic notes* record partial progress.
 
 Priority: **P0** shows wrong data or doesn't work, **P1** measurement correctness, **P2** visible defects, **P3** cleanup. Effort: S (hours), M (days), L (a week or more).
 
@@ -210,7 +210,7 @@ These refactors unblock most fixes above and every feature below.
 
 ## Build, CI and distribution
 
-Every install path is broken today, and CI is red.
+At the time of the review every install path was broken and CI was red.
 
 - [x] **C1 Reproducible builds.** B5, plus `--locked` in CI, release and every documented install command.
 - [x] **C2 Drop unused dependencies:** `pnet`, `libc`, `nix`, `tokio-util`, `serde`, `serde_json`, `thiserror`, `tokio-test` (re-add `nix`/`libc` when X3c needs them). Dropping `pnet` removes both Npcap CI steps (`ci.yml:72-84`, `release.yml:163-180`). `unicode-width` is also unused, but keep it for B13. *S*
@@ -220,7 +220,7 @@ Every install path is broken today, and CI is red.
   - The tag/version check (`ci.yml:40-57`) never runs, because the workflow isn't triggered by tags.
   - Target matrix: ubuntu x64 + arm, macos-15, windows; `cargo check` for FreeBSD; an MSRV job; a privileged loopback smoke test (`-r -c 2 -n 127.0.0.1`).
   - Size: *S-M*
-- [ ] **C4 Release pipeline.**
+- [x] **C4 Release pipeline.** *(m3: dist 0.32 (`dist-workspace.toml`, generated `release.yml`) builds macOS x86_64/arm64, Linux gnu x86_64/arm64 and musl x86_64 archives with checksums, a shell installer and the Homebrew formula for `edejong-dbc/homebrew-tap`. Our `build-deb.yml` adds amd64/arm64 `.deb`s; `publish-crates.yml` publishes to crates.io. `bump-version.sh` now runs the gate locally, also bumps `Cargo.lock` (the old one didn't, so every `--locked` release build would have failed), and pushes commit and tag atomically. Windows is no longer shipped until X3e. Needs the `HOMEBREW_TAP_TOKEN` and `CARGO_REGISTRY_TOKEN` secrets. Open: dist's formula puts the man page in `share/mtr-ng/`, off the `MANPATH`.)*
   - `release.yml:109-113` uses `macos-13`, which was retired 2025-12-04.
   - `workflow_dispatch` derives the version from the branch ref, so the verify step fails.
   - The release is published before the builds run.
@@ -229,7 +229,7 @@ Every install path is broken today, and CI is red.
   - Permissions are broader than needed.
   - `cargo publish` fails on B5.
   - Recommendation: **cargo-dist**, which produces archives, checksums, shell/PowerShell installers and the Homebrew tap formula, replacing `install.sh`, `Formula/` and most of `release.yml`. Use release-plz or cargo-release instead of `bump-version.sh`, which only edits `Cargo.toml` and waits forever on skipped or timed-out CI. *M*
-- [ ] **C5 Broken install paths.** *(m1: one-liner removed from README and release notes, `curl -f` in `install.sh`, README lists only working routes. The rest waits for C4.)*
+- [x] **C5 Broken install paths.** *(m1: one-liner removed, `curl -f` in `install.sh`. m3: `install.sh` and `Formula/` replaced by dist's installer and formula. `packaging/PKGBUILD` stays an unpublished draft.)*
   - `install.sh` downloads from `releases/download/latest/mtr-ng-$os-$arch`, which matches neither GitHub's URL scheme nor the asset names. `curl -L` without `-f` saves the 404 page, which is then installed **with sudo as the binary** (`install/install.sh:177`, `:183`, `:191`). It has no checksum check and uses sudo even for `~/.local`.
   - The README one-liner points at `/main/`, but the branch is `master`, so it pipes "404: Not Found" into bash (`README.md:43`, `release.yml:62`, `install.sh:194`).
   - The published tap formula has no `install` block or sha256. The in-repo formula's test expects text `--help` doesn't print (`Formula/mtr-ng.rb:19`).
@@ -241,7 +241,7 @@ Every install path is broken today, and CI is red.
   - It rejects musl.
   - It asks for confirmation before checking the platform.
   - Its warning that file capabilities are "less secure than sudo" has it backwards. *S*
-- [ ] **C7 Licence mismatch.** `Cargo.toml` says MIT OR Apache-2.0, but only MIT text ships; the README says MIT; the PKGBUILD says Apache. Pick one and align. *S*
+- [x] **C7 Licence mismatch.** *(m3: MIT OR Apache-2.0 with `LICENSE-MIT` and `LICENSE-APACHE`, the Rust convention; the crate, archives, `.deb` and PKGBUILD ship both.)* `Cargo.toml` says MIT OR Apache-2.0, but only MIT text ships; the README says MIT; the PKGBUILD says Apache. Pick one and align. *S*
 - [ ] **C8 Dependencies.** *(m3, mostly done: hickory 0.26, ratatui 0.30 with crossterm through its re-export, socket2 0.6, rand 0.10, `clap_mangen`, `rust-version = "1.89"` (forced by uuid via moka via hickory). hickory 0.26 resolves AAAA first by default, so the resolver is set to `Ipv4thenIpv6` until IPv6 probing exists. Open: `clap_complete`, and a `cargo-deny` run.)*
   - Advisories reported (via OSV) against hickory-proto 0.24, `lru` (via ratatui 0.29) and the unmaintained `paste`; upgrading to hickory 0.25+ and ratatui 0.30 + crossterm 0.29 clears them. The local `cargo-audit` is too old to read the current database, so re-check with a fresh `cargo-deny`.
   - Edition 2024 compiles cleanly.
@@ -292,7 +292,7 @@ PMTU/black-hole detection and an OpenMetrics exporter are further gaps in trippy
 
 1. **Tell the truth and unbreak.** *(Done on branch `m1-tell-the-truth`, plus B6 and X3b pulled forward.)* B1, B2, B4, B5/C1, B10, B13, B27, B31, C2, C5 (at least pull the 404 one-liner), X1. Refuse rather than fabricate; never break the user's terminal; make it installable.
 2. **Measure correctly.** *(Done: X2, R1, R2, B3, B7-B9, B11, B12, B29, X3b; R3/R4 partly.)* X2 spike first (it decides how much of R1 is written by hand), then R1, R2, R4, B3, B6-B9, B11, B12, X3b (macOS without sudo).
-3. **A UI that can grow.** *(Done except C4 and C7, which need decisions, and the tail of C8.)* U1-U3, after which B14-B26 mostly fall out. Add F5 and F11 (JSON/CSV) as cheap wins. C3, C4 (cargo-dist), C6-C9.
+3. **A UI that can grow.** *(Done, apart from the tail of C8.)* U1-U3, after which B14-B26 mostly fall out. Add F5 and F11 (JSON/CSV) as cheap wins. C3, C4 (cargo-dist), C6-C9.
 4. **Stable flows and multi-route.** R3, F1, F2, F9, F14.
 5. **Where is it.** F12, F6, F7, F8.
 6. **Platforms and depth.** X3a/c/d/e, X4, IPv6, F4, F3, F10, F13.
