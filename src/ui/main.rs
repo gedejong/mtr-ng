@@ -5,29 +5,21 @@
 //! and support for various terminal color modes.
 
 use crate::args::Column;
+use crate::probe::ProbeEngine;
 use crate::ui::events::EventHandler;
 use crate::ui::state::UiState;
-use crate::ui::visualization::{
-    create_heatmap_spans, create_sparkline_spans, VisualizationMode,
-};
+use crate::ui::visualization::{create_heatmap_spans, create_sparkline_spans, VisualizationMode};
 use crate::ui::widgets;
 use crate::utils;
 use crate::{MtrSession, Result};
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
-    backend::CrosstermBackend,
-
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     widgets::{Cell, Clear, Paragraph, Row, Table},
-    Frame, Terminal,
+    DefaultTerminal, Frame,
 };
 use std::{
-    io,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -38,34 +30,13 @@ use tracing::debug;
 // Main UI Rendering
 // ========================================
 
-/// Detect the terminal's color support capabilities
-
-
-
-
-
-
 // ========================================
 // Table Components
 // ========================================
 
-
-
-
-
-
-
 // ========================================
 // Main Rendering Function
 // ========================================
-
-
-
-
-
-
-
-
 
 // ========================================
 // Main UI Rendering
@@ -138,21 +109,12 @@ pub fn render_ui(f: &mut Frame, session: &MtrSession, ui_state: &UiState) {
 
     let mut rows = Vec::new();
 
-    // Determine how many hops to display based on discovery or organic growth
-    let max_hops_to_display = if session.num_hosts > 0 {
-        session.num_hosts
-    } else {
-        // Organic discovery: show hops up to the furthest one with data
-        session.hops.iter()
-            .enumerate()
-            .rev()
-            .find(|(_, hop)| hop.sent > 0 || hop.addr.is_some())
-            .map(|(i, _)| i + 1)
-            .unwrap_or(0)
-            .max(8) // Show at least 8 hops to see progress
-    };
-    
-    for hop in session.hops.iter().take(max_hops_to_display).filter(|hop| hop.sent > 0) {
+    for hop in session
+        .hops
+        .iter()
+        .take(session.display_hop_count())
+        .filter(|hop| hop.sent > 0)
+    {
         let hostname = widgets::format_hostname(session, hop, ui_state);
         let graph_width = widgets::calculate_graph_width(&chunks[1], &ui_state.columns);
 
@@ -175,12 +137,7 @@ pub fn render_ui(f: &mut Frame, session: &MtrSession, ui_state: &UiState) {
             ),
         };
 
-        let cells = widgets::create_table_cells(
-            hop,
-            &hostname,
-            &graph_spans,
-            &ui_state.columns,
-        );
+        let cells = widgets::create_table_cells(hop, &hostname, &graph_spans, &ui_state.columns);
 
         rows.push(Row::new(cells));
 
@@ -193,10 +150,10 @@ pub fn render_ui(f: &mut Frame, session: &MtrSession, ui_state: &UiState) {
                 let alt_hostname = if let Some(hostname) = &alt_path.hostname {
                     let full_name =
                         format!("  ↳ {} ({}) ({:.0}%)", hostname, alt_path.addr, percentage);
-                    if full_name.len() > 50 {
+                    if unicode_width::UnicodeWidthStr::width(full_name.as_str()) > 50 {
                         format!(
-                            "  ↳ {}...{} ({:.0}%)",
-                            &hostname[..15],
+                            "  ↳ {} ({}) ({:.0}%)",
+                            utils::network::truncate_hostname(hostname, 18),
                             alt_path.addr,
                             percentage
                         )
@@ -206,8 +163,6 @@ pub fn render_ui(f: &mut Frame, session: &MtrSession, ui_state: &UiState) {
                 } else {
                     format!("  ↳ {} ({:.0}%)", alt_path.addr, percentage)
                 };
-
-
 
                 // Create cells for each column, focusing on key info
                 let mut alt_cells = Vec::new();
@@ -228,7 +183,7 @@ pub fn render_ui(f: &mut Frame, session: &MtrSession, ui_state: &UiState) {
                             } else {
                                 alt_cells.push(Cell::from("???"));
                             }
-                        },
+                        }
                         Column::Avg => alt_cells.push(Cell::from("")),
                         Column::Ema => alt_cells.push(Cell::from("")),
                         Column::Best => alt_cells.push(Cell::from("")),
@@ -264,12 +219,10 @@ pub fn render_ui(f: &mut Frame, session: &MtrSession, ui_state: &UiState) {
     if ui_state.show_help {
         let area = f.area();
         // Center the help overlay
-        let (help_width, help_height) = utils::layout::calculate_popup_dimensions(
-            area.width, area.height, 50, 12
-        );
-        let (help_x, help_y) = utils::layout::center_popup(
-            area.width, area.height, help_width, help_height
-        );
+        let (help_width, help_height) =
+            utils::layout::calculate_popup_dimensions(area.width, area.height, 50, 12);
+        let (help_x, help_y) =
+            utils::layout::center_popup(area.width, area.height, help_width, help_height);
 
         let help_area = Rect {
             x: help_x,
@@ -289,11 +242,13 @@ pub fn render_ui(f: &mut Frame, session: &MtrSession, ui_state: &UiState) {
         // Center the column selector popup - make it larger than help
         let preferred_height = (ui_state.column_selector_state.available_columns.len() + 8) as u16;
         let (popup_width, popup_height) = utils::layout::calculate_popup_dimensions(
-            area.width, area.height, 60, preferred_height
+            area.width,
+            area.height,
+            60,
+            preferred_height,
         );
-        let (popup_x, popup_y) = utils::layout::center_popup(
-            area.width, area.height, popup_width, popup_height
-        );
+        let (popup_x, popup_y) =
+            utils::layout::center_popup(area.width, area.height, popup_width, popup_height);
 
         let popup_area = Rect {
             x: popup_x,
@@ -311,26 +266,30 @@ pub fn render_ui(f: &mut Frame, session: &MtrSession, ui_state: &UiState) {
     }
 }
 
-
-
 // ========================================
 // Interactive Event Loop
 // ========================================
 
 pub async fn run_interactive(session: MtrSession) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    // Open sockets before touching the terminal so failures print normally.
+    let probe_engine = session.open_probe_engine()?;
 
+    // try_init installs a panic hook that restores the terminal before unwinding.
+    let mut terminal = ratatui::try_init()?;
+    let result = run_event_loop(&mut terminal, session, probe_engine).await;
+    ratatui::restore();
+    result
+}
+
+async fn run_event_loop(
+    terminal: &mut DefaultTerminal,
+    session: MtrSession,
+    probe_engine: Option<ProbeEngine>,
+) -> Result<()> {
     let session_arc = Arc::new(Mutex::new(session.clone()));
     let session_clone = Arc::clone(&session_arc);
 
-    let mut ui_state = UiState::new(
-        session.args.sparkline_scale,
-        session.args.get_columns(),
-    );
+    let mut ui_state = UiState::new(session.args.sparkline_scale, session.args.get_columns());
 
     let mut event_handler = EventHandler::new();
 
@@ -344,18 +303,18 @@ pub async fn run_interactive(session: MtrSession) -> Result<()> {
         }));
     }
 
-    let trace_handle = {
+    let mut trace_handle = {
         let session_for_trace = Arc::clone(&session_clone);
-        tokio::spawn(async move {
-            if let Err(e) = MtrSession::run_trace_with_realtime_updates(session_for_trace).await {
-                debug!("Real-time trace failed: {}", e);
-            }
-        })
+        tokio::spawn(MtrSession::run_trace_with_realtime_updates(
+            session_for_trace,
+            probe_engine,
+        ))
     };
+    let mut trace_running = true;
 
     // Create a channel for keyboard input events
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<crossterm::event::Event>();
-    
+
     // Spawn a task to handle keyboard input asynchronously
     let input_handle = tokio::spawn(async move {
         loop {
@@ -375,26 +334,49 @@ pub async fn run_interactive(session: MtrSession) -> Result<()> {
         }
     });
 
-    loop {
+    let result = loop {
         // Pure event-driven: wait for data updates or keyboard input
         tokio::select! {
+            // A failed trace ends the session with its error instead of a frozen screen
+            trace_result = &mut trace_handle, if trace_running => {
+                trace_running = false;
+                match trace_result {
+                    Ok(Err(e)) => break Err(e),
+                    Err(e) if e.is_panic() => break Err(anyhow::anyhow!("trace task panicked: {e}")),
+                    _ => debug!("Trace finished"),
+                }
+            }
+
             // Wait for update notification from session (blocks until data arrives)
             update_result = update_rx.recv() => {
                 if update_result.is_none() {
                     // Channel closed, session ended
-                    break;
+                    break Ok(());
                 }
-                
+
                 // Update UI immediately when new data arrives
                 terminal.draw(|f| {
                     let session_guard = session_clone.lock().unwrap();
                     render_ui(f, &session_guard, &ui_state)
                 })?;
             }
-            
+
             // Handle keyboard input events immediately
             input_event = input_rx.recv() => {
-                if let Some(Event::Key(key)) = input_event {
+                if let Some(Event::Resize(..)) = input_event {
+                    terminal.draw(|f| {
+                        let session_guard = session_clone.lock().unwrap();
+                        render_ui(f, &session_guard, &ui_state)
+                    })?;
+                } else if let Some(Event::Key(key)) = input_event {
+                    // Windows also reports key releases; act on presses only
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    // Raw mode swallows SIGINT, so Ctrl-C arrives as a key
+                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        break Ok(());
+                    }
                     // Handle column selector popup inputs first
                     if ui_state.show_column_selector {
                         event_handler.handle_column_selector_input(
@@ -410,10 +392,10 @@ pub async fn run_interactive(session: MtrSession) -> Result<()> {
                             &session_clone,
                         );
                         if !should_continue {
-                            break;
+                            break Ok(());
                         }
                     }
-                    
+
                     // ALWAYS redraw UI immediately after keyboard input
                     terminal.draw(|f| {
                         let session_guard = session_clone.lock().unwrap();
@@ -421,21 +403,13 @@ pub async fn run_interactive(session: MtrSession) -> Result<()> {
                     })?;
                 } else if input_event.is_none() {
                     // Input channel closed
-                    break;
+                    break Ok(());
                 }
             }
         }
-    }
+    };
 
     input_handle.abort();
     trace_handle.abort();
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    Ok(())
+    result
 }

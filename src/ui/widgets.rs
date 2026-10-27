@@ -10,7 +10,7 @@ use crate::utils;
 use crate::{HopStats, MtrSession, SparklineScale};
 use ratatui::{
     layout::{Alignment, Constraint},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph},
 };
@@ -118,7 +118,7 @@ pub fn create_table_cells(
                     } else {
                         "???".to_string()
                     }
-                },
+                }
                 Column::Avg => utils::time::format_optional_duration_ms(hop.avg_rtt),
                 Column::Ema => utils::time::format_optional_duration_ms(hop.ema_rtt),
                 Column::Jitter => utils::time::format_optional_duration_ms(hop.last_jitter),
@@ -171,15 +171,17 @@ pub fn create_column_constraints(columns: &[Column]) -> Vec<Constraint> {
 
 /// Create inline status text without borders
 pub fn create_status_text(session: &MtrSession, ui_state: &super::UiState) -> Line<'static> {
-    let total_sent: usize = session.hops.iter().map(|h| h.sent).sum();
-    let total_received: usize = session.hops.iter().map(|h| h.received).sum();
+    // Only the hops on the path count; probes past the destination are noise
+    let shown = &session.hops[..session.display_hop_count()];
+    let total_sent: usize = shown.iter().map(|h| h.sent).sum();
+    let total_received: usize = shown.iter().map(|h| h.received).sum();
     let overall_loss = if total_sent > 0 {
-        ((total_sent - total_received) as f64 / total_sent as f64) * 100.0
+        (total_sent.saturating_sub(total_received) as f64 / total_sent as f64) * 100.0
     } else {
         0.0
     };
 
-    let active_hops = session.hops.iter().filter(|h| h.sent > 0).count();
+    let active_hops = shown.len();
     let scale_name = match ui_state.current_sparkline_scale {
         SparklineScale::Linear => "Linear",
         SparklineScale::Logarithmic => "Log",
@@ -208,11 +210,22 @@ pub fn create_status_text(session: &MtrSession, ui_state: &super::UiState) -> Li
         hostname_mode
     );
 
-    Line::from(vec![
+    let mut spans = Vec::new();
+    if session.is_simulated() {
+        spans.push(Span::styled(
+            "SIMULATED ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.extend([
         Span::raw(main_text),
         Span::raw(" | "),
         Span::styled("? for help", Style::default().fg(Color::Gray)),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 /// Create column selection popup
@@ -406,18 +419,17 @@ pub fn create_scale_widget(
         return Paragraph::new("No RTT data available");
     }
 
-            let scale_width = utils::layout::constrain_width(width as u16, 20, 60) as usize;
+    let scale_width = utils::layout::constrain_width(width as u16, 20, 60) as usize;
 
     // Create gradient visualization using the same color logic as sparklines
     let gradient_spans: Vec<Span> = (0..scale_width)
         .map(|i| {
             let ratio = i as f64 / (scale_width - 1) as f64;
-            let color = super::visualization::colors::get_smooth_gradient_color(ratio, color_support);
+            let color =
+                super::visualization::colors::get_smooth_gradient_color(ratio, color_support);
             Span::styled("█".to_string(), Style::default().fg(color))
         })
         .collect();
-
-
 
     // Create x-axis labels - use 5 evenly spaced points
     let num_labels = 5;
@@ -473,7 +485,9 @@ pub fn create_scale_widget(
 
         // Add spacing between labels (except for the last one)
         if i < label_info.len() - 1 {
-            let next_label_start = label_info[i + 1].1.saturating_sub(label_info[i + 1].0.len() / 2);
+            let next_label_start = label_info[i + 1]
+                .1
+                .saturating_sub(label_info[i + 1].0.len() / 2);
             if next_label_start > current_pos {
                 let spacing = next_label_start - current_pos;
                 label_spans.push(Span::raw(" ".repeat(spacing)));
@@ -482,10 +496,7 @@ pub fn create_scale_widget(
         }
     }
 
-    let content = vec![
-        Line::from(gradient_spans),
-        Line::from(label_spans),
-    ];
+    let content = vec![Line::from(gradient_spans), Line::from(label_spans)];
 
     Paragraph::new(content)
 }
@@ -523,14 +534,8 @@ pub fn format_hostname(session: &MtrSession, hop: &HopStats, ui_state: &super::U
     };
 
     // With 40% width allocation, allow much longer hostnames
-    const MAX_HOSTNAME_LEN: usize = 80; // Significantly increased for 40% width allocation
-    const TRUNCATED_LEN: usize = 77;
-
-    if hostname.len() > MAX_HOSTNAME_LEN {
-        format!("{}...", &hostname[..TRUNCATED_LEN])
-    } else {
-        hostname
-    }
+    const MAX_HOSTNAME_LEN: usize = 80;
+    crate::utils::network::truncate_hostname(&hostname, MAX_HOSTNAME_LEN)
 }
 
 /// Calculate available width for graph column
@@ -563,4 +568,4 @@ pub fn calculate_graph_width(table_area: &ratatui::layout::Rect, columns: &[Colu
     } else {
         20
     }
-} 
+}

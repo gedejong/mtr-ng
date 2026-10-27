@@ -1,6 +1,6 @@
 # Build artifacts
 /target/
-Cargo.lock
+# Cargo.lock is committed: this is a binary crate and builds must be reproducible
 
 # Log files  
 mtr-ng.log

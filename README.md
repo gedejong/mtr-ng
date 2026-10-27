@@ -31,38 +31,17 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 
 ### Performance & Compatibility
 - **Efficient Async**: Built with Tokio for high-performance networking
-- **Cross-platform**: Works on Linux, macOS, and Windows
+- **Platforms**: macOS (no sudo needed) and Linux (root or `CAP_NET_RAW`); Windows and FreeBSD are not supported yet
 - **IPv4 Support**: Robust IP address handling and DNS resolution
 - **Terminal Detection**: Automatic capability detection and graceful fallbacks
 
 ## Installation
 
-### Quick Install (Recommended)
-```bash
-# Unix/Linux/macOS one-liner
-curl -sSL https://raw.githubusercontent.com/edejong-dbc/mtr-ng/main/install/install.sh | bash
-```
-
-### Package Managers
-
-#### Homebrew (macOS)
-```bash
-# Option 1: Using the tap (recommended)
-brew tap edejong-dbc/tap
-brew install mtr-ng
-
-# Option 2: Direct install without adding tap
-brew install edejong-dbc/tap/mtr-ng
-```
+Homebrew, AUR and the install script are being reworked and don't work at the moment (see `BACKLOG.md`, C4/C5).
 
 #### Cargo (Rust)
 ```bash
-cargo install mtr-ng
-```
-
-#### Arch Linux (AUR)
-```bash
-yay -S mtr-ng
+cargo install --locked mtr-ng
 ```
 
 #### Debian/Ubuntu
@@ -73,15 +52,18 @@ sudo dpkg -i mtr-ng_*.deb
 
 ### From Source
 ```bash
-# Clone and build
 git clone https://github.com/edejong-dbc/mtr-ng
 cd mtr-ng
-cargo build --release
-
-# Install
+cargo build --release --locked
 sudo cp target/release/mtr-ng /usr/local/bin/
 sudo cp install/mtr-ng.1 /usr/local/share/man/man1/
 ```
+
+### Privileges
+- **macOS**: runs as a normal user (unprivileged ICMP sockets).
+- **Linux**: needs raw sockets. Run with `sudo`, or grant the capability once with `sudo setcap cap_net_raw+ep $(which mtr-ng)`.
+
+mtr-ng never falls back to fake data: if it can't probe, it exits with an error. Use `--simulate` for a demo without network access.
 
 ## Usage Examples
 
@@ -132,11 +114,6 @@ mtr-ng google.com --simulate
 
 # Quick test in report mode
 mtr-ng google.com --simulate --count 3 --report
-
-# Test all protocols in simulation
-mtr-ng google.com --simulate -P icmp
-mtr-ng google.com --simulate -P udp  
-mtr-ng google.com --simulate -P tcp
 ```
 
 **Perfect for:**

@@ -15,4 +15,4 @@ pub use widgets::ColumnSelectorState;
 
 // Include the main UI functionality
 mod main;
-pub use main::*; 
+pub use main::*;

@@ -180,7 +180,7 @@ install_binary() {
     fi
     
     log "Downloading from: $binary_url"
-    if ! curl -L -o mtr-ng "$binary_url"; then
+    if ! curl -fL -o mtr-ng "$binary_url"; then
         error "Failed to download binary"
         rm -rf "$temp_dir"
         return 1
@@ -191,7 +191,7 @@ install_binary() {
     sudo cp mtr-ng "$INSTALL_DIR/"
     
     # Download and install man page
-    if curl -L -o mtr-ng.1 "$REPO_URL/raw/main/install/mtr-ng.1" 2>/dev/null; then
+    if curl -fL -o mtr-ng.1 "$REPO_URL/raw/master/install/mtr-ng.1" 2>/dev/null; then
         sudo mkdir -p "$MAN_DIR"
         sudo cp mtr-ng.1 "$MAN_DIR/"
         sudo gzip -f "$MAN_DIR/mtr-ng.1"

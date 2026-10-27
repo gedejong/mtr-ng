@@ -90,10 +90,12 @@ impl UiState {
         // Ensure at least one column remains
         if self.columns.is_empty() {
             self.columns.push(Column::Host);
-            if let Some((_, enabled)) = self.column_selector_state
+            if let Some((_, enabled)) = self
+                .column_selector_state
                 .available_columns
                 .iter_mut()
-                .find(|(col, _)| matches!(col, Column::Host)) {
+                .find(|(col, _)| matches!(col, Column::Host))
+            {
                 *enabled = true;
             }
         }
@@ -180,7 +182,7 @@ impl UiState {
     // ========================================
 
     /// Generate header string for the current column configuration
-    /// 
+    ///
     /// Note: This method is legacy and may be removed in favor of widget-based headers
     pub fn get_header(&self) -> String {
         let mut header = String::from("  ");
@@ -204,4 +206,4 @@ impl UiState {
         }
         header
     }
-} 
+}

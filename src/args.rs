@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq)]
 pub enum SparklineScale {
@@ -10,9 +11,9 @@ pub enum SparklineScale {
 pub enum ProbeProtocol {
     /// ICMP Echo (ping) - default and most common
     Icmp,
-    /// UDP probes (useful for firewalls that block ICMP)
+    /// UDP probes (not implemented yet)
     Udp,
-    /// TCP SYN probes (useful for strict firewalls)
+    /// TCP SYN probes (not implemented yet)
     Tcp,
 }
 
@@ -126,7 +127,7 @@ pub struct Args {
     /// Target hostname or IP address
     pub target: String,
 
-    /// Number of pings per round (default: infinite)
+    /// Number of rounds to run (default: until quit; 10 in report mode)
     #[arg(short, long)]
     pub count: Option<usize>,
 
@@ -166,7 +167,7 @@ pub struct Args {
     #[arg(long, help = "Run in simulation mode with fake network data")]
     pub simulate: bool,
 
-    /// Probe protocol to use for measurements  
+    /// Probe protocol (only icmp is implemented so far)
     #[arg(short = 'P', long, value_enum, default_value = "icmp")]
     pub protocol: ProbeProtocol,
 
@@ -181,6 +182,10 @@ pub struct Args {
     /// Quiet mode - reduce output verbosity
     #[arg(short, long, help = "Quiet mode - minimal output")]
     pub quiet: bool,
+
+    /// Append debug logs to this file (level can be overridden with RUST_LOG)
+    #[arg(long, value_name = "PATH")]
+    pub log_file: Option<PathBuf>,
 }
 
 impl Args {

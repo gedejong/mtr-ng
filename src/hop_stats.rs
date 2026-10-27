@@ -70,10 +70,10 @@ pub struct HopStats {
     // Multi-path tracking
     pub alternate_paths: HashMap<IpAddr, AlternatePath>,
     pub path_frequency: HashMap<IpAddr, usize>,
-    
+
     // Target tracking
     pub is_target: bool,
-    
+
     // ICMP error tracking (for MTR algorithm compatibility)
     pub icmp_error: bool,
 
@@ -162,7 +162,7 @@ impl HopStats {
     /// Get all alternate paths sorted by frequency
     pub fn get_alternate_paths(&self) -> Vec<&AlternatePath> {
         let mut paths: Vec<_> = self.alternate_paths.values().collect();
-        paths.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+        paths.sort_by_key(|path| std::cmp::Reverse(path.frequency));
         paths
     }
 
@@ -242,7 +242,7 @@ impl HopStats {
             // Detect timing anomalies using real-time analysis
             if utils::time::detect_timing_anomaly(rtt, prev_rtt, self.jitter_threshold) {
                 self.timing_anomalies += 1;
-                tracing::warn!(
+                tracing::debug!(
                     "Timing anomaly detected: hop={}, current={:.1}ms, previous={:.1}ms, factor={:.2}",
                     self.hop,
                     utils::time::duration_to_ms_f64(rtt),
@@ -261,8 +261,8 @@ impl HopStats {
 
             // Calculate mean jitter using high-precision moving average
             if let Some(avg_jitter) = utils::time::calculate_timing_moving_average(
-                &self.jitters.iter().cloned().collect::<Vec<_>>(), 
-                self.jitters.len()
+                &self.jitters.iter().cloned().collect::<Vec<_>>(),
+                self.jitters.len(),
             ) {
                 self.jitter_avg = Some(avg_jitter);
             }
@@ -311,7 +311,11 @@ impl HopStats {
         self.avg_rtt = Some(sum / self.rtts.len() as u32);
 
         // Calculate exponential moving average using high-precision timing
-        self.ema_rtt = Some(utils::time::calculate_timing_ema(rtt, self.ema_rtt, self.ema_alpha));
+        self.ema_rtt = Some(utils::time::calculate_timing_ema(
+            rtt,
+            self.ema_rtt,
+            self.ema_alpha,
+        ));
 
         self.update_loss_percent();
     }
@@ -369,17 +373,17 @@ impl HopStats {
     pub fn set_ema_alpha(&mut self, alpha: f64) {
         self.ema_alpha = utils::math::clamp_ratio(alpha);
     }
-    
+
     /// Mark this hop as containing the target destination
     pub fn mark_as_target(&mut self) {
         self.is_target = true;
     }
-    
+
     /// Check if this hop has returned an ICMP error (like original MTR)
     pub fn has_icmp_error(&self) -> bool {
         self.icmp_error
     }
-    
+
     /// Mark this hop as having an ICMP error
     pub fn set_icmp_error(&mut self) {
         self.icmp_error = true;

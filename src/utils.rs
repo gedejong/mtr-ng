@@ -47,14 +47,14 @@ pub mod time {
     /// Format optional duration as milliseconds with one decimal place, or "???" if None
     pub fn format_optional_duration_ms(duration: Option<Duration>) -> String {
         duration
-            .map(|d| format_duration_ms(d))
+            .map(format_duration_ms)
             .unwrap_or_else(|| "???".to_string())
     }
 
     /// Format optional duration with high precision
     pub fn format_optional_duration_us(duration: Option<Duration>) -> String {
         duration
-            .map(|d| format_duration_us(d))
+            .map(format_duration_us)
             .unwrap_or_else(|| "???".to_string())
     }
 
@@ -78,33 +78,33 @@ pub mod time {
 
     /// Calculate timing jitter between consecutive measurements
     pub fn calculate_timing_jitter(current: Duration, previous: Duration) -> Duration {
-        if current > previous {
-            current - previous
-        } else {
-            previous - current
-        }
+        current.abs_diff(previous)
     }
 
     /// Moving average for timing smoothing
-    pub fn calculate_timing_moving_average(values: &[Duration], window_size: usize) -> Option<Duration> {
+    pub fn calculate_timing_moving_average(
+        values: &[Duration],
+        window_size: usize,
+    ) -> Option<Duration> {
         if values.is_empty() || window_size == 0 {
             return None;
         }
 
         let window_size = window_size.min(values.len());
         let recent_values = &values[values.len() - window_size..];
-        
-        let sum_nanos: u128 = recent_values
-            .iter()
-            .map(|d| d.as_nanos())
-            .sum();
-        
+
+        let sum_nanos: u128 = recent_values.iter().map(|d| d.as_nanos()).sum();
+
         let avg_nanos = sum_nanos / window_size as u128;
         Some(Duration::from_nanos(avg_nanos as u64))
     }
 
     /// Exponential moving average for timing with configurable alpha
-    pub fn calculate_timing_ema(current: Duration, previous_ema: Option<Duration>, alpha: f64) -> Duration {
+    pub fn calculate_timing_ema(
+        current: Duration,
+        previous_ema: Option<Duration>,
+        alpha: f64,
+    ) -> Duration {
         match previous_ema {
             None => current,
             Some(prev) => {
@@ -117,20 +117,27 @@ pub mod time {
     }
 
     /// Detect timing anomalies (spikes or drops)
-    pub fn detect_timing_anomaly(current: Duration, baseline: Duration, threshold_factor: f64) -> bool {
+    pub fn detect_timing_anomaly(
+        current: Duration,
+        baseline: Duration,
+        threshold_factor: f64,
+    ) -> bool {
         let current_ns = current.as_nanos() as f64;
         let baseline_ns = baseline.as_nanos() as f64;
-        
+
         if baseline_ns == 0.0 {
             return false;
         }
-        
+
         let ratio = current_ns / baseline_ns;
         ratio > threshold_factor || ratio < (1.0 / threshold_factor)
     }
 
     /// Calculate timing percentiles for performance analysis
-    pub fn calculate_timing_percentile(values: &mut [Duration], percentile: f64) -> Option<Duration> {
+    pub fn calculate_timing_percentile(
+        values: &mut [Duration],
+        percentile: f64,
+    ) -> Option<Duration> {
         if values.is_empty() || percentile < 0.0 || percentile > 100.0 {
             return None;
         }
@@ -180,9 +187,16 @@ pub mod time {
                 let mean_ns = self.mean.as_nanos() as f64;
                 let duration_ns = duration.as_nanos() as f64;
                 let diff = duration_ns - mean_ns;
-                self.variance = ((self.count - 1) as f64 * self.variance + diff * diff) / self.count as f64;
+                self.variance =
+                    ((self.count - 1) as f64 * self.variance + diff * diff) / self.count as f64;
                 self.stddev = Duration::from_nanos(self.variance.sqrt() as u64);
             }
+        }
+    }
+
+    impl Default for TimingStats {
+        fn default() -> Self {
+            Self::new()
         }
     }
 }
@@ -214,11 +228,11 @@ pub mod math {
         if min_value <= 0.0 || max_value <= min_value || value <= 0.0 {
             return 0.0;
         }
-        
+
         let log_value = value.ln();
         let log_min = min_value.ln();
         let log_max = max_value.ln();
-        
+
         ((log_value - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
     }
 
@@ -227,7 +241,7 @@ pub mod math {
         if values.len() <= 1 {
             return 0.0;
         }
-        
+
         let variance = values
             .iter()
             .map(|&value| {
@@ -236,7 +250,7 @@ pub mod math {
             })
             .sum::<f64>()
             / (values.len() - 1) as f64;
-        
+
         variance.sqrt()
     }
 
@@ -267,21 +281,29 @@ pub mod network {
     }
 
     /// Format hostname with fallback to IP address
-    pub fn format_hostname_with_fallback(
-        hostname: Option<String>,
-        addr: Option<IpAddr>,
-    ) -> String {
+    pub fn format_hostname_with_fallback(hostname: Option<String>, addr: Option<IpAddr>) -> String {
         hostname.unwrap_or_else(|| format_optional_ip(addr))
     }
 
-    /// Truncate hostname to specified length with ellipsis
-    pub fn truncate_hostname(hostname: &str, max_len: usize) -> String {
-        if hostname.len() > max_len {
-            let truncated_len = max_len.saturating_sub(3); // Reserve space for "..."
-            format!("{}...", &hostname[..truncated_len])
-        } else {
-            hostname.to_string()
+    /// Truncate hostname to at most `max_width` terminal columns, ending in "..." when
+    /// shortened. Counts display width, so multi-byte and wide characters are safe.
+    pub fn truncate_hostname(hostname: &str, max_width: usize) -> String {
+        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+        if hostname.width() <= max_width {
+            return hostname.to_string();
         }
+        let budget = max_width.saturating_sub(3); // Reserve space for "..."
+        let mut used = 0;
+        let mut truncated: String = hostname
+            .chars()
+            .take_while(|c| {
+                used += c.width().unwrap_or(0);
+                used <= budget
+            })
+            .collect();
+        truncated.push_str(&"..."[..max_width.min(3)]);
+        truncated
     }
 }
 
@@ -305,7 +327,12 @@ pub mod layout {
     }
 
     /// Calculate centered position for popup
-    pub fn center_popup(area_width: u16, area_height: u16, popup_width: u16, popup_height: u16) -> (u16, u16) {
+    pub fn center_popup(
+        area_width: u16,
+        area_height: u16,
+        popup_width: u16,
+        popup_height: u16,
+    ) -> (u16, u16) {
         let x = area_width.saturating_sub(popup_width) / 2;
         let y = area_height.saturating_sub(popup_height) / 2;
         (x, y)
@@ -321,7 +348,12 @@ pub mod format {
 
     /// Format number with specified decimal places and width
     pub fn format_number_padded(value: f64, width: usize, decimals: usize) -> String {
-        format!("{:width$.decimals$}", value, width = width, decimals = decimals)
+        format!(
+            "{:width$.decimals$}",
+            value,
+            width = width,
+            decimals = decimals
+        )
     }
 
     /// Format count with specified width
@@ -337,7 +369,7 @@ pub mod icmp {
     /// Calculate ICMP checksum
     pub fn calculate_checksum(packet: &[u8]) -> u16 {
         let mut sum = 0u32;
-        
+
         // Sum all 16-bit words
         for chunk in packet.chunks(2) {
             if chunk.len() == 2 {
@@ -346,12 +378,12 @@ pub mod icmp {
                 sum += (chunk[0] as u32) << 8;
             }
         }
-        
+
         // Add carry
         while (sum >> 16) != 0 {
             sum = (sum & 0xffff) + (sum >> 16);
         }
-        
+
         // One's complement
         !(sum as u16)
     }
@@ -359,7 +391,7 @@ pub mod icmp {
     /// Construct basic ICMP echo request packet
     pub fn construct_icmp_packet(seq: u16, id: u16) -> Result<Vec<u8>> {
         let mut packet = vec![0u8; 8];
-        
+
         // ICMP Type (8 = Echo Request)
         packet[0] = 8;
         // ICMP Code (0)
@@ -382,7 +414,7 @@ pub mod icmp {
     /// Construct basic ICMPv6 echo request packet
     pub fn construct_icmp6_packet(seq: u16, id: u16) -> Result<Vec<u8>> {
         let mut packet = vec![0u8; 8];
-        
+
         // ICMPv6 Type (128 = Echo Request)
         packet[0] = 128;
         // ICMPv6 Code (0)
@@ -445,16 +477,29 @@ mod tests {
         let addr = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
         assert_eq!(network::format_optional_ip(addr), "192.168.1.1");
         assert_eq!(network::format_optional_ip(None), "???");
-        
+
         let long_hostname = "very-long-hostname-that-should-be-truncated";
-        assert_eq!(network::truncate_hostname(long_hostname, 20), "very-long-hostnam...");
+        assert_eq!(
+            network::truncate_hostname(long_hostname, 20),
+            "very-long-hostnam..."
+        );
+        // Multi-byte names must not panic and must respect display width
+        assert_eq!(
+            network::truncate_hostname("rüter-ünïcode.example", 8),
+            "rüter..."
+        );
+        assert_eq!(
+            network::truncate_hostname("路由器.例子.中国", 9),
+            "路由器..."
+        );
+        assert_eq!(network::truncate_hostname("short", 20), "short");
     }
 
     #[test]
     fn test_layout_utils() {
         assert_eq!(layout::constrain_width(100, 20, 60), 60);
         assert_eq!(layout::constrain_width(10, 20, 60), 20);
-        
+
         let (width, height) = layout::calculate_popup_dimensions(100, 50, 80, 40);
         assert_eq!(width, 80);
         assert_eq!(height, 40);
@@ -504,15 +549,15 @@ mod tests {
         let duration = Duration::from_micros(1500);
         assert_eq!(time::duration_to_us_f64(duration), 1500.0);
         assert_eq!(time::duration_to_us_u64(duration), 1500);
-        
+
         // Test nanosecond conversion
         let duration_ns = Duration::from_nanos(1_234_567);
         assert_eq!(time::duration_to_ns_u128(duration_ns), 1_234_567);
-        
+
         // Test high-precision formatting
         let small_duration = Duration::from_micros(500);
         assert_eq!(time::format_duration_us(small_duration), "500.0μs");
-        
+
         let large_duration = Duration::from_millis(1500);
         assert_eq!(time::format_duration_us(large_duration), "1500.0ms");
     }
@@ -523,7 +568,7 @@ mod tests {
         let previous = Duration::from_millis(100);
         let jitter = time::calculate_timing_jitter(current, previous);
         assert_eq!(jitter, Duration::from_millis(20));
-        
+
         // Test reverse order
         let jitter_reverse = time::calculate_timing_jitter(previous, current);
         assert_eq!(jitter_reverse, Duration::from_millis(20));
@@ -534,7 +579,7 @@ mod tests {
         let first = Duration::from_millis(100);
         let ema1 = time::calculate_timing_ema(first, None, 0.1);
         assert_eq!(ema1, first);
-        
+
         let second = Duration::from_millis(200);
         let ema2 = time::calculate_timing_ema(second, Some(ema1), 0.1);
         // EMA should be closer to first value due to low alpha
@@ -546,7 +591,7 @@ mod tests {
         let baseline = Duration::from_millis(100);
         let normal = Duration::from_millis(110);
         let spike = Duration::from_millis(300);
-        
+
         assert!(!time::detect_timing_anomaly(normal, baseline, 2.0));
         assert!(time::detect_timing_anomaly(spike, baseline, 2.0));
     }
@@ -554,12 +599,12 @@ mod tests {
     #[test]
     fn test_timing_stats() {
         let mut stats = time::TimingStats::new();
-        
+
         stats.update(Duration::from_millis(100));
         assert_eq!(stats.count, 1);
         assert_eq!(stats.min, Duration::from_millis(100));
         assert_eq!(stats.max, Duration::from_millis(100));
-        
+
         stats.update(Duration::from_millis(50));
         assert_eq!(stats.count, 2);
         assert_eq!(stats.min, Duration::from_millis(50));
@@ -575,7 +620,7 @@ mod tests {
             Duration::from_millis(120),
             Duration::from_millis(130),
         ];
-        
+
         let avg = time::calculate_timing_moving_average(&values, 3);
         assert!(avg.is_some());
         // Average of last 3 values: (110 + 120 + 130) / 3 = 120
@@ -588,20 +633,20 @@ mod tests {
         let ultra_fast = Duration::from_micros(100); // 100μs - typical for localhost
         assert_eq!(time::duration_to_us_f64(ultra_fast), 100.0);
         assert_eq!(time::format_duration_us(ultra_fast), "100.0μs");
-        
+
         let sub_ms = Duration::from_micros(750); // 0.75ms
         assert_eq!(time::format_duration_us(sub_ms), "750.0μs");
-        
+
         let ms_range = Duration::from_millis(5); // 5ms - show ms formatting
         assert_eq!(time::format_duration_us(ms_range), "5.0ms");
-        
+
         // Test that we no longer have 10ms quantization
         let precise_timing = Duration::from_nanos(123_456); // 123.456μs
         assert_eq!(time::duration_to_us_f64(precise_timing), 123.456);
         assert_eq!(time::duration_to_ns_u128(precise_timing), 123_456);
-        
+
         // Verify sub-millisecond precision detection
         assert!(time::duration_to_us_f64(ultra_fast) < 1000.0); // Should use μs format
-        assert!(time::duration_to_us_f64(ms_range) >= 1000.0);  // Should use ms format
+        assert!(time::duration_to_us_f64(ms_range) >= 1000.0); // Should use ms format
     }
-} 
+}

@@ -35,7 +35,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Check if version matches tag (on tag push)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -69,20 +69,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Install Npcap SDK for Windows tests
-      - name: Install Npcap SDK (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        run: |
-          Write-Host "Downloading Npcap SDK..."
-          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile "npcap-sdk.zip"
-          Expand-Archive -Path "npcap-sdk.zip" -DestinationPath "npcap-sdk"
-          
-          $sdkPath = "$pwd\npcap-sdk"
-          echo "NPCAP_SDK=$sdkPath" >> $env:GITHUB_ENV
-          echo "LIB=$env:LIB;$sdkPath\Lib\x64" >> $env:GITHUB_ENV
-          echo "INCLUDE=$env:INCLUDE;$sdkPath\Include" >> $env:GITHUB_ENV
-
       - name: Cache cargo dependencies
         uses: actions/cache@v3
         with:
@@ -93,10 +79,10 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --locked --verbose
 
   security:
     name: Security Audit
@@ -139,7 +125,7 @@ jobs:
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3

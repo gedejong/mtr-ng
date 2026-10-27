@@ -100,7 +100,8 @@ fn format_row_data(
 }
 
 pub async fn run_report(mut session: MtrSession) -> Result<()> {
-    session.run_trace().await?;
+    let probe_engine = session.open_probe_engine()?;
+    session.run_trace(probe_engine).await?;
 
     let columns = session.args.get_columns();
 
@@ -112,26 +113,16 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         "HOST: localhost → {} ({})",
         session.target, session.target_addr
     );
+    if session.is_simulated() {
+        println!("SIMULATED: fake data from --simulate, not a real trace");
+    }
     println!();
     println!(
         "                             {}",
         format_column_headers(&columns)
     );
 
-    // Determine how many hops to display based on discovery or organic growth  
-    let max_hops_to_display = if session.num_hosts > 0 {
-        session.num_hosts
-    } else {
-        // Show all hops that have been probed
-        session.hops.iter()
-            .enumerate()
-            .rev()
-            .find(|(_, hop)| hop.sent > 0)
-            .map(|(i, _)| i + 1)
-            .unwrap_or(0)
-    };
-    
-    for hop in session.hops.iter().take(max_hops_to_display) {
+    for hop in session.hops.iter().take(session.display_hop_count()) {
         if hop.sent == 0 {
             continue;
         }

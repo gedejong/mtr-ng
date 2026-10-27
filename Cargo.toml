@@ -51,47 +51,19 @@ assets = [
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# Command line argument parsing
 clap = { version = "4.5", features = ["derive"] }
-
-# Async runtime and networking
 tokio = { version = "1.45", features = ["full"] }
-tokio-util = "0.7"
-
-# Network operations
-socket2 = "0.5"
-pnet = "0.34"
-
-# Terminal UI and graphics
+# "all" is required for Type::RAW / ICMP datagram sockets; don't rely on tokio enabling it.
+socket2 = { version = "0.5", features = ["all"] }
 crossterm = "0.28"
 ratatui = "0.29"
 unicode-width = "0.2"
-
-# Data structures and utilities
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-
-# Logging
+chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Error handling
 anyhow = "1.0"
-thiserror = "1.0"
-
-# Random number generation
 rand = "0.8"
-
-# Raw socket operations
-libc = "0.2"
-nix = { version = "0.28", default-features = false, features = ["net", "poll"] }
-
-# DNS resolution - migrated from trust-dns (unmaintained) to hickory-dns
 hickory-resolver = "0.24"
-
-[dev-dependencies]
-tokio-test = "0.4"
 
 [[bin]]
 name = "mtr-ng"

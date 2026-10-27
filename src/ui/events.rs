@@ -19,7 +19,7 @@ impl EventHandler {
     }
 
     /// Handle keyboard input when column selector popup is active
-    /// 
+    ///
     /// Returns true if the event was handled, false if it should be passed through
     pub fn handle_column_selector_input(
         &mut self,
@@ -77,7 +77,7 @@ impl EventHandler {
     }
 
     /// Handle keyboard input during normal operation (non-popup mode)
-    /// 
+    ///
     /// Returns true if the application should continue running, false to quit
     pub fn handle_normal_input(
         &mut self,
@@ -150,4 +150,4 @@ impl Default for EventHandler {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

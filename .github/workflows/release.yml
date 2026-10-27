@@ -57,19 +57,14 @@ jobs:
 
           ## Installation
 
-          ### Quick Install (Unix/Linux/macOS)
-          \`\`\`bash
-          curl -sSL https://raw.githubusercontent.com/${{ github.repository }}/main/install/install.sh | bash
-          \`\`\`
-
           ### Package Managers
           \`\`\`bash
           # Cargo (Rust)
-          cargo install mtr-ng
+          cargo install --locked mtr-ng
 
           # From source
           git clone https://github.com/${{ github.repository }}
-          cd mtr-ng && cargo build --release
+          cd mtr-ng && cargo build --release --locked
           \`\`\`
 
           ### Manual Download
@@ -160,27 +155,8 @@ jobs:
           # Set environment variables for the build
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> $GITHUB_ENV
 
-      - name: Install Npcap SDK (Windows)
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        shell: powershell
-        run: |
-          # Download and install Npcap SDK
-          Write-Host "Downloading Npcap SDK..."
-          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile "npcap-sdk.zip"
-          Expand-Archive -Path "npcap-sdk.zip" -DestinationPath "npcap-sdk"
-          
-          # Set up environment variables for the build
-          $sdkPath = "$pwd\npcap-sdk"
-          echo "NPCAP_SDK=$sdkPath" >> $env:GITHUB_ENV
-          echo "LIB=$env:LIB;$sdkPath\Lib\x64" >> $env:GITHUB_ENV
-          echo "INCLUDE=$env:INCLUDE;$sdkPath\Include" >> $env:GITHUB_ENV
-          
-          Write-Host "Npcap SDK installed to: $sdkPath"
-          Write-Host "Libraries available:"
-          Get-ChildItem "$sdkPath\Lib\x64" -Name
-
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Create archive (Unix)
         if: matrix.os != 'windows-2022'
@@ -243,7 +219,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   update-homebrew:
     needs: [create-release, build-release]
