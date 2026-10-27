@@ -3,6 +3,7 @@ pub mod hop_stats;
 pub mod probe;
 pub mod report;
 pub mod session;
+pub mod tracer;
 pub mod ui;
 pub mod utils;
 

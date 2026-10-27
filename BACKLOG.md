@@ -2,6 +2,8 @@
 
 Compiled 2026-10-27 from a full review (networking core, statistics/reporting, TUI, portability/CI, feature research). Line numbers refer to commit `59605fa`.
 
+**Status:** milestones 1 and 2 are done. Ticked items are fixed; *italic notes* record partial progress.
+
 Priority: **P0** shows wrong data or doesn't work, **P1** measurement correctness, **P2** visible defects, **P3** cleanup. Effort: S (hours), M (days), L (a week or more).
 
 ## Quality snapshot
@@ -31,7 +33,7 @@ Distribution is in worse shape than the code:
   - Rows past a near target repeat the target, and Destination Unreachable doesn't end the path (`:315-324`).
   - `mark_as_target`/`is_target` are unused.
   - Fix: grow toward `max_hops`, and trim at the first hop whose source == target, or at a DU. *M*
-- [ ] **B3 Report-mode RTT and loss are wrong beyond ~50 ms.**
+- [x] **B3 Report-mode RTT and loss are wrong beyond ~50 ms.** *(m2, via R1. A 14-hop path to Japan went from ~1005 ms and 33% loss to 242-266 ms and 0%.)*
   - The collection window is hard-coded to 50 ms (`session.rs:236`; `collect_duration` is ignored). The loop then sleeps without reading the socket (`:161-168`).
   - RTT is stamped at parse time (`probe.rs:367`), so a late reply is read in the next round with RTT ≈ interval.
   - Final-round replies are never drained, which shows up as loss. The fixed 200 ms timeout (`:212`) breaks long paths.
@@ -48,24 +50,24 @@ Distribution is in worse shape than the code:
   - There is no identifier, inner-protocol or inner-type check, and the inner header is assumed to start at a fixed `8 + 20` (`probe.rs:338-366`, v6 `:405-441`).
   - Raw sockets see all ICMP on the host, so other tools' traffic and a second mtr-ng instance (same start seq) get cross-attributed. An inner IHL > 5 loses the probe.
   - Fix: parse IHL, require the inner proto/type/id to match, and randomise the start seq. *S*
-- [ ] **B7 DNS uses Google's resolvers and blocks probing.**
+- [x] **B7 DNS uses Google's resolvers and blocks probing.**
   - `ResolverConfig::default()` (`session.rs:50-51`) is Google DNS. It ignores the system resolver and split-horizon DNS, and sends RFC 1918 PTR queries out of the network.
   - Report mode awaits an uncached reverse lookup inline for every reply (`:256`, `:296`, `:312`), which inflates RTTs.
   - Fix: `tokio_from_system_conf()`, a per-address cache, and lookups off the probe path. *S*
-- [ ] **B8 Timeouts never become loss, and replies land in the wrong slot.**
+- [x] **B8 Timeouts never become loss, and replies land in the wrong slot.** *(m2: each probe carries its ordinal into HopStats; with real probes the TUI shows 0% on responsive hops instead of ~17%.)*
   - `Timeout` responses are ignored (`session.rs:325-328`, `:725-727`), so lost probes stay `?` forever.
   - `add_rtt` marks the newest Pending slot regardless of seq (`hop_stats.rs:283-288`).
   - In-flight probes count as lost (`:337-343`), so loss% oscillates every round.
   - Fix: carry the seq into HopStats; compute loss as (xmit − transit) / xmit, as mtr does. *M*
-- [ ] **B9 Multipath accounting is wrong.**
+- [x] **B9 Multipath accounting is wrong.** *(m2: `ResponderStats` per address, primary = argmax. The split still measures random flows until F1.)*
   - `AlternatePath` starts at frequency 1 and `update()` adds 1 (`hop_stats.rs:25-43`), so an even A/B split shows 43/57.
   - On a primary switch the new primary stays listed as an alternate and the old one vanishes (`:122-160`).
   - Alternate replies never update `packet_history` and are left out of the RTT stats.
   - The hostname isn't reset on a switch, so B's IP is shown with A's PTR name.
   - Fix: one per-address map, with primary = argmax (see R3). *M*
 - [x] **B10 `-P udp|tcp` silently send ICMP Echo** (`probe.rs:137-144`, `:153-160`); interactive mode ignores the flag (`session.rs:614`). Fix: reject the flag until it is implemented (X-series). *S*
-- [ ] **B11 One `send_to` error aborts the whole report** with no output (`probe.rs:169` → `session.rs:221`), e.g. ENETUNREACH during a Wi-Fi blip. Fix: count the probe as lost and continue. *S*
-- [ ] **B12 Avg/StDev/JAvg cover only the last 100 replies**, while Best/Worst/Loss are all-time (`hop_stats.rs:263-268`, `:310-311`). Fix: running Welford accumulators; keep the ring buffer for the graph only. *S*
+- [x] **B11 One `send_to` error aborts the whole report** with no output (`probe.rs:169` → `session.rs:221`), e.g. ENETUNREACH during a Wi-Fi blip. Fix: count the probe as lost and continue. *S*
+- [x] **B12 Avg/StDev/JAvg cover only the last 100 replies**, while Best/Worst/Loss are all-time (`hop_stats.rs:263-268`, `:310-311`). Fix: running Welford accumulators; keep the ring buffer for the graph only. *S*
 
 ## P2: visible defects
 
@@ -98,8 +100,9 @@ Distribution is in worse shape than the code:
   - Phantom `???` rows past the target.
   - The status bar aggregates over all `max_hops` ("Hops: 30", "Loss: 76%").
   - No table scrolling for long paths.
+  - The status-bar Loss averages over silent routers too: two hops that never answer TTL-expired probes give "Loss: 28.6%" while every responsive hop and the target are at 0%. Show the target's loss instead (mtr has no aggregate).
   - Fix: follow B2, and compute status over hops up to the target. *S*
-- [ ] **B20 Lifecycle.** *(Resize redraws and trace errors surface since m1; the done state and the last-round drop are open.)*
+- [ ] **B20 Lifecycle.** *(Resize redraws and trace errors surface since m1; R1 drains the last round. The done state is open.)*
   - Resize is ignored, because redraws only happen on key events (`ui/main.rs:396-425`).
   - There is no "done" state after `-c N`, and the last round's replies are dropped (`session.rs:695-698`).
   - Trace-task errors only reach the log (`ui/main.rs:349-353`). *S*
@@ -123,7 +126,7 @@ Distribution is in worse shape than the code:
   - `-M`, `-P`, `--simulate` and `--ema-alpha` are missing.
   - The `-c` help says "pings per round"; it's rounds.
   - Fix: generate the man page with `clap_mangen`. *S*
-- [ ] **B26 Report formatting.**
+- [ ] **B26 Report formatting.** *(m2: widths come from the data, the host column fits the longest name as `mtr -w` does, `???` lines up, `--fields` works; golden tests in `report.rs`. `HOST: localhost` is open.)*
   - Headers drift right of the values (`report.rs:15-23` vs `:44-96`).
   - `???` is narrower than the values.
   - A fixed 29-space prefix breaks with `--fields`.
@@ -136,12 +139,12 @@ Distribution is in worse shape than the code:
 
 ## P3: cleanup
 
-- [ ] **B28 Polling disguised as event-driven I/O.**
+- [ ] **B28 Polling disguised as event-driven I/O.** *(R1 removed the probe half. The UI half waits for U1.)*
   - Each receive dups the fd and registers/deregisters it with the reactor (~1000×/s in interactive mode; `probe.rs:201-209`).
   - ICMPv6 replies are matched against the IPv4 pending map (`:231-261`).
   - A blocking `crossterm::event::poll` runs on a tokio worker (`ui/main.rs:360-376`).
   - Every update triggers a full redraw through an unbounded channel. Superseded by R1 and U1. *M*
-- [ ] **B29 Dead or misleading state.** *(`pnet` and `collect_responses` removed in m1.)*
+- [x] **B29 Dead or misleading state.** *(m1 removed `pnet` and `collect_responses`; m2 removed the sequence table, `TimingStats`, and 21 dead helpers in `utils.rs`, including a second ICMP packet builder.)*
   - `sequence_table` is never pruned (~32k entries).
   - `next_sequence` isn't the seq that goes on the wire.
   - `packet_id` and `batch_at` are unused.
@@ -155,14 +158,14 @@ Distribution is in worse shape than the code:
 
 These refactors unblock most fixes above and every feature below.
 
-- [ ] **R1 One probing pipeline.** Replace the two divergent loops (report: batch + 50 ms window + 200 ms timeout; interactive: channels + 5 s timeout) with:
+- [x] **R1 One probing pipeline.** *(m2, `tracer.rs`. It uses a blocking receive thread per address family instead of `AsyncFd`, which also works on Windows, and timestamps in user space on arrival instead of `SO_TIMESTAMP`; that costs microseconds and can come later.)* Replace the two divergent loops (report: batch + 50 ms window + 200 ms timeout; interactive: channels + 5 s timeout) with:
   - one long-lived receiver task per address family on an `AsyncFd`;
   - kernel receive timestamps (`SO_TIMESTAMP`);
   - a single timeout/loss policy.
   - Fixes B3, B8, B11, B28. *L*
-- [ ] **R2 Testable seams.** A `Prober` trait (real, simulated, fake) and pure `parse(&[u8]) -> Option<Reply>` functions tested against captured packets. Session logic (hop trimming, loss, end of path) is then tested against the fake. *M*
-- [ ] **R3 Per-probe records as the source of truth.** `ProbeSpec { ttl, flow, proto, size, df }` and a ring of `ProbeRecord`s (responder, RTT, reply TTL, quoted header, ICMP extensions). `HopStats` and a new per-responder `PerAddrStats` derive from it, replacing `AlternatePath`. Fixes B9 and B12; needed for F1, F2 and F7. *M*
-- [ ] **R4 Tests.**
+- [x] **R2 Testable seams.** *(m2: `Prober` trait, `FakeProber` in `tracer.rs` tests, pure `decode`/`parse_icmpv4`. Simulation is not yet a `Prober`: it still has its own loops in `session.rs`.)* A `Prober` trait (real, simulated, fake) and pure `parse(&[u8]) -> Option<Reply>` functions tested against captured packets. Session logic (hop trimming, loss, end of path) is then tested against the fake. *M*
+- [ ] **R3 Per-probe records as the source of truth.** *(m2: `ResponderStats` replaced `AlternatePath`. Per-probe records are open.)* `ProbeSpec { ttl, flow, proto, size, df }` and a ring of `ProbeRecord`s (responder, RTT, reply TTL, quoted header, ICMP extensions). `HopStats` and a new per-responder `PerAddrStats` derive from it, replacing `AlternatePath`. Fixes B9 and B12; needed for F1, F2 and F7. *M*
+- [ ] **R4 Tests.** *(m2: golden report tests, multipath and stale-ordinal HopStats tests. `TestBackend` render tests are open.)*
   - Golden tests for report output.
   - Table-driven multipath and out-of-order tests for HopStats.
   - `TestBackend` render tests at several sizes.
@@ -191,7 +194,8 @@ These refactors unblock most fixes above and every feature below.
   - Every key fires twice, because Release events aren't filtered (`ui/main.rs:397`; crossterm emits them on Windows). Filter on `KeyEventKind::Press`.
   - `File::create("/dev/null")` fallback panics (`main.rs:27`). Use `io::sink()`.
   - Npcap is only needed because of the unused `pnet` (see C2). *S*
-- [ ] **X2 Spike: adopt `trippy-core` behind `Prober`?** It covers ICMP/UDP/TCP, IPv4/IPv6, Paris/Dublin and five OSes, but its unprivileged mode only works on macOS. It has a 0.x API, its round model differs from HopStats, and its last release was May 2025. Decide before investing in R1. *S*
+- [x] **X2 Spike: adopt `trippy-core` behind `Prober`?** **Verdict: no.** It reports per round rather than per probe, timestamps with `SystemTime`, can't do ICMP Paris, and its engine isn't pluggable. Consider `trippy-packet` (Apache-2.0) for F1/F9 packet work. Side finding: `IP_HDRINCL` works on macOS datagram ICMP sockets.
+  - Original question: It covers ICMP/UDP/TCP, IPv4/IPv6, Paris/Dublin and five OSes, but its unprivileged mode only works on macOS. It has a 0.x API, its round model differs from HopStats, and its last release was May 2025. Decide before investing in R1. *S*
 - [ ] **X3 `Prober` backends** (on R2). Each runs its own blocking receive thread that timestamps on arrival and feeds a channel, which sidesteps Unix-only `AsyncFd`. `select_prober()` picks a backend per OS and privilege level and says why.
   - **a. Raw ICMP** (root/admin, all OSes): the current code, plus id matching, IHL parsing, the IPv6 hop limit (`set_unicast_hops_v6`, not `set_ttl` at `probe.rs:150`), `ICMP6_FILTER`, and a Windows `bind`. *S-M*
   - [x] **b. macOS unprivileged ICMP:** `Type::DGRAM` with the same parser. Make it the macOS default so Homebrew users never need sudo. *S*
@@ -287,7 +291,7 @@ PMTU/black-hole detection and an OpenMetrics exporter are further gaps in trippy
 ## Suggested milestones
 
 1. **Tell the truth and unbreak.** *(Done on branch `m1-tell-the-truth`, plus B6 and X3b pulled forward.)* B1, B2, B4, B5/C1, B10, B13, B27, B31, C2, C5 (at least pull the 404 one-liner), X1. Refuse rather than fabricate; never break the user's terminal; make it installable.
-2. **Measure correctly.** X2 spike first (it decides how much of R1 is written by hand), then R1, R2, R4, B3, B6-B9, B11, B12, X3b (macOS without sudo).
+2. **Measure correctly.** *(Done: X2, R1, R2, B3, B7-B9, B11, B12, B29, X3b; R3/R4 partly.)* X2 spike first (it decides how much of R1 is written by hand), then R1, R2, R4, B3, B6-B9, B11, B12, X3b (macOS without sudo).
 3. **A UI that can grow.** U1-U3, after which B14-B26 mostly fall out. Add F5 and F11 (JSON/CSV) as cheap wins. C3, C4 (cargo-dist), C6-C9.
 4. **Stable flows and multi-route.** R3, F1, F2, F9, F14.
 5. **Where is it.** F12, F6, F7, F8.

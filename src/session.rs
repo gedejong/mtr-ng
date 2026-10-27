@@ -1,5 +1,5 @@
-use crate::probe::{IcmpResponseType, ProbeEngine, ProbeResponse};
-use crate::{utils, Args, HopStats, Result};
+use crate::probe::{IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
+use crate::{tracer, utils, Args, HopStats, Result};
 use anyhow::{anyhow, bail};
 use hickory_resolver::{
     config::{ResolverConfig, ResolverOpts},
@@ -9,16 +9,12 @@ use rand;
 
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::{Duration, Instant},
+    net::{IpAddr, Ipv4Addr},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
-use tokio::sync::mpsc;
 use tokio::time;
-use tracing::{debug, info};
-
-const MIN_SEQUENCE: u16 = 33000;
-const MAX_SEQUENCE: u16 = 65535;
+use tracing::{debug, info, warn};
 
 /// Rounds in report mode when `--count` is not given (same as mtr).
 pub const DEFAULT_REPORT_CYCLES: usize = 10;
@@ -29,14 +25,6 @@ const SIMULATED_PATH_LENGTH: usize = 8;
 // Add callback type for real-time updates
 pub type UpdateCallback = Arc<dyn Fn() + Send + Sync>;
 
-#[derive(Debug, Clone)]
-pub struct SequenceEntry {
-    pub index: usize,       // hop index (like original mtr)
-    pub transit: bool,      // is this sequence in transit?
-    pub saved_seq: u32,     // saved sequence for this host
-    pub send_time: Instant, // when packet was sent
-}
-
 #[derive(Clone)]
 pub struct MtrSession {
     pub target: String,
@@ -44,18 +32,22 @@ pub struct MtrSession {
     pub hops: Vec<HopStats>,
     pub args: Args,
     pub resolver: TokioAsyncResolver,
-    pub packet_id: u16,
-    pub next_sequence: u16,
-    pub sequence_table: HashMap<u16, SequenceEntry>, // sequence -> entry (like original mtr)
-    pub batch_at: usize,  // current hop index being sent (like original mtr)
-    pub num_hosts: usize, // number of active hops
+    pub num_hosts: usize, // TTLs probed each round (trimmed once the path end is known)
     pub update_callback: Option<UpdateCallback>, // callback for real-time updates
+    /// How long a probe may stay unanswered before it counts as lost
+    pub probe_timeout: Duration,
+    /// Reverse DNS results per address; `None` while pending or when there is no name
+    dns_names: HashMap<IpAddr, Option<String>>,
 }
 
 impl MtrSession {
     pub async fn new(args: Args) -> Result<Self> {
-        let resolver =
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        // The system resolver honours /etc/hosts, VPN and split-horizon DNS and keeps
+        // private PTR lookups inside the network.
+        let resolver = TokioAsyncResolver::tokio_from_system_conf().unwrap_or_else(|e| {
+            warn!("Cannot read the system DNS configuration ({e}); using public resolvers");
+            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+        });
 
         // Resolve target hostname to IP
         let target_addr = if let Ok(ip) = args.target.parse::<IpAddr>() {
@@ -74,7 +66,6 @@ impl MtrSession {
         for hop in &mut hops {
             hop.set_ema_alpha(args.ema_alpha);
         }
-        let packet_id = std::process::id() as u16;
         let num_hosts = hops.len();
 
         Ok(Self {
@@ -83,12 +74,10 @@ impl MtrSession {
             hops,
             args,
             resolver,
-            packet_id,
-            next_sequence: MIN_SEQUENCE,
-            sequence_table: HashMap::new(),
-            batch_at: 0, // Start at hop 1 (index 0)
-            num_hosts,   // probe every TTL until the end of the path is known
+            num_hosts, // probe every TTL until the end of the path is known
             update_callback: None,
+            probe_timeout: tracer::PROBE_TIMEOUT,
+            dns_names: HashMap::new(),
         })
     }
 
@@ -96,9 +85,9 @@ impl MtrSession {
         self.args.simulate || self.args.force_simulate
     }
 
-    /// Open the probe engine for a real trace, or return `None` in simulation mode.
+    /// Open the prober for a real trace, or return `None` in simulation mode.
     /// Fails instead of falling back to simulated data when real probing is impossible.
-    pub fn open_probe_engine(&self) -> Result<Option<ProbeEngine>> {
+    pub fn open_probe_engine(&self) -> Result<Option<Box<dyn Prober>>> {
         if self.is_simulated() {
             return Ok(None);
         }
@@ -110,20 +99,7 @@ impl MtrSession {
                 self.target_addr
             );
         }
-        ProbeEngine::new().map(Some)
-    }
-
-    /// Run the trace to completion (report mode).
-    pub async fn run_trace(&mut self, probe_engine: Option<ProbeEngine>) -> Result<()> {
-        info!("Starting trace to {} ({})", self.target, self.target_addr);
-        let Some(probe_engine) = probe_engine else {
-            return self.run_simulated_trace().await;
-        };
-        let IpAddr::V4(target) = self.target_addr else {
-            bail!("IPv6 targets are not supported yet");
-        };
-        self.run_mtr_algorithm_with_probe_engine(target, probe_engine)
-            .await
+        Ok(Some(Box::new(ProbeEngine::new()?)))
     }
 
     /// Hops worth showing: up to the end of the path once it is known, otherwise
@@ -142,229 +118,69 @@ impl MtrSession {
     /// Record a probe response in the hop table. An echo reply or Destination
     /// Unreachable marks the end of the path; higher TTLs are no longer probed.
     /// Returns false if the response refers to a hop outside the table.
-    fn apply_response(&mut self, response: &ProbeResponse) -> bool {
+    pub fn apply_response(&mut self, response: &ProbeResponse) -> bool {
         let index = response.hop;
         let Some(hop) = self.hops.get_mut(index) else {
             return false;
         };
+        let addr = response.source_addr;
         match response.icmp_type {
             IcmpResponseType::TimeExceeded => {
-                hop.add_rtt_from_addr(response.source_addr, response.rtt);
+                hop.record_reply(response.ordinal, Some(addr), response.rtt);
             }
             IcmpResponseType::EchoReply | IcmpResponseType::DestinationUnreachable => {
-                hop.add_rtt_from_addr(response.source_addr, response.rtt);
+                hop.record_reply(response.ordinal, Some(addr), response.rtt);
                 if response.icmp_type == IcmpResponseType::DestinationUnreachable {
                     hop.set_icmp_error();
                 }
                 hop.mark_as_target();
                 if index + 1 < self.num_hosts {
-                    info!("Path ends at hop {} ({})", index + 1, response.source_addr);
+                    info!("Path ends at hop {} ({})", index + 1, addr);
                     self.num_hosts = index + 1;
                 }
             }
-            IcmpResponseType::Timeout => debug!("Timeout for hop {}", index + 1),
+            IcmpResponseType::Timeout => {
+                hop.record_timeout(response.ordinal);
+                return true;
+            }
+        }
+        if let Some(Some(name)) = self.dns_names.get(&addr) {
+            self.hops[index].set_hostname_for_addr(addr, name.clone());
         }
         true
     }
 
-    // Modern ProbeEngine implementation
-    async fn run_mtr_algorithm_with_probe_engine(
-        &mut self,
-        target: Ipv4Addr,
-        mut probe_engine: ProbeEngine,
-    ) -> Result<()> {
-        info!("Starting MTR algorithm with ProbeEngine");
-        let rounds = self.args.count.unwrap_or(DEFAULT_REPORT_CYCLES);
-        let mut round = 0;
+    /// True the first time an address is seen: the caller should look it up.
+    pub fn want_lookup(&mut self, addr: IpAddr) -> bool {
+        if self.dns_names.contains_key(&addr) {
+            return false;
+        }
+        self.dns_names.insert(addr, None);
+        true
+    }
 
-        while round < rounds {
-            let round_start = Instant::now();
-
-            // Send probes for all active hops (like net_send_batch)
-            let restart = self
-                .net_send_batch_with_probe_engine(target, &mut probe_engine)
-                .await?;
-
-            // Collect responses efficiently
-            let collect_duration = Duration::from_millis(self.args.interval);
-            self.net_process_return_with_probe_engine(&mut probe_engine, collect_duration)
-                .await;
-
-            if restart {
-                round += 1;
-                debug!("Completed round {}/{}, restarting batch", round, rounds);
-
-                // Only wait for remaining interval time if we're not done
-                if round < rounds {
-                    let elapsed = round_start.elapsed();
-                    let target_interval = Duration::from_millis(self.args.interval);
-                    if elapsed < target_interval {
-                        tokio::time::sleep(target_interval - elapsed).await;
-                    }
+    /// Store a reverse DNS result and show it on every hop where `addr` answered.
+    pub fn set_hostname(&mut self, addr: IpAddr, name: Option<String>) {
+        if let Some(name) = &name {
+            debug!("Resolved {} to {}", addr, name);
+            for hop in &mut self.hops {
+                if hop.responders.contains_key(&addr) {
+                    hop.set_hostname_for_addr(addr, name.clone());
                 }
             }
         }
-
-        Ok(())
+        self.dns_names.insert(addr, name);
     }
 
-    // ProbeEngine-based equivalent of net_send_batch - send to all hops in parallel
-    async fn net_send_batch_with_probe_engine(
-        &mut self,
-        target: Ipv4Addr,
-        probe_engine: &mut ProbeEngine,
-    ) -> Result<bool> {
-        // Send to every TTL up to the end of the path (all of them until it is known)
-        for i in 0..self.num_hosts {
-            self.net_send_query_with_probe_engine(target, probe_engine, i)?;
-        }
-
-        // Always restart after sending batch (that's how MTR works)
-        Ok(true)
-    }
-
-    // ProbeEngine-based equivalent of net_send_query
-    fn net_send_query_with_probe_engine(
-        &mut self,
-        target: Ipv4Addr,
-        probe_engine: &mut ProbeEngine,
-        index: usize,
-    ) -> Result<()> {
-        let time_to_live = (index + 1) as u8;
-        let seq = self.prepare_sequence(index);
-        let send_time = Instant::now();
-
-        self.save_sequence_with_send_time(index, seq, send_time);
-
-        let target_addr = std::net::SocketAddr::from((target, 0));
-        let timeout = Duration::from_millis(200); // Short timeout per individual probe (like original MTR)
-
-        probe_engine.send_probe(index, target_addr, time_to_live, timeout)?;
-
-        debug!(
-            "Sent probe to hop {} (TTL={}), seq={}",
-            index + 1,
-            time_to_live,
-            seq
-        );
-        Ok(())
-    }
-
-    // Event-driven response collection (no polling!)
-    async fn net_process_return_with_probe_engine(
-        &mut self,
-        probe_engine: &mut ProbeEngine,
-        _collect_duration: Duration,
-    ) {
-        let start_collect = Instant::now();
-        let max_wait = Duration::from_millis(50);
-        let mut total_responses = 0;
-
-        // Use tokio::select for event-driven I/O instead of polling
-        loop {
-            if start_collect.elapsed() >= max_wait {
-                break;
-            }
-
-            tokio::select! {
-                // Event-driven response collection
-                result = probe_engine.collect_responses_async() => {
-                    match result {
-                        Ok(batch_responses) => {
-                            if batch_responses.is_empty() {
-                                // No responses available, yield briefly to other tasks
-                                tokio::task::yield_now().await;
-                            } else {
-                                total_responses += batch_responses.len();
-                                for response in batch_responses {
-                                    self.process_probe_response(response).await;
-                                }
-                                // Continue immediately if we got responses
-                                continue;
-                            }
-                        }
-                        Err(_) => {
-                            // Error in collection, yield and continue
-                            tokio::task::yield_now().await;
-                        }
-                    }
-                }
-                // Timeout fallback to prevent infinite waiting
-                _ = tokio::time::sleep(Duration::from_micros(500)) => {
-                    // Cooperative yielding instead of busy polling
-                    tokio::task::yield_now().await;
-                }
-            }
-        }
-
-        debug!(
-            "Collected {} responses in {:?} (event-driven)",
-            total_responses,
-            start_collect.elapsed()
-        );
-    }
-
-    // Process individual probe responses
-    async fn process_probe_response(&mut self, response: ProbeResponse) {
-        if !self.apply_response(&response) {
-            return;
-        }
-        if !self.args.numeric && response.icmp_type != IcmpResponseType::Timeout {
-            self.perform_dns_lookup(response.hop, response.source_addr)
-                .await;
-        }
-
-        // Trigger real-time UI update when a response arrives
+    /// Tell the UI that something changed.
+    pub fn notify(&self) {
         if let Some(ref callback) = self.update_callback {
             callback();
         }
     }
 
-    // DNS lookup functionality
-    async fn perform_dns_lookup(&mut self, hop_index: usize, addr: IpAddr) {
-        if hop_index >= self.hops.len() {
-            return;
-        }
-
-        if let Ok(lookup_result) = self.resolver.reverse_lookup(addr).await {
-            if let Some(hostname) = lookup_result.iter().next() {
-                let hostname_str = hostname.to_string();
-                if hostname_str != addr.to_string() {
-                    debug!("Resolved {} to {}", addr, hostname_str);
-                    self.hops[hop_index].set_hostname_for_addr(addr, hostname_str);
-                }
-            }
-        }
-    }
-
-    // ProbeEngine-based sequence management
-    fn prepare_sequence(&mut self, index: usize) -> u16 {
-        let seq = self.next_sequence;
-        self.next_sequence += 1;
-        if self.next_sequence == MAX_SEQUENCE {
-            self.next_sequence = MIN_SEQUENCE;
-        }
-        self.hops[index].increment_sent();
-
-        // Trigger UI update immediately when packet is sent (shows waiting state)
-        if let Some(ref callback) = self.update_callback {
-            callback();
-        }
-
-        seq
-    }
-
-    fn save_sequence_with_send_time(&mut self, index: usize, seq: u16, send_time: Instant) {
-        let entry = SequenceEntry {
-            index,
-            transit: true,
-            saved_seq: self.hops[index].sent as u32,
-            send_time,
-        };
-        self.sequence_table.insert(seq, entry);
-    }
-
-    async fn run_simulated_trace(&mut self) -> Result<()> {
+    /// Simulated trace for report mode: lockstep rounds, no real sockets.
+    pub async fn run_simulated_trace(&mut self) -> Result<()> {
         info!("Running simulated traceroute (use sudo for real network tracing)");
 
         if let Some(end) = self.hops.get_mut(SIMULATED_PATH_LENGTH - 1) {
@@ -433,309 +249,17 @@ impl MtrSession {
         self.update_callback = Some(callback);
     }
 
-    /// Run the trace with live updates for the TUI. `probe_engine` comes from
+    /// Run the trace with live updates for the TUI. `prober` comes from
     /// `open_probe_engine`; `None` means simulation.
     pub async fn run_trace_with_realtime_updates(
-        session_arc: std::sync::Arc<std::sync::Mutex<Self>>,
-        probe_engine: Option<ProbeEngine>,
+        session_arc: Arc<Mutex<Self>>,
+        prober: Option<Box<dyn Prober>>,
     ) -> Result<()> {
-        let (target_addr, args) = {
-            let session = session_arc.lock().unwrap();
-            (session.target_addr, session.args.clone())
-        };
-
-        info!("Starting real-time trace to {}", target_addr);
-
-        let Some(probe_engine) = probe_engine else {
-            return Self::run_simulated_trace_realtime(session_arc, args).await;
-        };
-        let IpAddr::V4(ipv4) = target_addr else {
-            bail!("IPv6 targets are not supported yet");
-        };
-        Self::run_real_trace_realtime(session_arc, ipv4, probe_engine, args).await
-    }
-
-    async fn run_real_trace_realtime(
-        session_arc: std::sync::Arc<std::sync::Mutex<Self>>,
-        target: Ipv4Addr,
-        probe_engine: ProbeEngine,
-        args: Args,
-    ) -> Result<()> {
-        info!("Starting real network trace with channels (real-time UI)");
-
-        // Create channels for communication between probe task and UI
-        let (response_tx, response_rx) = mpsc::unbounded_channel::<ProbeResponse>();
-        let (sent_tx, sent_rx) = mpsc::unbounded_channel::<usize>(); // hop index when packet sent
-
-        // Clone session for probe task
-        let probe_session_arc = Arc::clone(&session_arc);
-        let probe_args = args.clone();
-
-        // Spawn probe task that runs independently
-        let probe_handle = tokio::spawn(async move {
-            Self::run_probe_task(
-                probe_session_arc,
-                target,
-                probe_engine,
-                probe_args,
-                response_tx,
-                sent_tx,
-            )
-            .await
-        });
-
-        // UI task processes both sent notifications and responses
-        let ui_handle = tokio::spawn(async move {
-            Self::run_ui_processor_with_sent_notifications(session_arc, response_rx, sent_rx).await
-        });
-
-        // Wait for both tasks
-        let (probe_result, ui_result) = tokio::try_join!(probe_handle, ui_handle)?;
-        probe_result?;
-        ui_result?;
-
-        Ok(())
-    }
-
-    // Probe task - continuously sends probes and async listens for responses
-    #[allow(unused_mut)]
-    async fn run_probe_task(
-        session_arc: std::sync::Arc<std::sync::Mutex<Self>>,
-        target: Ipv4Addr,
-        mut probe_engine: ProbeEngine,
-        args: Args,
-        response_tx: mpsc::UnboundedSender<ProbeResponse>,
-        sent_tx: mpsc::UnboundedSender<usize>,
-    ) -> Result<()> {
-        info!("Probe task starting with {} max hops", args.max_hops);
-
-        // Spawn continuous response listener task
-        #[allow(unused_mut)]
-        let (probe_tx, probe_rx) = mpsc::unbounded_channel();
-        let listener_response_tx = response_tx.clone();
-
-        let listener_handle = tokio::spawn(async move {
-            Self::run_response_listener(probe_engine, probe_rx, listener_response_tx).await
-        });
-
-        // Main probe sending loop
-        let sender_handle = tokio::spawn(async move {
-            let mut round = 0;
-
-            loop {
-                if let Some(count) = args.count {
-                    if round >= count {
-                        break;
-                    }
-                }
-
-                // Send to every TTL up to the end of the path (all of them until it is known)
-                let hops_this_round = session_arc.lock().unwrap().num_hosts;
-                for i in 0..hops_this_round {
-                    // Notify UI that packet is being sent (shows waiting state)
-                    if sent_tx.send(i).is_err() {
-                        return Ok::<(), anyhow::Error>(());
-                    }
-
-                    let dest = SocketAddr::new(target.into(), 0);
-                    let ttl = (i + 1) as u8;
-                    let timeout = Duration::from_millis(5000);
-
-                    // Send probe request to listener task
-                    if probe_tx.send((i, dest, ttl, timeout, round)).is_err() {
-                        return Ok::<(), anyhow::Error>(());
-                    }
-                }
-
-                debug!("Sent {} probes for round {}", hops_this_round, round + 1);
-                round += 1;
-
-                tokio::time::sleep(Duration::from_millis(args.interval)).await;
-            }
-
-            info!("Probe sender completed {} rounds", round);
-            Ok(())
-        });
-
-        // Wait for both tasks
-        let (listener_result, sender_result) = tokio::try_join!(listener_handle, sender_handle)?;
-        listener_result?;
-        sender_result?;
-
-        Ok(())
-    }
-
-    // Pure event-driven async response listener (zero polling!)
-    async fn run_response_listener(
-        mut probe_engine: ProbeEngine,
-        mut probe_rx: mpsc::UnboundedReceiver<(usize, SocketAddr, u8, Duration, usize)>, // (hop, dest, ttl, timeout, round)
-        response_tx: mpsc::UnboundedSender<ProbeResponse>,
-    ) -> Result<()> {
-        use std::collections::HashMap;
-
-        let mut sent_sequences: HashMap<u16, (usize, usize)> = HashMap::new(); // seq -> (hop, round)
-
-        loop {
-            tokio::select! {
-                // Handle probe send requests (channel-driven)
-                probe_request = probe_rx.recv() => {
-                    if let Some((hop, dest, ttl, timeout, round)) = probe_request {
-                        match probe_engine.send_probe(hop, dest, ttl, timeout) {
-                            Ok(seq) => {
-                                sent_sequences.insert(seq, (hop, round));
-                                debug!("Sent probe: hop={}, round={}, seq={}", hop + 1, round + 1, seq);
-                            }
-                            Err(e) => debug!("Failed to send probe: {}", e),
-                        }
-                    } else {
-                        // Sender dropped, time to exit
-                        break;
-                    }
-                }
-
-                // Event-driven response collection (no sleep!)
-                result = probe_engine.collect_responses_async() => {
-                    match result {
-                        Ok(responses) => {
-                            for response in responses {
-                                // Check if this sequence belongs to a known round
-                                if let Some((expected_hop, round)) = sent_sequences.remove(&response.seq) {
-                                    if expected_hop == response.hop {
-                                        debug!("Valid response: hop={}, round={}, seq={}, rtt={:?}",
-                                              response.hop + 1, round + 1, response.seq, response.rtt);
-                                    } else {
-                                        debug!("WARNING: Hop mismatch - expected {}, got {}", expected_hop + 1, response.hop + 1);
-                                    }
-
-                                    if response_tx.send(response).is_err() {
-                                        return Ok(());
-                                    }
-                                } else {
-                                    debug!("OUT-OF-ORDER/LATE: seq={}, hop={}, rtt={:?} - no matching sent probe",
-                                          response.seq, response.hop + 1, response.rtt);
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Brief yield on error to prevent tight error loops
-                            tokio::task::yield_now().await;
-                        }
-                    }
-                }
-            }
+        let args = session_arc.lock().unwrap().args.clone();
+        match prober {
+            Some(prober) => tracer::run(session_arc, prober).await,
+            None => Self::run_simulated_trace_realtime(session_arc, args).await,
         }
-
-        info!("Response listener finished");
-        Ok(())
-    }
-
-    // UI processor - handles both sent notifications and responses for real-time updates
-    async fn run_ui_processor_with_sent_notifications(
-        session_arc: std::sync::Arc<std::sync::Mutex<Self>>,
-        mut response_rx: mpsc::UnboundedReceiver<ProbeResponse>,
-        mut sent_rx: mpsc::UnboundedReceiver<usize>,
-    ) -> Result<()> {
-        loop {
-            tokio::select! {
-                // Handle packet sent notifications (shows waiting state)
-                sent_hop = sent_rx.recv() => {
-                    match sent_hop {
-                        Some(hop_index) => {
-                            let should_update = {
-                                let mut session = session_arc.lock().unwrap();
-                                if hop_index < session.hops.len() {
-                                    session.hops[hop_index].increment_sent();
-                                    session.update_callback.is_some()
-                                } else {
-                                    false
-                                }
-                            };
-
-                            // Trigger UI update immediately when packet is sent
-                            if should_update {
-                                let session = session_arc.lock().unwrap();
-                                if let Some(ref callback) = session.update_callback {
-                                    callback();
-                                }
-                            }
-                        }
-                        None => {
-                            // Sender closed, but continue processing responses
-                            break;
-                        }
-                    }
-                }
-
-                // Handle packet responses (shows actual RTT)
-                response_result = response_rx.recv() => {
-                    match response_result {
-                        Some(response) => {
-                            let (should_trigger_update, needs_dns_lookup) = {
-                                let mut session = session_arc.lock().unwrap();
-                                if session.apply_response(&response) {
-                                    let needs_dns = !session.args.numeric
-                                        && response.icmp_type != IcmpResponseType::Timeout;
-                                    (session.update_callback.is_some(), needs_dns)
-                                } else {
-                                    (false, false)
-                                }
-                            };
-
-                            // Perform DNS lookup if needed (outside the lock to avoid deadlock)
-                            if needs_dns_lookup {
-                                let session_clone = session_arc.clone();
-                                let source_addr = response.source_addr;
-                                let hop_index = response.hop;
-
-                                // Extract resolver outside the async block to avoid Send issues
-                                let resolver = {
-                                    let session = session_arc.lock().unwrap();
-                                    session.resolver.clone()
-                                };
-
-                                // Spawn DNS lookup task to avoid blocking the UI processor
-                                tokio::spawn(async move {
-                                    if let Ok(lookup_result) = resolver.reverse_lookup(source_addr).await {
-                                        if let Some(hostname) = lookup_result.iter().next() {
-                                            let hostname_str = hostname.to_string();
-                                            if hostname_str != source_addr.to_string() {
-                                                debug!("UI: Resolved {} to {}", source_addr, hostname_str);
-                                                let mut session = session_clone.lock().unwrap();
-                                                if hop_index < session.hops.len() {
-                                                    session.hops[hop_index].set_hostname_for_addr(source_addr, hostname_str);
-                                                    // Trigger UI update after DNS resolution
-                                                    if let Some(ref callback) = session.update_callback {
-                                                        callback();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-
-                            // Trigger UI update after processing each response (moved outside lock)
-                            if should_trigger_update {
-                                let session = session_arc.lock().unwrap();
-                                if let Some(ref callback) = session.update_callback {
-                                    callback();
-                                }
-                            }
-
-                            // Yield to allow other tasks to run - cooperative multitasking
-                            tokio::task::yield_now().await;
-                        }
-                        None => {
-                            // Response channel closed
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("UI processor finished");
-        Ok(())
     }
 
     async fn run_simulated_trace_realtime(
@@ -936,9 +460,10 @@ mod tests {
     }
 
     fn response(hop: usize, kind: IcmpResponseType, from: [u8; 4]) -> ProbeResponse {
-        let now = Instant::now();
+        let now = std::time::Instant::now();
         ProbeResponse {
             hop,
+            ordinal: None,
             seq: 0,
             source_addr: IpAddr::V4(Ipv4Addr::from(from)),
             icmp_type: kind,

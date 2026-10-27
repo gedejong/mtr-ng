@@ -5,7 +5,7 @@
 //! and support for various terminal color modes.
 
 use crate::args::Column;
-use crate::probe::ProbeEngine;
+use crate::probe::Prober;
 use crate::ui::events::EventHandler;
 use crate::ui::state::UiState;
 use crate::ui::visualization::{create_heatmap_spans, create_sparkline_spans, VisualizationMode};
@@ -284,7 +284,7 @@ pub async fn run_interactive(session: MtrSession) -> Result<()> {
 async fn run_event_loop(
     terminal: &mut DefaultTerminal,
     session: MtrSession,
-    probe_engine: Option<ProbeEngine>,
+    probe_engine: Option<Box<dyn Prober>>,
 ) -> Result<()> {
     let session_arc = Arc::new(Mutex::new(session.clone()));
     let session_clone = Arc::clone(&session_arc);

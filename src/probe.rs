@@ -1,21 +1,25 @@
-//! Simplified probe engine for MTR-NG
+//! Probe engine for MTR-NG
 //!
-//! This provides a cleaner interface for network probing without the complex
-//! cross-platform error queue handling from the original probe_unix.c
+//! Sends ICMP echo requests with a chosen TTL and delivers the replies, each
+//! timestamped by a dedicated receive thread the moment it arrives. Matching
+//! replies to probes and deciding when a probe is lost happen in `tracer`.
 
 use std::{
-    collections::HashMap,
     io,
+    mem::MaybeUninit,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Result};
 use rand::Rng;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::io::Interest;
-use tokio::net::UdpSocket;
-use tokio::time::timeout;
+use tokio::sync::mpsc;
 
 /// Maximum MTU size for network packets
 const MAX_MTU: usize = 1500;
@@ -25,6 +29,9 @@ const INITIAL_SEQUENCE: u16 = 32768;
 
 /// Maximum sequence number before wrapping back to initial
 const MAX_SEQUENCE: u16 = 60999;
+
+/// How often blocked receive threads check whether the engine was dropped
+const RECEIVE_POLL: Duration = Duration::from_millis(100);
 
 /// Types of ICMP responses we care about
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +46,8 @@ pub enum IcmpResponseType {
 #[derive(Debug, Clone)]
 pub struct ProbeResponse {
     pub hop: usize,
+    /// Which probe to this hop it answers (see `HopStats::increment_sent`)
+    pub ordinal: Option<u64>,
     pub seq: u16,
     pub source_addr: IpAddr,
     pub icmp_type: IcmpResponseType,
@@ -48,24 +57,24 @@ pub struct ProbeResponse {
     pub precise_rtt_ns: u128,  // Nanosecond precision RTT
 }
 
-/// A probe that has been sent but not yet answered.
-#[derive(Debug)]
-struct ProbeInfo {
-    hop: usize,
-    sent_at: Instant,
-    timeout: Duration,
+/// A reply to one of our probes, timestamped when it was received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reply {
+    pub kind: IcmpResponseType,
+    pub source: IpAddr,
+    pub seq: u16,
+    pub received_at: Instant,
 }
 
-impl ProbeInfo {
-    fn timed_out(&self) -> bool {
-        self.sent_at.elapsed() >= self.timeout
-    }
+/// Sends probes and delivers replies. Implementations only move packets;
+/// matching replies to probes and timeouts are the tracer's job.
+pub trait Prober: Send {
+    /// Send one probe with the given TTL (IPv4) or hop limit (IPv6).
+    /// Returns its sequence number and the time it was sent.
+    fn send(&mut self, dst: IpAddr, ttl: u8) -> io::Result<(u16, Instant)>;
 
-    fn get_precise_rtt(&self, receive_time: Instant) -> (Duration, u128) {
-        let rtt = receive_time.duration_since(self.sent_at);
-        let rtt_ns = rtt.as_nanos();
-        (rtt, rtt_ns)
-    }
+    /// The stream of replies. Can be taken once.
+    fn take_replies(&mut self) -> Option<mpsc::UnboundedReceiver<Reply>>;
 }
 
 /// Fields of an ICMP message that may answer one of our echo requests.
@@ -77,20 +86,20 @@ struct IcmpReply {
     seq: u16,
 }
 
-/// Simplified probe engine focused on core functionality
+/// ICMP echo prober over raw or (on macOS) unprivileged datagram sockets
 pub struct ProbeEngine {
     next_seq: u16,
-    icmp_socket: Socket,
-    icmp6_socket: Option<Socket>, // IPv6 ICMP socket
-    pending: HashMap<u16, ProbeInfo>,
+    icmp_socket: Arc<Socket>,
+    icmp6_socket: Option<Arc<Socket>>,
     packet_id: u16,
     unprivileged: bool,
+    replies: Option<mpsc::UnboundedReceiver<Reply>>,
+    stop: Arc<AtomicBool>,
 }
 
 impl ProbeEngine {
     pub fn new() -> Result<Self> {
         let (icmp_socket, unprivileged) = open_icmpv4_socket()?;
-        icmp_socket.set_nonblocking(true)?;
         tracing::info!(
             "Using {} ICMP socket",
             if unprivileged {
@@ -101,200 +110,47 @@ impl ProbeEngine {
         );
 
         // Try to create IPv6 ICMP socket (optional)
-        let icmp6_socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
-            .inspect(|sock| {
-                let _ = sock.set_nonblocking(true);
-            })
-            .ok();
-
-        if icmp6_socket.is_some() {
-            tracing::info!("IPv6 ICMP socket created successfully");
-        } else {
+        let icmp6_socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6)).ok();
+        if icmp6_socket.is_none() {
             tracing::debug!("IPv6 ICMP socket creation failed - IPv6 support disabled");
         }
+
+        let packet_id = std::process::id() as u16;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let icmp_socket = Arc::new(icmp_socket);
+        spawn_receiver(
+            Arc::clone(&icmp_socket),
+            false,
+            packet_id,
+            tx.clone(),
+            &stop,
+        )?;
+        let icmp6_socket = match icmp6_socket {
+            Some(socket) => {
+                let socket = Arc::new(socket);
+                spawn_receiver(Arc::clone(&socket), true, packet_id, tx, &stop)?;
+                Some(socket)
+            }
+            None => None,
+        };
 
         Ok(Self {
             // Random start so concurrent instances don't walk the same sequence numbers.
             next_seq: rand::thread_rng().gen_range(INITIAL_SEQUENCE..=MAX_SEQUENCE),
             icmp_socket,
             icmp6_socket,
-            pending: HashMap::new(),
-            packet_id: std::process::id() as u16,
+            packet_id,
             unprivileged,
+            replies: Some(rx),
+            stop,
         })
     }
 
     /// True when probing through an unprivileged datagram socket instead of a raw one.
     pub fn is_unprivileged(&self) -> bool {
         self.unprivileged
-    }
-
-    /// Send an ICMP echo request with the given TTL (IPv4) or hop limit (IPv6).
-    pub fn send_probe(
-        &mut self,
-        hop: usize,
-        dst: SocketAddr,
-        ttl: u8,
-        timeout: Duration,
-    ) -> Result<u16> {
-        let seq = self.alloc_seq();
-
-        // Select appropriate socket based on destination address family
-        let (socket, packet) = match dst {
-            SocketAddr::V4(_) => {
-                self.icmp_socket.set_ttl(ttl.into())?;
-                (
-                    &self.icmp_socket,
-                    construct_icmp_packet(seq, self.packet_id)?,
-                )
-            }
-            SocketAddr::V6(_) => {
-                let Some(ref icmp6_sock) = self.icmp6_socket else {
-                    return Err(anyhow!("IPv6 not supported - no ICMPv6 socket available"));
-                };
-                icmp6_sock.set_unicast_hops_v6(ttl.into())?;
-                (icmp6_sock, construct_icmp6_packet(seq, self.packet_id)?)
-            }
-        };
-
-        socket.send_to(&packet, &dst.into())?;
-
-        // Track the probe
-        let now = Instant::now();
-        let probe = ProbeInfo {
-            hop,
-            sent_at: now,
-            timeout,
-        };
-
-        self.pending.insert(seq, probe);
-
-        let addr_family = match dst {
-            SocketAddr::V4(_) => "IPv4",
-            SocketAddr::V6(_) => "IPv6",
-        };
-
-        tracing::debug!(
-            "Sent ICMP probe ({}): hop={}, ttl={}, seq={}",
-            addr_family,
-            hop + 1,
-            ttl,
-            seq
-        );
-
-        Ok(seq)
-    }
-
-    /// Event-driven async response collection (no polling!)
-    pub async fn collect_responses_async(&mut self) -> Result<Vec<ProbeResponse>> {
-        let mut responses = Vec::new();
-        let mut buffer = [0u8; MAX_MTU];
-
-        // Use tokio's async socket operations for event-driven I/O
-        // This waits for actual socket events instead of polling
-
-        // Check IPv4 ICMP socket for readiness
-        if let Ok(ready) = timeout(Duration::from_micros(1), async {
-            // Convert to tokio socket for async operations
-            let std_socket = std::net::UdpSocket::from(self.icmp_socket.try_clone()?);
-            std_socket.set_nonblocking(true)?;
-            let tokio_socket = UdpSocket::from_std(std_socket)?;
-
-            // Wait for socket to become readable (event-driven!)
-            tokio_socket.ready(Interest::READABLE).await
-        })
-        .await
-        {
-            if ready.is_ok() {
-                // Socket is ready - collect all available responses
-                loop {
-                    let mut uninit_buffer = [std::mem::MaybeUninit::<u8>::uninit(); MAX_MTU];
-                    match self.icmp_socket.recv_from(&mut uninit_buffer) {
-                        Ok((len, _addr)) => {
-                            let received_at = Instant::now();
-                            // Convert MaybeUninit to initialized bytes
-                            for i in 0..len {
-                                buffer[i] = unsafe { uninit_buffer[i].assume_init() };
-                            }
-                            let reply = parse_icmpv4(&buffer[..len]);
-                            if let Some(response) =
-                                reply.and_then(|r| self.match_reply(r, received_at))
-                            {
-                                responses.push(response);
-                            }
-                        }
-                        Err(_) => break, // No more data available
-                    }
-                }
-            }
-        }
-
-        // Handle IPv6 socket if available
-        if self.icmp6_socket.is_some() {
-            // Similar async approach for IPv6
-            if let Ok(ready) = timeout(Duration::from_micros(1), async {
-                // IPv6 socket readiness check would go here
-                // For now, fall back to non-blocking check
-                Ok::<(), anyhow::Error>(())
-            })
-            .await
-            {
-                if ready.is_ok() {
-                    loop {
-                        let mut uninit_buffer = [std::mem::MaybeUninit::<u8>::uninit(); MAX_MTU];
-                        let recv_result = if let Some(ref icmp6_socket) = self.icmp6_socket {
-                            icmp6_socket.recv_from(&mut uninit_buffer)
-                        } else {
-                            break;
-                        };
-
-                        match recv_result {
-                            Ok((len, addr)) => {
-                                let received_at = Instant::now();
-                                for i in 0..len {
-                                    buffer[i] = unsafe { uninit_buffer[i].assume_init() };
-                                }
-                                let reply = addr
-                                    .as_socket()
-                                    .and_then(|from| parse_icmpv6(&buffer[..len], from.ip()));
-                                if let Some(response) =
-                                    reply.and_then(|r| self.match_reply(r, received_at))
-                                {
-                                    responses.push(response);
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check for timeouts (no change needed here)
-        let timed_out: Vec<_> = self
-            .pending
-            .iter()
-            .filter(|(_, probe)| probe.timed_out())
-            .map(|(seq, probe)| (*seq, probe.hop, probe.sent_at))
-            .collect();
-
-        for (seq, hop, send_time) in timed_out {
-            if let Some(probe) = self.pending.remove(&seq) {
-                let (rtt, precise_rtt_ns) = probe.get_precise_rtt(Instant::now());
-                responses.push(ProbeResponse {
-                    hop,
-                    seq,
-                    source_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                    icmp_type: IcmpResponseType::Timeout,
-                    rtt,
-                    send_time,
-                    receive_time: Instant::now(),
-                    precise_rtt_ns,
-                });
-            }
-        }
-
-        Ok(responses)
     }
 
     fn alloc_seq(&mut self) -> u16 {
@@ -305,25 +161,113 @@ impl ProbeEngine {
         }
         seq
     }
+}
 
-    /// Turn a parsed reply into a response if it answers one of our pending probes.
-    fn match_reply(&mut self, reply: IcmpReply, received_at: Instant) -> Option<ProbeResponse> {
-        if reply.id != self.packet_id {
-            return None; // another process's ICMP traffic
-        }
-        let probe = self.pending.remove(&reply.seq)?;
-        let (rtt, precise_rtt_ns) = probe.get_precise_rtt(received_at);
-        Some(ProbeResponse {
-            hop: probe.hop,
-            seq: reply.seq,
-            source_addr: reply.source,
-            icmp_type: reply.kind,
-            rtt,
-            send_time: probe.sent_at,
-            receive_time: received_at,
-            precise_rtt_ns,
-        })
+impl Prober for ProbeEngine {
+    fn send(&mut self, dst: IpAddr, ttl: u8) -> io::Result<(u16, Instant)> {
+        let seq = self.alloc_seq();
+        let (socket, packet) = match dst {
+            IpAddr::V4(_) => {
+                self.icmp_socket.set_ttl(ttl.into())?;
+                (
+                    &self.icmp_socket,
+                    construct_icmp_packet(seq, self.packet_id),
+                )
+            }
+            IpAddr::V6(_) => {
+                let Some(ref icmp6_sock) = self.icmp6_socket else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "IPv6 not supported - no ICMPv6 socket available",
+                    ));
+                };
+                icmp6_sock.set_unicast_hops_v6(ttl.into())?;
+                (icmp6_sock, construct_icmp6_packet(seq, self.packet_id))
+            }
+        };
+
+        let sent_at = Instant::now();
+        socket.send_to(&packet, &SocketAddr::new(dst, 0).into())?;
+        tracing::debug!("Sent ICMP probe to {dst}: ttl={ttl}, seq={seq}");
+        Ok((seq, sent_at))
     }
+
+    fn take_replies(&mut self) -> Option<mpsc::UnboundedReceiver<Reply>> {
+        self.replies.take()
+    }
+}
+
+impl Drop for ProbeEngine {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Start a thread that blocks on `socket`, timestamps each packet on arrival and
+/// forwards the ones that answer our probes.
+fn spawn_receiver(
+    socket: Arc<Socket>,
+    ipv6: bool,
+    packet_id: u16,
+    tx: mpsc::UnboundedSender<Reply>,
+    stop: &Arc<AtomicBool>,
+) -> Result<()> {
+    socket.set_read_timeout(Some(RECEIVE_POLL))?;
+    let stop = Arc::clone(stop);
+    thread::Builder::new()
+        .name(format!("mtr-ng-recv-v{}", if ipv6 { 6 } else { 4 }))
+        .spawn(move || {
+            let mut buf = [MaybeUninit::<u8>::uninit(); MAX_MTU];
+            while !stop.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut buf) {
+                    Ok((len, from)) => {
+                        let received_at = Instant::now();
+                        // SAFETY: recv_from initialised the first `len` bytes.
+                        let bytes =
+                            unsafe { &*(&buf[..len] as *const [MaybeUninit<u8>] as *const [u8]) };
+                        let from = from.as_socket().map(|a| a.ip());
+                        if let Some(reply) = decode(bytes, from, ipv6, packet_id, received_at) {
+                            if tx.send(reply).is_err() {
+                                break; // nobody listens any more
+                            }
+                        }
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock
+                                | io::ErrorKind::TimedOut
+                                | io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(e) => {
+                        tracing::warn!("ICMP receive failed: {e}");
+                        thread::sleep(RECEIVE_POLL);
+                    }
+                }
+            }
+        })?;
+    Ok(())
+}
+
+/// Parse a received packet and keep it only if it answers one of our probes.
+fn decode(
+    bytes: &[u8],
+    from: Option<IpAddr>,
+    ipv6: bool,
+    packet_id: u16,
+    received_at: Instant,
+) -> Option<Reply> {
+    let reply = if ipv6 {
+        parse_icmpv6(bytes, from?)?
+    } else {
+        parse_icmpv4(bytes)?
+    };
+    (reply.id == packet_id).then_some(Reply {
+        kind: reply.kind,
+        source: reply.source,
+        seq: reply.seq,
+        received_at,
+    })
 }
 
 /// Open the IPv4 ICMP socket. On macOS an unprivileged datagram socket works for
@@ -421,7 +365,7 @@ fn parse_icmpv6(buf: &[u8], source: IpAddr) -> Option<IcmpReply> {
 }
 
 // Helper function to construct ICMP packet
-fn construct_icmp_packet(seq: u16, id: u16) -> Result<Vec<u8>> {
+fn construct_icmp_packet(seq: u16, id: u16) -> Vec<u8> {
     let mut packet = vec![0u8; 8];
 
     // ICMP Type (8 = Echo Request)
@@ -440,7 +384,7 @@ fn construct_icmp_packet(seq: u16, id: u16) -> Result<Vec<u8>> {
     let checksum = calculate_icmp_checksum(&packet);
     packet[2..4].copy_from_slice(&checksum.to_be_bytes());
 
-    Ok(packet)
+    packet
 }
 
 fn calculate_icmp_checksum(packet: &[u8]) -> u16 {
@@ -465,7 +409,7 @@ fn calculate_icmp_checksum(packet: &[u8]) -> u16 {
 }
 
 // Helper function to construct ICMPv6 packet
-fn construct_icmp6_packet(seq: u16, id: u16) -> Result<Vec<u8>> {
+fn construct_icmp6_packet(seq: u16, id: u16) -> Vec<u8> {
     let mut packet = vec![0u8; 8];
 
     // ICMPv6 Type (128 = Echo Request)
@@ -483,7 +427,7 @@ fn construct_icmp6_packet(seq: u16, id: u16) -> Result<Vec<u8>> {
     // Note: For ICMPv6, the kernel typically calculates the checksum
     // so we don't need to manually calculate it like we do for ICMP
 
-    Ok(packet)
+    packet
 }
 #[cfg(test)]
 mod tests {
@@ -561,49 +505,19 @@ mod tests {
         }
     }
 
-    fn engine_with_pending(seq: u16) -> ProbeEngine {
-        let (icmp_socket, unprivileged) = (
-            Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap(),
-            false,
-        );
-        let mut engine = ProbeEngine {
-            next_seq: INITIAL_SEQUENCE,
-            icmp_socket,
-            icmp6_socket: None,
-            pending: HashMap::new(),
-            packet_id: 0x1234,
-            unprivileged,
-        };
-        engine.pending.insert(
-            seq,
-            ProbeInfo {
-                hop: 4,
-                sent_at: Instant::now(),
-                timeout: Duration::from_secs(1),
-            },
-        );
-        engine
-    }
-
     #[test]
-    fn matches_only_our_identifier() {
-        let mut engine = engine_with_pending(40000);
-        let mut reply = IcmpReply {
-            kind: IcmpResponseType::EchoReply,
-            source: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-            id: 0x9999,
-            seq: 40000,
-        };
-        assert!(engine.match_reply(reply, Instant::now()).is_none());
-        assert!(
-            engine.pending.contains_key(&40000),
-            "foreign reply must not consume the probe"
+    fn decode_keeps_only_our_identifier() {
+        let mut p = ipv4_header(20, 1, [1, 1, 1, 1]);
+        p.extend(echo(0, 0x1234, 40000));
+        let now = Instant::now();
+        assert_eq!(
+            decode(&p, None, false, 0x9999, now),
+            None,
+            "another process's ping"
         );
-
-        reply.id = 0x1234;
-        let response = engine.match_reply(reply, Instant::now()).unwrap();
-        assert_eq!(response.hop, 4);
-        assert!(engine.pending.is_empty());
+        let reply = decode(&p, None, false, 0x1234, now).unwrap();
+        assert_eq!(reply.kind, IcmpResponseType::EchoReply);
+        assert_eq!((reply.seq, reply.received_at), (40000, now));
     }
 
     #[test]

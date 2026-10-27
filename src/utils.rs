@@ -2,7 +2,7 @@
 
 /// Time conversion utilities
 pub mod time {
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     /// Convert Duration to milliseconds as f64
     pub fn duration_to_ms_f64(duration: Duration) -> f64 {
@@ -17,16 +17,6 @@ pub mod time {
     /// Convert Duration to microseconds for high precision
     pub fn duration_to_us_f64(duration: Duration) -> f64 {
         duration.as_secs_f64() * 1_000_000.0
-    }
-
-    /// Convert Duration to microseconds as u64
-    pub fn duration_to_us_u64(duration: Duration) -> u64 {
-        duration.as_micros() as u64
-    }
-
-    /// Convert Duration to nanoseconds for maximum precision
-    pub fn duration_to_ns_u128(duration: Duration) -> u128 {
-        duration.as_nanos()
     }
 
     /// Format duration as milliseconds with one decimal place
@@ -51,52 +41,9 @@ pub mod time {
             .unwrap_or_else(|| "???".to_string())
     }
 
-    /// Format optional duration with high precision
-    pub fn format_optional_duration_us(duration: Option<Duration>) -> String {
-        duration
-            .map(format_duration_us)
-            .unwrap_or_else(|| "???".to_string())
-    }
-
-    /// Get high-precision monotonic timestamp
-    pub fn get_monotonic_timestamp() -> Instant {
-        Instant::now()
-    }
-
-    /// Get system timestamp with nanosecond precision
-    pub fn get_system_timestamp_ns() -> u128 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    }
-
-    /// Calculate precise elapsed time with overflow protection
-    pub fn calculate_precise_elapsed(start: Instant) -> Duration {
-        start.elapsed()
-    }
-
     /// Calculate timing jitter between consecutive measurements
     pub fn calculate_timing_jitter(current: Duration, previous: Duration) -> Duration {
         current.abs_diff(previous)
-    }
-
-    /// Moving average for timing smoothing
-    pub fn calculate_timing_moving_average(
-        values: &[Duration],
-        window_size: usize,
-    ) -> Option<Duration> {
-        if values.is_empty() || window_size == 0 {
-            return None;
-        }
-
-        let window_size = window_size.min(values.len());
-        let recent_values = &values[values.len() - window_size..];
-
-        let sum_nanos: u128 = recent_values.iter().map(|d| d.as_nanos()).sum();
-
-        let avg_nanos = sum_nanos / window_size as u128;
-        Some(Duration::from_nanos(avg_nanos as u64))
     }
 
     /// Exponential moving average for timing with configurable alpha
@@ -115,90 +62,6 @@ pub mod time {
             }
         }
     }
-
-    /// Detect timing anomalies (spikes or drops)
-    pub fn detect_timing_anomaly(
-        current: Duration,
-        baseline: Duration,
-        threshold_factor: f64,
-    ) -> bool {
-        let current_ns = current.as_nanos() as f64;
-        let baseline_ns = baseline.as_nanos() as f64;
-
-        if baseline_ns == 0.0 {
-            return false;
-        }
-
-        let ratio = current_ns / baseline_ns;
-        ratio > threshold_factor || ratio < (1.0 / threshold_factor)
-    }
-
-    /// Calculate timing percentiles for performance analysis
-    pub fn calculate_timing_percentile(
-        values: &mut [Duration],
-        percentile: f64,
-    ) -> Option<Duration> {
-        if values.is_empty() || percentile < 0.0 || percentile > 100.0 {
-            return None;
-        }
-
-        values.sort_unstable();
-        let index = ((percentile / 100.0) * (values.len() - 1) as f64).round() as usize;
-        values.get(index).copied()
-    }
-
-    /// Real-time timing statistics
-    #[derive(Debug, Clone)]
-    pub struct TimingStats {
-        pub count: usize,
-        pub min: Duration,
-        pub max: Duration,
-        pub sum: Duration,
-        pub mean: Duration,
-        pub variance: f64,
-        pub stddev: Duration,
-        pub last_update: Instant,
-    }
-
-    impl TimingStats {
-        pub fn new() -> Self {
-            Self {
-                count: 0,
-                min: Duration::MAX,
-                max: Duration::ZERO,
-                sum: Duration::ZERO,
-                mean: Duration::ZERO,
-                variance: 0.0,
-                stddev: Duration::ZERO,
-                last_update: Instant::now(),
-            }
-        }
-
-        pub fn update(&mut self, duration: Duration) {
-            self.count += 1;
-            self.sum += duration;
-            self.min = self.min.min(duration);
-            self.max = self.max.max(duration);
-            self.mean = self.sum / self.count as u32;
-            self.last_update = Instant::now();
-
-            // Calculate variance incrementally for efficiency
-            if self.count > 1 {
-                let mean_ns = self.mean.as_nanos() as f64;
-                let duration_ns = duration.as_nanos() as f64;
-                let diff = duration_ns - mean_ns;
-                self.variance =
-                    ((self.count - 1) as f64 * self.variance + diff * diff) / self.count as f64;
-                self.stddev = Duration::from_nanos(self.variance.sqrt() as u64);
-            }
-        }
-    }
-
-    impl Default for TimingStats {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
 }
 
 /// Mathematical utilities
@@ -214,15 +77,6 @@ pub mod math {
         index.min(array_len - 1)
     }
 
-    /// Calculate ratio for array indexing (0.0 to 1.0)
-    pub fn calculate_ratio(value: f64, max_value: f64) -> f64 {
-        if max_value > 0.0 {
-            (value / max_value).clamp(0.0, 1.0)
-        } else {
-            0.0
-        }
-    }
-
     /// Calculate logarithmic ratio for scaling
     pub fn calculate_log_ratio(value: f64, min_value: f64, max_value: f64) -> f64 {
         if min_value <= 0.0 || max_value <= min_value || value <= 0.0 {
@@ -236,32 +90,9 @@ pub mod math {
         ((log_value - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
     }
 
-    /// Calculate standard deviation from a collection of values
-    pub fn calculate_stddev(values: &[f64], mean: f64) -> f64 {
-        if values.len() <= 1 {
-            return 0.0;
-        }
-
-        let variance = values
-            .iter()
-            .map(|&value| {
-                let diff = value - mean;
-                diff * diff
-            })
-            .sum::<f64>()
-            / (values.len() - 1) as f64;
-
-        variance.sqrt()
-    }
-
     /// Clamp ratio to 0.0-1.0 range (common pattern)
     pub fn clamp_ratio(ratio: f64) -> f64 {
         ratio.clamp(0.0, 1.0)
-    }
-
-    /// Ensure value doesn't exceed a maximum with safety bounds
-    pub fn min_with_safety<T: Ord>(value: T, max_value: T) -> T {
-        value.min(max_value)
     }
 
     /// Ensure value meets a minimum threshold
@@ -339,108 +170,6 @@ pub mod layout {
     }
 }
 
-/// Formatting utilities
-pub mod format {
-    /// Format percentage with one decimal place
-    pub fn format_percentage(value: f64) -> String {
-        format!("{:.1}%", value)
-    }
-
-    /// Format number with specified decimal places and width
-    pub fn format_number_padded(value: f64, width: usize, decimals: usize) -> String {
-        format!(
-            "{:width$.decimals$}",
-            value,
-            width = width,
-            decimals = decimals
-        )
-    }
-
-    /// Format count with specified width
-    pub fn format_count_padded(value: usize, width: usize) -> String {
-        format!("{:width$}", value, width = width)
-    }
-}
-
-/// ICMP packet utilities
-pub mod icmp {
-    use crate::Result;
-
-    /// Calculate ICMP checksum
-    pub fn calculate_checksum(packet: &[u8]) -> u16 {
-        let mut sum = 0u32;
-
-        // Sum all 16-bit words
-        for chunk in packet.chunks(2) {
-            if chunk.len() == 2 {
-                sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-            } else {
-                sum += (chunk[0] as u32) << 8;
-            }
-        }
-
-        // Add carry
-        while (sum >> 16) != 0 {
-            sum = (sum & 0xffff) + (sum >> 16);
-        }
-
-        // One's complement
-        !(sum as u16)
-    }
-
-    /// Construct basic ICMP echo request packet
-    pub fn construct_icmp_packet(seq: u16, id: u16) -> Result<Vec<u8>> {
-        let mut packet = vec![0u8; 8];
-
-        // ICMP Type (8 = Echo Request)
-        packet[0] = 8;
-        // ICMP Code (0)
-        packet[1] = 0;
-        // Checksum (0 initially, calculated later)
-        packet[2] = 0;
-        packet[3] = 0;
-        // Identifier
-        packet[4..6].copy_from_slice(&id.to_be_bytes());
-        // Sequence Number
-        packet[6..8].copy_from_slice(&seq.to_be_bytes());
-
-        // Calculate checksum
-        let checksum = calculate_checksum(&packet);
-        packet[2..4].copy_from_slice(&checksum.to_be_bytes());
-
-        Ok(packet)
-    }
-
-    /// Construct basic ICMPv6 echo request packet
-    pub fn construct_icmp6_packet(seq: u16, id: u16) -> Result<Vec<u8>> {
-        let mut packet = vec![0u8; 8];
-
-        // ICMPv6 Type (128 = Echo Request)
-        packet[0] = 128;
-        // ICMPv6 Code (0)
-        packet[1] = 0;
-        // Checksum (0 initially, kernel will calculate for ICMPv6)
-        packet[2] = 0;
-        packet[3] = 0;
-        // Identifier
-        packet[4..6].copy_from_slice(&id.to_be_bytes());
-        // Sequence Number
-        packet[6..8].copy_from_slice(&seq.to_be_bytes());
-
-        // Note: For ICMPv6, the kernel typically calculates the checksum
-        Ok(packet)
-    }
-
-    /// Extract sequence number from ICMP packet
-    pub fn extract_sequence_from_packet(packet: &[u8]) -> Option<u16> {
-        if packet.len() >= 8 {
-            Some(u16::from_be_bytes([packet[6], packet[7]]))
-        } else {
-            None
-        }
-    }
-}
-
 /// Visualization utilities
 pub mod visualization {
     /// Get sparkline character based on ratio (0.0 to 1.0)
@@ -468,7 +197,6 @@ mod tests {
     fn test_math_utils() {
         assert_eq!(math::clamp_f64(1.5, 0.0, 1.0), 1.0);
         assert_eq!(math::safe_array_index(0.5, 10), 5); // (0.5 * 9).round() = 4.5.round() = 5
-        assert_eq!(math::calculate_ratio(50.0, 100.0), 0.5);
     }
 
     #[test]
@@ -506,20 +234,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_utils() {
-        assert_eq!(format::format_percentage(12.345), "12.3%");
-        assert_eq!(format::format_number_padded(123.45, 8, 2), "  123.45");
-    }
-
-    #[test]
-    fn test_icmp_utils() {
-        let packet = icmp::construct_icmp_packet(1234, 5678).unwrap();
-        assert_eq!(packet.len(), 8);
-        assert_eq!(packet[0], 8); // ICMP Echo Request
-        assert_eq!(icmp::extract_sequence_from_packet(&packet), Some(1234));
-    }
-
-    #[test]
     fn test_visualization_utils() {
         // Test basic sparkline character functionality
         assert_eq!(visualization::get_sparkline_char(0.0), '▁');
@@ -536,9 +250,6 @@ mod tests {
         assert_eq!(math::clamp_ratio(-0.1), 0.0);
         assert_eq!(math::clamp_ratio(1.5), 1.0);
 
-        // Test min/max with safety
-        assert_eq!(math::min_with_safety(5, 10), 5);
-        assert_eq!(math::min_with_safety(15, 10), 10);
         assert_eq!(math::max_with_minimum(5, 10), 10);
         assert_eq!(math::max_with_minimum(15, 10), 15);
     }
@@ -548,11 +259,6 @@ mod tests {
         // Test microsecond conversion
         let duration = Duration::from_micros(1500);
         assert_eq!(time::duration_to_us_f64(duration), 1500.0);
-        assert_eq!(time::duration_to_us_u64(duration), 1500);
-
-        // Test nanosecond conversion
-        let duration_ns = Duration::from_nanos(1_234_567);
-        assert_eq!(time::duration_to_ns_u128(duration_ns), 1_234_567);
 
         // Test high-precision formatting
         let small_duration = Duration::from_micros(500);
@@ -587,47 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn test_timing_anomaly_detection() {
-        let baseline = Duration::from_millis(100);
-        let normal = Duration::from_millis(110);
-        let spike = Duration::from_millis(300);
-
-        assert!(!time::detect_timing_anomaly(normal, baseline, 2.0));
-        assert!(time::detect_timing_anomaly(spike, baseline, 2.0));
-    }
-
-    #[test]
-    fn test_timing_stats() {
-        let mut stats = time::TimingStats::new();
-
-        stats.update(Duration::from_millis(100));
-        assert_eq!(stats.count, 1);
-        assert_eq!(stats.min, Duration::from_millis(100));
-        assert_eq!(stats.max, Duration::from_millis(100));
-
-        stats.update(Duration::from_millis(50));
-        assert_eq!(stats.count, 2);
-        assert_eq!(stats.min, Duration::from_millis(50));
-        assert_eq!(stats.max, Duration::from_millis(100));
-        assert_eq!(stats.mean, Duration::from_millis(75));
-    }
-
-    #[test]
-    fn test_timing_moving_average() {
-        let values = vec![
-            Duration::from_millis(100),
-            Duration::from_millis(110),
-            Duration::from_millis(120),
-            Duration::from_millis(130),
-        ];
-
-        let avg = time::calculate_timing_moving_average(&values, 3);
-        assert!(avg.is_some());
-        // Average of last 3 values: (110 + 120 + 130) / 3 = 120
-        assert_eq!(avg.unwrap(), Duration::from_millis(120));
-    }
-
-    #[test]
     fn test_timing_precision_improvements() {
         // Test high-precision microsecond timing
         let ultra_fast = Duration::from_micros(100); // 100μs - typical for localhost
@@ -643,7 +308,6 @@ mod tests {
         // Test that we no longer have 10ms quantization
         let precise_timing = Duration::from_nanos(123_456); // 123.456μs
         assert_eq!(time::duration_to_us_f64(precise_timing), 123.456);
-        assert_eq!(time::duration_to_ns_u128(precise_timing), 123_456);
 
         // Verify sub-millisecond precision detection
         assert!(time::duration_to_us_f64(ultra_fast) < 1000.0); // Should use μs format

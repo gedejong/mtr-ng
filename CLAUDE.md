@@ -3,10 +3,11 @@
 Rust reimplementation of `mtr` (traceroute + ping) with a ratatui TUI and a `--report` mode. One crate: library in `src/lib.rs`, binary in `src/main.rs`.
 
 ## Layout
-- `src/session.rs`: `MtrSession`. Target resolution, probe scheduling, sequence table, matching replies to hops, simulation mode.
-- `src/probe.rs`: `ProbeEngine`. Raw sockets, packet building and parsing.
-- `src/hop_stats.rs`: per-hop statistics (loss, RTT, jitter, EMA, multipath `AlternatePath`).
-- `src/report.rs`: non-interactive `--report` output.
+- `src/tracer.rs`: the one probing loop (report and TUI). Sends a round per interval, matches replies by seq, expires probes after 2 s, runs reverse DNS off the probe path. Tested against a `FakeProber`.
+- `src/probe.rs`: `Prober` trait and `ProbeEngine`. ICMP sockets (unprivileged datagram on macOS, raw elsewhere), one receive thread per address family that timestamps replies on arrival, packet building and parsing.
+- `src/session.rs`: `MtrSession`. Target resolution, the hop table, applying replies and timeouts to hops, the reverse DNS cache, simulation mode.
+- `src/hop_stats.rs`: per-hop statistics (loss excluding probes in flight, RTT, Welford stddev, jitter, EMA) and per-address `ResponderStats` for multipath.
+- `src/report.rs`: non-interactive `--report` output; `format_table` is golden-tested.
 - `src/ui/`: TUI. `main.rs` event/render loop, `widgets.rs` table and column selector, `visualization.rs` sparklines and colours, `state.rs`, `events.rs`.
 - `src/args.rs`: clap CLI. `src/utils.rs`: math, formatting and timing helpers.
 

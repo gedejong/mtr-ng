@@ -5,6 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Probes remembered per hop for the history graph and for matching late replies.
+const HISTORY_LEN: usize = 100;
+
 #[derive(Debug, Clone)]
 pub enum PacketOutcome {
     Received(Duration), // RTT
@@ -12,40 +15,53 @@ pub enum PacketOutcome {
     Pending,            // Sent but no response yet
 }
 
+/// Statistics for one address that answered at this hop. With load balancing a
+/// hop can have several; the one with the most replies is the hop's primary.
 #[derive(Debug, Clone)]
-pub struct AlternatePath {
+pub struct ResponderStats {
     pub addr: IpAddr,
     pub hostname: Option<String>,
-    pub frequency: usize,
+    pub replies: usize,
     pub last_seen: Instant,
     pub last_rtt: Option<Duration>,
-    pub avg_rtt: Option<Duration>,
+    pub best_rtt: Option<Duration>,
+    rtt_sum_ns: u128,
 }
 
-impl AlternatePath {
-    pub fn new(addr: IpAddr) -> Self {
+impl ResponderStats {
+    fn new(addr: IpAddr) -> Self {
         Self {
             addr,
             hostname: None,
-            frequency: 1,
+            replies: 0,
             last_seen: Instant::now(),
             last_rtt: None,
-            avg_rtt: None,
+            best_rtt: None,
+            rtt_sum_ns: 0,
         }
     }
 
-    pub fn update(&mut self, rtt: Duration) {
-        self.frequency += 1;
+    fn record(&mut self, rtt: Duration) {
+        self.replies += 1;
         self.last_seen = Instant::now();
         self.last_rtt = Some(rtt);
-        // Simple running average
-        self.avg_rtt = Some(rtt);
+        self.best_rtt = Some(self.best_rtt.map_or(rtt, |best| best.min(rtt)));
+        self.rtt_sum_ns += rtt.as_nanos();
     }
+
+    pub fn avg_rtt(&self) -> Option<Duration> {
+        mean_duration(self.rtt_sum_ns, self.replies)
+    }
+}
+
+fn mean_duration(sum_ns: u128, count: usize) -> Option<Duration> {
+    (count > 0).then(|| Duration::from_nanos((sum_ns / count as u128) as u64))
 }
 
 #[derive(Debug, Clone)]
 pub struct HopStats {
     pub hop: u8,
+    /// Primary responder (the address with the most replies)
     pub addr: Option<IpAddr>,
     pub hostname: Option<String>,
     pub sent: usize,
@@ -53,13 +69,15 @@ pub struct HopStats {
     pub last_rtt: Option<Duration>,
     pub best_rtt: Option<Duration>,
     pub worst_rtt: Option<Duration>,
+    /// Mean over all replies since start (or reset)
     pub avg_rtt: Option<Duration>,
     pub ema_rtt: Option<Duration>, // Exponentially smoothed average RTT
-    pub jitter_avg: Option<Duration>, // Mean jitter (average of jitter values)
+    pub jitter_avg: Option<Duration>, // Mean of all jitter values
     pub last_jitter: Option<Duration>, // Last calculated jitter value
-    pub jitters: VecDeque<Duration>, // Store jitter values for average calculation
+    /// Most recent RTTs, for the graph and its scale
     pub rtts: VecDeque<Duration>,
     pub packet_history: VecDeque<PacketOutcome>, // Chronological packet outcomes
+    /// Loss among probes that have been answered or timed out (in-flight excluded)
     pub loss_percent: f64,
     // Exponential smoothing factor (0.0 to 1.0)
     // Higher values = more responsive to recent changes
@@ -67,9 +85,8 @@ pub struct HopStats {
     // Typical values: 0.1-0.3 for network monitoring
     pub ema_alpha: f64,
 
-    // Multi-path tracking
-    pub alternate_paths: HashMap<IpAddr, AlternatePath>,
-    pub path_frequency: HashMap<IpAddr, usize>,
+    /// Every address that answered at this hop
+    pub responders: HashMap<IpAddr, ResponderStats>,
 
     // Target tracking
     pub is_target: bool,
@@ -77,14 +94,12 @@ pub struct HopStats {
     // ICMP error tracking (for MTR algorithm compatibility)
     pub icmp_error: bool,
 
-    /// Real-time timing statistics tracker
-    pub timing_stats: Option<crate::utils::time::TimingStats>,
-    /// High-precision RTT values in nanoseconds for detailed analysis
-    pub precise_rtts_ns: VecDeque<u128>,
-    /// Real-time jitter detection threshold (default 2.0 = 200% spike)
-    pub jitter_threshold: f64,
-    /// Timing anomaly counter
-    pub timing_anomalies: usize,
+    // All-time accumulators
+    rtt_sum_ns: u128,
+    rtt_mean_ns: f64, // Welford running mean and sum of squared deviations
+    rtt_m2: f64,
+    jitter_sum_ns: u128,
+    jitter_count: usize,
 }
 
 impl HopStats {
@@ -102,268 +117,219 @@ impl HopStats {
             ema_rtt: None,
             jitter_avg: None,
             last_jitter: None,
-            jitters: VecDeque::with_capacity(100),
-            rtts: VecDeque::with_capacity(100),
-            packet_history: VecDeque::with_capacity(100),
+            rtts: VecDeque::with_capacity(HISTORY_LEN),
+            packet_history: VecDeque::with_capacity(HISTORY_LEN),
             loss_percent: 0.0,
             ema_alpha: 0.1,
-            alternate_paths: HashMap::new(),
-            path_frequency: HashMap::new(),
+            responders: HashMap::new(),
             is_target: false,
             icmp_error: false,
-            timing_stats: None,
-            precise_rtts_ns: VecDeque::new(),
-            jitter_threshold: 2.0,
-            timing_anomalies: 0,
+            rtt_sum_ns: 0,
+            rtt_mean_ns: 0.0,
+            rtt_m2: 0.0,
+            jitter_sum_ns: 0,
+            jitter_count: 0,
         }
     }
 
-    /// Track an RTT from a specific address, handling multi-path logic
-    pub fn add_rtt_from_addr(&mut self, addr: IpAddr, rtt: Duration) {
-        // Update path frequency tracking
-        *self.path_frequency.entry(addr).or_insert(0) += 1;
-
-        // Determine if this is the primary path
-        let is_primary = self.addr.is_none()
-            || self.addr == Some(addr)
-            || self.path_frequency.get(&addr).unwrap_or(&0)
-                > self
-                    .path_frequency
-                    .get(&self.addr.unwrap_or(addr))
-                    .unwrap_or(&0);
-
-        if is_primary {
-            // Update primary path stats
-            self.addr = Some(addr);
-            self.add_rtt(rtt);
-        } else {
-            // Track as alternate path
-            let alt_path = self
-                .alternate_paths
-                .entry(addr)
-                .or_insert_with(|| AlternatePath::new(addr));
-            alt_path.update(rtt);
-            let alt_frequency = alt_path.frequency; // Save for logging
-
-            // For alternate paths, we still need to count the received packet
-            self.received += 1;
-            self.update_loss_percent();
-
-            tracing::debug!(
-                "Alternate path detected: hop={}, primary={:?}, alternate={}, frequency={}",
-                self.hop,
-                self.addr,
-                addr,
-                alt_frequency
-            );
+    /// Count a probe sent to this hop. Returns its ordinal, which identifies the
+    /// probe when its reply or timeout is recorded.
+    pub fn increment_sent(&mut self) -> u64 {
+        let ordinal = self.sent as u64;
+        self.sent += 1;
+        self.packet_history.push_back(PacketOutcome::Pending);
+        if self.packet_history.len() > HISTORY_LEN {
+            self.packet_history.pop_front();
         }
+        self.update_loss_percent();
+        ordinal
     }
 
-    /// Get all alternate paths sorted by frequency
-    pub fn get_alternate_paths(&self) -> Vec<&AlternatePath> {
-        let mut paths: Vec<_> = self.alternate_paths.values().collect();
-        paths.sort_by_key(|path| std::cmp::Reverse(path.frequency));
-        paths
-    }
-
-    /// Check if this hop has multiple paths
-    pub fn has_multiple_paths(&self) -> bool {
-        !self.alternate_paths.is_empty()
-    }
-
-    /// Get total frequency across all paths
-    pub fn get_total_frequency(&self) -> usize {
-        let primary_freq = self
-            .path_frequency
-            .get(&self.addr.unwrap_or(IpAddr::from([0, 0, 0, 0])))
-            .unwrap_or(&0);
-        let alt_freq: usize = self.alternate_paths.values().map(|p| p.frequency).sum();
-        primary_freq + alt_freq
-    }
-
-    /// Calculate percentage for an alternate path
-    pub fn get_path_percentage(&self, path: &AlternatePath) -> f64 {
-        let total = self.get_total_frequency();
-        if total > 0 {
-            (path.frequency as f64 / total as f64) * 100.0
-        } else {
-            0.0
+    /// Record a reply. `ordinal` identifies the probe (from `increment_sent`); without
+    /// one the most recent pending probe is assumed, which suits lockstep callers.
+    /// Replies to unknown, already answered or timed-out probes are ignored.
+    pub fn record_reply(&mut self, ordinal: Option<u64>, addr: Option<IpAddr>, rtt: Duration) {
+        let slot = match ordinal {
+            Some(ordinal) => match self.pending_slot(ordinal) {
+                Some(slot) => Some(slot),
+                None => return,
+            },
+            None => self
+                .packet_history
+                .iter()
+                .rposition(|o| matches!(o, PacketOutcome::Pending)),
+        };
+        if let Some(slot) = slot {
+            self.packet_history[slot] = PacketOutcome::Received(rtt);
         }
-    }
 
-    /// Calculate percentage for the primary path
-    pub fn get_primary_path_percentage(&self) -> f64 {
-        let total = self.get_total_frequency();
-        if total > 0 {
-            let primary_freq = self
-                .path_frequency
-                .get(&self.addr.unwrap_or(IpAddr::from([0, 0, 0, 0])))
-                .unwrap_or(&0);
-            (*primary_freq as f64 / total as f64) * 100.0
-        } else {
-            100.0 // If no frequency data, assume 100%
-        }
-    }
-
-    /// Set hostname for a specific address
-    pub fn set_hostname_for_addr(&mut self, addr: IpAddr, hostname: String) {
-        if Some(addr) == self.addr {
-            self.hostname = Some(hostname);
-        } else if let Some(alt_path) = self.alternate_paths.get_mut(&addr) {
-            alt_path.hostname = Some(hostname);
-        }
-    }
-
-    pub fn add_rtt(&mut self, rtt: Duration) {
         self.received += 1;
-
-        // Initialize timing stats if not already done
-        if self.timing_stats.is_none() {
-            self.timing_stats = Some(utils::time::TimingStats::new());
+        if let Some(addr) = addr {
+            self.responders
+                .entry(addr)
+                .or_insert_with(|| ResponderStats::new(addr))
+                .record(rtt);
+            self.update_primary(addr);
         }
+        self.update_rtt_stats(rtt);
+        self.update_loss_percent();
+    }
 
-        // Update real-time timing statistics
-        if let Some(ref mut stats) = self.timing_stats {
-            stats.update(rtt);
+    /// Record a probe that got no answer in time. Without an ordinal the oldest
+    /// pending probe is assumed.
+    pub fn record_timeout(&mut self, ordinal: Option<u64>) {
+        let slot = match ordinal {
+            Some(ordinal) => self.pending_slot(ordinal),
+            None => self
+                .packet_history
+                .iter()
+                .position(|o| matches!(o, PacketOutcome::Pending)),
+        };
+        if let Some(slot) = slot {
+            self.packet_history[slot] = PacketOutcome::Lost;
         }
+        self.update_loss_percent();
+    }
 
-        // Store high-precision nanosecond values
-        let rtt_ns = rtt.as_nanos();
-        self.precise_rtts_ns.push_back(rtt_ns);
-        if self.precise_rtts_ns.len() > 100 {
-            self.precise_rtts_ns.pop_front();
+    /// Reply for the most recent probe, no address (simulation and tests).
+    pub fn add_rtt(&mut self, rtt: Duration) {
+        self.record_reply(None, None, rtt);
+    }
+
+    /// Reply from `addr` for the most recent probe.
+    pub fn add_rtt_from_addr(&mut self, addr: IpAddr, rtt: Duration) {
+        self.record_reply(None, Some(addr), rtt);
+    }
+
+    /// Timeout for the oldest pending probe.
+    pub fn add_timeout(&mut self) {
+        self.record_timeout(None);
+    }
+
+    /// History index of a still-pending probe, if it is within the window.
+    fn pending_slot(&self, ordinal: u64) -> Option<usize> {
+        let first = (self.sent - self.packet_history.len()) as u64;
+        let slot = usize::try_from(ordinal.checked_sub(first)?).ok()?;
+        matches!(self.packet_history.get(slot)?, PacketOutcome::Pending).then_some(slot)
+    }
+
+    fn update_primary(&mut self, addr: IpAddr) {
+        let replies = |a: &IpAddr| self.responders.get(a).map_or(0, |r| r.replies);
+        let switch = match self.addr {
+            None => true,
+            Some(primary) => primary != addr && replies(&addr) > replies(&primary),
+        };
+        if switch {
+            self.addr = Some(addr);
+            self.hostname = self.responders[&addr].hostname.clone();
         }
+    }
 
-        // Calculate jitter BEFORE updating last_rtt (need previous value)
-        // Jitter = |current_rtt - previous_rtt|
+    fn update_rtt_stats(&mut self, rtt: Duration) {
         if let Some(prev_rtt) = self.last_rtt {
             let jitter = utils::time::calculate_timing_jitter(rtt, prev_rtt);
-
-            // Detect timing anomalies using real-time analysis
-            if utils::time::detect_timing_anomaly(rtt, prev_rtt, self.jitter_threshold) {
-                self.timing_anomalies += 1;
-                tracing::debug!(
-                    "Timing anomaly detected: hop={}, current={:.1}ms, previous={:.1}ms, factor={:.2}",
-                    self.hop,
-                    utils::time::duration_to_ms_f64(rtt),
-                    utils::time::duration_to_ms_f64(prev_rtt),
-                    utils::time::duration_to_ms_f64(rtt) / utils::time::duration_to_ms_f64(prev_rtt)
-                );
-            }
-
             self.last_jitter = Some(jitter);
-            self.jitters.push_back(jitter);
-
-            // Maintain capacity limit for jitter values
-            if self.jitters.len() > 100 {
-                self.jitters.pop_front();
-            }
-
-            // Calculate mean jitter using high-precision moving average
-            if let Some(avg_jitter) = utils::time::calculate_timing_moving_average(
-                &self.jitters.iter().cloned().collect::<Vec<_>>(),
-                self.jitters.len(),
-            ) {
-                self.jitter_avg = Some(avg_jitter);
-            }
-
-            tracing::debug!(
-                "Jitter: hop={}, current_jitter={:.1}ms, avg_jitter={:.1}ms, precise_rtt={}ns",
-                self.hop,
-                utils::time::duration_to_ms_f64(jitter),
-                utils::time::duration_to_ms_f64(self.jitter_avg.unwrap_or_default()),
-                rtt_ns
-            );
+            self.jitter_sum_ns += jitter.as_nanos();
+            self.jitter_count += 1;
+            self.jitter_avg = mean_duration(self.jitter_sum_ns, self.jitter_count);
         }
 
         self.last_rtt = Some(rtt);
-        self.rtts.push_back(rtt);
+        self.best_rtt = Some(self.best_rtt.map_or(rtt, |best| best.min(rtt)));
+        self.worst_rtt = Some(self.worst_rtt.map_or(rtt, |worst| worst.max(rtt)));
 
-        // Find the last pending packet and mark it as received
-        for outcome in self.packet_history.iter_mut().rev() {
-            if matches!(outcome, PacketOutcome::Pending) {
-                *outcome = PacketOutcome::Received(rtt);
-                break;
-            }
-        }
+        // received counts this reply already
+        self.rtt_sum_ns += rtt.as_nanos();
+        self.avg_rtt = mean_duration(self.rtt_sum_ns, self.received);
+        let x = rtt.as_nanos() as f64;
+        let delta = x - self.rtt_mean_ns;
+        self.rtt_mean_ns += delta / self.received as f64;
+        self.rtt_m2 += delta * (x - self.rtt_mean_ns);
 
-        if self.rtts.len() > 100 {
-            self.rtts.pop_front();
-        }
-
-        tracing::debug!(
-            "add_rtt: hop={}, received={}, rtt={:.1}ms",
-            self.hop,
-            self.received,
-            utils::time::duration_to_ms_f64(rtt)
-        );
-
-        // Update statistics
-        if self.best_rtt.is_none() || rtt < self.best_rtt.unwrap() {
-            self.best_rtt = Some(rtt);
-        }
-        if self.worst_rtt.is_none() || rtt > self.worst_rtt.unwrap() {
-            self.worst_rtt = Some(rtt);
-        }
-
-        // Calculate arithmetic average
-        let sum: Duration = self.rtts.iter().sum();
-        self.avg_rtt = Some(sum / self.rtts.len() as u32);
-
-        // Calculate exponential moving average using high-precision timing
         self.ema_rtt = Some(utils::time::calculate_timing_ema(
             rtt,
             self.ema_rtt,
             self.ema_alpha,
         ));
 
-        self.update_loss_percent();
+        self.rtts.push_back(rtt);
+        if self.rtts.len() > HISTORY_LEN {
+            self.rtts.pop_front();
+        }
     }
 
-    pub fn add_timeout(&mut self) {
-        // Find the oldest pending packet and mark it as lost
-        for outcome in self.packet_history.iter_mut() {
-            if matches!(outcome, PacketOutcome::Pending) {
-                *outcome = PacketOutcome::Lost;
-                break;
-            }
+    /// Sample standard deviation of all RTTs in milliseconds (as mtr reports it).
+    pub fn stddev_ms(&self) -> f64 {
+        if self.received < 2 {
+            return 0.0;
         }
+        (self.rtt_m2 / (self.received - 1) as f64).sqrt() / 1e6
+    }
 
-        tracing::debug!(
-            "add_timeout: hop={}, packet_history.len()={}",
-            self.hop,
-            self.packet_history.len()
-        );
-
-        self.update_loss_percent();
+    /// Probes sent but neither answered nor timed out yet.
+    pub fn in_flight(&self) -> usize {
+        self.packet_history
+            .iter()
+            .filter(|o| matches!(o, PacketOutcome::Pending))
+            .count()
     }
 
     pub fn update_loss_percent(&mut self) {
-        if self.sent > 0 {
-            // Ensure received can't exceed sent to prevent overflow
-            let actual_received = utils::math::min_with_safety(self.received, self.sent);
-            self.loss_percent = ((self.sent - actual_received) as f64 / self.sent as f64) * 100.0;
+        let settled = self.sent.saturating_sub(self.in_flight());
+        self.loss_percent = if settled > 0 {
+            settled.saturating_sub(self.received) as f64 / settled as f64 * 100.0
+        } else {
+            0.0
+        };
+    }
+
+    /// Addresses other than the primary, most frequent first
+    pub fn get_alternate_paths(&self) -> Vec<&ResponderStats> {
+        let mut paths: Vec<_> = self
+            .responders
+            .values()
+            .filter(|r| Some(r.addr) != self.addr)
+            .collect();
+        paths.sort_by_key(|path| std::cmp::Reverse(path.replies));
+        paths
+    }
+
+    /// Check if this hop has multiple paths
+    pub fn has_multiple_paths(&self) -> bool {
+        self.responders.len() > 1
+    }
+
+    /// Replies across all responders
+    pub fn get_total_frequency(&self) -> usize {
+        self.responders.values().map(|r| r.replies).sum()
+    }
+
+    /// Share of replies that came from `path`
+    pub fn get_path_percentage(&self, path: &ResponderStats) -> f64 {
+        let total = self.get_total_frequency();
+        if total > 0 {
+            (path.replies as f64 / total as f64) * 100.0
+        } else {
+            0.0
         }
     }
 
-    pub fn increment_sent(&mut self) {
-        self.sent += 1;
-
-        // Add pending packet to chronological history when sent
-        self.packet_history.push_back(PacketOutcome::Pending);
-
-        if self.packet_history.len() > 100 {
-            self.packet_history.pop_front();
+    /// Share of replies that came from the primary responder
+    pub fn get_primary_path_percentage(&self) -> f64 {
+        match self.addr.and_then(|addr| self.responders.get(&addr)) {
+            Some(primary) => self.get_path_percentage(primary),
+            None => 100.0, // If no frequency data, assume 100%
         }
+    }
 
-        tracing::debug!(
-            "increment_sent: hop={}, sent={}, packet_history.len()={}",
-            self.hop,
-            self.sent,
-            self.packet_history.len()
-        );
-
-        self.update_loss_percent();
+    /// Set hostname for a specific address
+    pub fn set_hostname_for_addr(&mut self, addr: IpAddr, hostname: String) {
+        if Some(addr) == self.addr {
+            self.hostname = Some(hostname.clone());
+        }
+        if let Some(responder) = self.responders.get_mut(&addr) {
+            responder.hostname = Some(hostname);
+        }
     }
 
     /// Set the exponential smoothing factor (alpha)
@@ -546,7 +512,8 @@ mod tests {
 
         hop.increment_sent();
         assert_eq!(hop.sent, 1);
-        assert_eq!(hop.loss_percent, 100.0); // 1 sent, 0 received = 100% loss
+        assert_eq!(hop.loss_percent, 0.0); // still in flight, so not lost (as in mtr)
+        assert_eq!(hop.in_flight(), 1);
 
         hop.add_rtt(Duration::from_millis(100)); // This also calls increment_sent internally
         assert_eq!(hop.sent, 1); // Should still be 1 since add_rtt doesn't increment sent
@@ -663,14 +630,12 @@ mod tests {
         hop.add_rtt(Duration::from_millis(120));
         assert_eq!(hop.last_jitter, Some(Duration::from_millis(20))); // |120 - 100| = 20
         assert_eq!(hop.jitter_avg, Some(Duration::from_millis(20))); // Only one jitter value
-        assert_eq!(hop.jitters.len(), 1);
 
         // Third RTT - jitter decreases
         hop.add_rtt(Duration::from_millis(110));
         assert_eq!(hop.last_jitter, Some(Duration::from_millis(10))); // |110 - 120| = 10
         let expected_avg = (20 + 10) / 2; // Average of 20ms and 10ms = 15ms
         assert_eq!(hop.jitter_avg, Some(Duration::from_millis(expected_avg)));
-        assert_eq!(hop.jitters.len(), 2);
 
         // Fourth RTT - larger jitter spike
         hop.add_rtt(Duration::from_millis(150));
@@ -678,6 +643,105 @@ mod tests {
                                                                       // Average of jitter values: (20 + 10 + 40) / 3 = 23.333... ms
         let expected_avg_ms = utils::time::duration_to_ms_u64(hop.jitter_avg.unwrap());
         assert_eq!(expected_avg_ms, 23); // Rounded to nearest ms
-        assert_eq!(hop.jitters.len(), 3);
+    }
+
+    fn addr(last: u8) -> IpAddr {
+        IpAddr::from([10, 0, 0, last])
+    }
+
+    #[test]
+    fn replies_land_in_their_own_slot() {
+        let mut hop = HopStats::new(1);
+        let first = hop.increment_sent();
+        let second = hop.increment_sent();
+        // Reply to the older probe arrives while the newer one is in flight
+        hop.record_reply(Some(first), Some(addr(1)), Duration::from_millis(10));
+        assert!(matches!(hop.packet_history[0], PacketOutcome::Received(_)));
+        assert!(matches!(hop.packet_history[1], PacketOutcome::Pending));
+        assert_eq!(hop.loss_percent, 0.0);
+
+        hop.record_timeout(Some(second));
+        assert!(matches!(hop.packet_history[1], PacketOutcome::Lost));
+        assert_eq!(hop.loss_percent, 50.0);
+
+        // A late reply after the timeout and a duplicate are both ignored
+        hop.record_reply(Some(second), Some(addr(1)), Duration::from_millis(900));
+        hop.record_reply(Some(first), Some(addr(1)), Duration::from_millis(10));
+        assert_eq!(hop.received, 1);
+        assert_eq!(hop.worst_rtt, Some(Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn stale_ordinal_after_reset_is_ignored() {
+        let mut hop = HopStats::new(1);
+        hop.record_reply(Some(57), Some(addr(1)), Duration::from_millis(10));
+        assert_eq!(hop.received, 0);
+        assert!(hop.addr.is_none());
+    }
+
+    #[test]
+    fn averages_cover_all_replies_not_just_the_window() {
+        let mut hop = HopStats::new(1);
+        for _ in 0..50 {
+            hop.increment_sent();
+            hop.add_rtt(Duration::from_millis(1000));
+        }
+        for _ in 0..100 {
+            hop.increment_sent();
+            hop.add_rtt(Duration::from_millis(10));
+        }
+        assert_eq!(hop.rtts.len(), 100, "graph window stays bounded");
+        assert_eq!(hop.avg_rtt, Some(Duration::from_millis(340))); // (50*1000 + 100*10) / 150
+        let expected_sd = {
+            let mean = 340.0;
+            let ss = 50.0 * (1000.0f64 - mean).powi(2) + 100.0 * (10.0f64 - mean).powi(2);
+            (ss / 149.0).sqrt()
+        };
+        assert!(
+            (hop.stddev_ms() - expected_sd).abs() < 1e-6,
+            "{}",
+            hop.stddev_ms()
+        );
+    }
+
+    #[test]
+    fn even_split_between_two_responders_is_50_50() {
+        let mut hop = HopStats::new(3);
+        for i in 0..6 {
+            hop.increment_sent();
+            hop.add_rtt_from_addr(
+                addr(if i % 2 == 0 { 1 } else { 2 }),
+                Duration::from_millis(10),
+            );
+        }
+        let alternates = hop.get_alternate_paths();
+        assert_eq!(alternates.len(), 1);
+        assert_eq!(hop.get_primary_path_percentage(), 50.0);
+        assert_eq!(hop.get_path_percentage(alternates[0]), 50.0);
+        assert_eq!(
+            hop.packet_history
+                .iter()
+                .filter(|o| matches!(o, PacketOutcome::Received(_)))
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn primary_switch_keeps_old_primary_as_alternate() {
+        let mut hop = HopStats::new(3);
+        hop.add_rtt_from_addr(addr(1), Duration::from_millis(10));
+        hop.set_hostname_for_addr(addr(1), "router-a.example".into());
+        hop.add_rtt_from_addr(addr(2), Duration::from_millis(20));
+        hop.add_rtt_from_addr(addr(2), Duration::from_millis(20));
+
+        assert_eq!(hop.addr, Some(addr(2)));
+        assert_eq!(hop.hostname, None, "B must not show A's name");
+        let alternates = hop.get_alternate_paths();
+        assert_eq!(alternates.len(), 1);
+        assert_eq!(alternates[0].addr, addr(1));
+        assert_eq!(alternates[0].hostname.as_deref(), Some("router-a.example"));
+        let primary = hop.get_primary_path_percentage();
+        assert!((primary - 200.0 / 3.0).abs() < 1e-9, "{primary}");
     }
 }
