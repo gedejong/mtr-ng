@@ -1,0 +1,52 @@
+# Pushes the Homebrew formula that dist generates to edejong-dbc/homebrew-tap,
+# with one addition: the man page goes to man1 (dist's formula leaves it in
+# pkgshare, off the MANPATH). Replaces dist's built-in "homebrew" publish job
+# and uses the COMMITTER_TOKEN secret, a token with write access to the tap.
+# release.yml calls this (publish-jobs in dist-workspace.toml).
+name: Publish to Homebrew
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  formula:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: edejong-dbc/homebrew-tap
+          token: ${{ secrets.COMMITTER_TOKEN }}
+          path: tap
+      - name: Fetch the generated formula
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: dist/
+          merge-multiple: true
+      - name: Add the man page
+        run: |
+          awk '/^    install_binary_aliases!$/ { print "    man1.install \"mtr-ng.1\"" } { print }' \
+            dist/mtr-ng.rb > tap/Formula/mtr-ng.rb
+          if ! grep -q '^    man1.install "mtr-ng.1"$' tap/Formula/mtr-ng.rb; then
+            echo "::error::dist's formula template changed; the man page line was not added"
+            exit 1
+          fi
+          ruby -c tap/Formula/mtr-ng.rb
+      - name: Commit and push
+        working-directory: tap
+        run: |
+          version=$(sed -n 's/^  version "\(.*\)"$/\1/p' Formula/mtr-ng.rb)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/mtr-ng.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged"
+            exit 0
+          fi
+          git commit -m "mtr-ng $version" \
+            -m "Created by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          git push

@@ -21,9 +21,17 @@ hosting = "github"
 install-updater = false
 # Extra files in every archive
 include = ["install/mtr-ng.1"]
-# The formula is pushed here with the HOMEBREW_TAP_TOKEN secret
+# Where the formula goes, also named in the release notes
 tap = "edejong-dbc/homebrew-tap"
-# publish-crates.yml uses the CARGO_REGISTRY_TOKEN secret
-publish-jobs = ["homebrew", "./publish-crates"]
+# publish-homebrew.yml (instead of dist's built-in "homebrew" job) adds the man
+# page and uses the COMMITTER_TOKEN secret; publish-crates.yml uses
+# CARGO_REGISTRY_TOKEN.
+publish-jobs = ["./publish-homebrew", "./publish-crates"]
 # build-deb.yml adds Debian packages to the release
 global-artifacts-jobs = ["./build-deb"]
+
+# Custom publish jobs otherwise get only id-token and packages; publish-crates
+# checks out this repo. publish-homebrew pushes with its own token.
+[dist.github-custom-job-permissions]
+"publish-crates" = { contents = "read" }
+"publish-homebrew" = { contents = "read" }

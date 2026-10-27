@@ -25,7 +25,7 @@ Rust reimplementation of `mtr` (traceroute + ping) with a ratatui TUI and a `--r
 - Never fall back to simulated data. If probing is impossible, return an error; simulation only with `--simulate`.
 - Logging: report mode writes warnings to stderr; interactive mode logs only with `--log-file PATH`. `RUST_LOG` sets the level.
 - `scripts/bump-version.sh X.Y.Z` bumps, commits, tags and (after a prompt) pushes, which publishes a release. Only run it when the user asks.
-- Releases are built by dist from `dist-workspace.toml`. `release.yml` is generated: edit the config and run `dist generate`, never the workflow. `build-deb.yml` and `publish-crates.yml` are hand-written jobs it calls.
+- Releases are built by dist from `dist-workspace.toml`. `release.yml` is generated: edit the config and run `dist generate`, never the workflow. `build-deb.yml`, `publish-homebrew.yml` and `publish-crates.yml` are hand-written jobs it calls.
 - `DEVELOPMENT.md`, `TESTING.md` hold older long-form notes; the code wins where they disagree.
 - MSRV is 1.89 (`rust-version`), set by hickory-resolver's dependencies; CI checks it.
 - Open work and known bugs: `BACKLOG.md`.
