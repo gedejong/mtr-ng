@@ -17,23 +17,22 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Scalable Display**: Auto-scaling sparklines with manual override options
 
 ### Column Selection System
-- **Flexible Fields**: Choose from 12 available metrics
-  - `hop`, `host`, `loss`, `sent`, `last`, `avg`, `ema`
-  - `jitter`, `jitter-avg`, `best`, `worst`, `graph`
+- **Flexible Fields**: Choose from 14 columns
+  - `hop`, `host`, `asn`, `loss`, `sent`, `last`, `avg`, `ema`
+  - `jitter`, `jitter-avg`, `best`, `worst`, `stdev`, `graph`
 - **Quick Presets**: `--show-all` for complete metrics, custom combinations via `--fields`
-- **Interactive Toggle**: Press `f` key in interactive mode to cycle columns
+- **Interactive Chooser**: `o` opens a column chooser to show, hide and reorder columns
 - **Report Mode**: Same column selection works for both interactive and report output
 
 ### Interface Modes
 - **Interactive UI**: Real-time terminal interface with keyboard controls
 - **Report Mode**: Clean output for automation and scripting
-- **Colorblind Friendly**: Accessible color schemes for all users
+- **Colour Depth**: Detected from `COLORTERM`/`TERM` (none, 16, 256 or true colour); `c` cycles through them
 
 ### Performance & Compatibility
 - **Efficient Async**: Built with Tokio for high-performance networking
-- **Platforms**: macOS (no sudo needed) and Linux (root or `CAP_NET_RAW`); Windows and FreeBSD are not supported yet
-- **IPv4 Support**: Robust IP address handling and DNS resolution
-- **Terminal Detection**: Automatic capability detection and graceful fallbacks
+- **Platforms**: macOS (no sudo needed) and Linux (root or `CAP_NET_RAW`). Windows builds but can't probe yet; FreeBSD is only type-checked.
+- **IPv4 only**: IPv6 targets and `-P udp`/`-P tcp` exit with an error for now. Reverse DNS for hop names (`-n` turns it off).
 
 ## Installation
 
@@ -60,8 +59,15 @@ sudo cp install/mtr-ng.1 /usr/local/share/man/man1/
 ```
 
 ### Privileges
-- **macOS**: runs as a normal user (unprivileged ICMP sockets).
-- **Linux**: needs raw sockets. Run with `sudo`, or grant the capability once with `sudo setcap cap_net_raw+ep $(which mtr-ng)`.
+- **macOS**: runs as a normal user (unprivileged ICMP sockets). No sudo.
+- **Linux**: needs raw sockets, so root or `CAP_NET_RAW`. Either run it with `sudo`, or grant the capability to the installed binary once:
+  ```bash
+  sudo setcap cap_net_raw+ep "$(readlink -f "$(which mtr-ng)")"
+  # or, with checks and a test run:
+  scripts/setup-capabilities.sh
+  ```
+  The capability is narrower than sudo (raw sockets only, not full root). Reinstalling replaces the file and drops it, so set it again afterwards.
+- **Windows**: compiles, but probing doesn't work yet.
 
 mtr-ng never falls back to fake data: if it can't probe, it exits with an error. Use `--simulate` for a demo without network access.
 
@@ -87,21 +93,31 @@ mtr-ng google.com --fields hop,host,jitter,jitter-avg,graph
 # Real-time monitoring with keyboard controls
 mtr-ng google.com
 
-# Controls:
-# q/Esc - Quit
-# r     - Reset statistics  
-# s     - Toggle sparkline scale
-# c     - Cycle color modes
-# f     - Toggle column visibility
+# Keys (press ? for the full list, or see `man mtr-ng`):
+# q / Ctrl-C  Quit
+# o           Choose and order columns
+# r           Reset statistics
+# h           Host names or IP addresses
+# s, v, c     RTT scale, sparkline/heatmap, colour mode
+# ↑ ↓ PgUp PgDn Home End  Select and scroll hops
 ```
+
+Colours follow `NO_COLOR` and `TERM=dumb`.
 
 ### Report Mode
 ```bash
 # Generate report output
 mtr-ng google.com --report
 
-# Automation-friendly format
-mtr-ng google.com --report --fields hop,host,loss,avg > network_report.txt
+# Fewer columns
+mtr-ng google.com --report --fields hop,host,loss,avg
+
+# Machine-readable: JSON with mtr's field names, or CSV
+mtr-ng google.com --json
+mtr-ng google.com --csv > trace.csv
+
+# AS numbers via Team Cymru's DNS (public addresses only)
+mtr-ng -z google.com
 ```
 
 ## Advanced Features
@@ -126,7 +142,7 @@ mtr-ng google.com --simulate --count 3 --report
 ### Sparkline Visualization
 MTR-NG provides beautiful Unicode sparklines showing RTT history:
 - `▁▂▃▄▅▆▇█` - Visual representation of network performance
-- Color coding: Green (fast) → Yellow (moderate) → Red (slow)
+- Bar height and colour place each reply on one RTT scale shared by all hops (shown under the table); `·` is a lost probe, `?` one still in flight
 - Real-time updates as packets are sent/received
 
 ### Jitter Analysis  
@@ -143,6 +159,7 @@ Monitor network stability with comprehensive jitter metrics:
 |-------------|--------------------------------|----------|
 | `hop`       | Hop number                     | `1`      |
 | `host`      | Hostname/IP address            | `gateway.local` |
+| `asn`       | Origin AS (with `-z`)          | `AS13335` |
 | `loss`      | Packet loss percentage         | `2.0%`   |
 | `sent`      | Packets sent                   | `10`     |
 | `last`      | Most recent RTT               | `15.2ms` |
@@ -152,6 +169,7 @@ Monitor network stability with comprehensive jitter metrics:
 | `jitter-avg`| Average jitter                | `1.8ms`  |
 | `best`      | Minimum RTT observed          | `12.1ms` |
 | `worst`     | Maximum RTT observed          | `45.2ms` |
+| `stdev`     | RTT standard deviation        | `3.1ms`  |
 | `graph`     | RTT sparkline visualization   | `▁▂▄▇▆▃▁` |
 
 ## Development Status
@@ -177,17 +195,20 @@ cargo test
 
 # Use automated testing tools
 ./scripts/test-dev.sh test-all     # Shell script
-just ci                           # Or with 'just' task runner
+just ci                            # The CI gate: fmt, clippy, tests
+
+# Real probes over loopback (macOS: no sudo; Linux: sudo)
+cargo build && ./target/debug/mtr-ng -r -c 2 -n 127.0.0.1
 ```
 
-**Testing Documentation**: See [TESTING.md](TESTING.md) for comprehensive testing guide.
+**Testing Documentation**: See [TESTING.md](TESTING.md) for comprehensive testing guide, and [DEVELOPMENT.md](DEVELOPMENT.md) for how probing works and how CI is set up.
 
 ### Development Tools
 The project includes several convenience tools:
-- `justfile` - Modern task runner with development commands
-- `scripts/test-dev.sh` - Shell script for common testing tasks  
-- Simulation mode - Test all functionality without network access
-- Comprehensive unit test suite covering all components
+- `justfile` - Task runner with development commands (`just --list`)
+- `scripts/test-dev.sh` - Shell script for common testing tasks
+- Simulation mode - Exercise the UI and statistics without network access
+- Unit tests: `cargo test`
 
 ## Contributing
 
@@ -201,42 +222,4 @@ Contributions welcome! Areas of interest:
 
 ## License
 
-MIT License - see LICENSE file for details. 
-
-# edejong-dbc/homebrew-tap
-
-This is a Homebrew tap for [mtr-ng](https://github.com/edejong-dbc/mtr-ng), a modern implementation of My Traceroute with real-time network path visualization.
-
-## Installation
-
-```bash
-# Add the tap
-brew tap edejong-dbc/tap
-
-# Install mtr-ng
-brew install mtr-ng
-```
-
-## Usage
-
-```bash
-# Basic usage (requires sudo for raw socket access)
-sudo mtr-ng google.com
-
-# Show all metrics with sparklines
-sudo mtr-ng google.com --show-all
-
-# Generate a report
-mtr-ng google.com --report --count 10
-```
-
-## About mtr-ng
-
-MTR-NG is a modern, feature-rich implementation of My Traceroute (MTR) that provides:
-
-- Real-time network path visualization with Unicode sparklines
-- Comprehensive RTT statistics and jitter analysis
-- Customizable column display and interactive controls
-- Cross-platform support with colorblind-friendly design
-
-For more information, visit the [main repository](https://github.com/edejong-dbc/mtr-ng). 
+MIT License - see LICENSE file for details.

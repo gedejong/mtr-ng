@@ -1,363 +1,269 @@
-//! Visualization utilities for RTT data
-//!
-//! This module provides sparkline generation, color management, and RTT calculation
-//! utilities for the terminal user interface.
+//! RTT colours, the history cells (sparkline or heatmap), and the RTT scale they share.
 
-use crate::utils;
+use crate::hop_stats::PacketOutcome;
 use crate::{HopStats, SparklineScale};
-use ratatui::{style::Style, text::Span};
+use ratatui::{
+    style::{Color, Style},
+    text::Span,
+};
+use std::time::Duration;
 
-// ========================================
-// Public Types
-// ========================================
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ColorSupport {
-    None,      // No color support
+    None,      // monochrome: NO_COLOR, TERM=dumb
     Basic,     // 16 colors
     Extended,  // 256 colors
     TrueColor, // 24-bit RGB
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VisualizationMode {
-    Sparkline, // Variable height characters (▁▂▃▄▅▆▇█)
-    Heatmap,   // Full height blocks (█) with colors only
+    Sparkline, // bar height and colour
+    Heatmap,   // colour only
 }
 
-// ========================================
-// Color Management
-// ========================================
+/// Keeps the log scale finite and spread out for sub-millisecond RTTs.
+const LOG_OFFSET_MS: f64 = 0.1;
 
-/// Color scheme functions for RTT visualization
-pub mod colors {
-    use super::ColorSupport;
-    use crate::utils;
-    use ratatui::style::Color;
+/// Maps an RTT onto 0..=1 for bar height and colour. The axis labels use the same
+/// mapping, so a bar and its label always agree.
+#[derive(Debug, Clone, Copy)]
+pub struct RttScale {
+    min_ms: f64,
+    max_ms: f64,
+    kind: SparklineScale,
+}
 
-    pub fn get_rtt_color(ratio: f64, color_support: ColorSupport) -> (char, Color) {
-        let level = (utils::math::clamp_ratio(ratio) * 8.0).round() as usize;
-        let chars = ['▁', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-        let char = chars[utils::math::safe_array_index(level as f64, chars.len())];
-
-        let color = match color_support {
-            ColorSupport::None => Color::White,
-            ColorSupport::Basic => {
-                // Use standard 16-color ANSI palette based on level
-                let colors = [
-                    Color::Green,   // Level 0 - Very low RTT
-                    Color::Green,   // Level 1 - Low RTT
-                    Color::Cyan,    // Level 2 - Low-medium RTT
-                    Color::Blue,    // Level 3 - Medium-low RTT
-                    Color::Yellow,  // Level 4 - Medium RTT
-                    Color::Yellow,  // Level 5 - Medium-high RTT
-                    Color::Magenta, // Level 6 - High RTT
-                    Color::Red,     // Level 7 - Very high RTT
-                    Color::Red,     // Level 8 - Maximum RTT
-                ];
-                colors[utils::math::safe_array_index(level as f64, colors.len())]
-            }
-            ColorSupport::Extended => {
-                // Use a broader range of 256-color palette: blue → cyan → green → yellow → orange → red
-                let colors = [
-                    17,  // Dark blue (low RTT)
-                    21,  // Medium blue
-                    33,  // Bright blue
-                    39,  // Cyan-blue
-                    51,  // Cyan
-                    87,  // Light cyan
-                    118, // Green-cyan
-                    154, // Green
-                    190, // Light green
-                    226, // Yellow-green
-                    220, // Yellow
-                    214, // Light yellow
-                    208, // Orange-yellow
-                    202, // Orange
-                    196, // Red-orange
-                    160, // Red
-                    124, // Dark red
-                    88,  // Very dark red (high RTT)
-                ];
-                let index = utils::math::safe_array_index(level as f64, colors.len());
-                Color::Indexed(colors[index])
-            }
-            ColorSupport::TrueColor => {
-                let colors = [
-                    (0, 50, 150),
-                    (0, 100, 200),
-                    (50, 150, 255),
-                    (100, 200, 255),
-                    (150, 220, 255),
-                    (255, 200, 100),
-                    (255, 150, 50),
-                    (220, 120, 0),
-                    (150, 80, 0),
-                ];
-                let (r, g, b) = colors[utils::math::safe_array_index(level as f64, colors.len())];
-                Color::Rgb(r, g, b)
-            }
-        };
-
-        (char, color)
+impl RttScale {
+    /// Spans every reply in the hops' histories; `None` before the first reply.
+    pub fn from_hops<'a>(
+        hops: impl IntoIterator<Item = &'a HopStats>,
+        kind: SparklineScale,
+    ) -> Option<Self> {
+        let (mut min_ms, mut max_ms) = (f64::INFINITY, f64::NEG_INFINITY);
+        for rtt in hops.into_iter().flat_map(|hop| hop.rtts.iter()) {
+            let ms = rtt.as_secs_f64() * 1000.0;
+            min_ms = min_ms.min(ms);
+            max_ms = max_ms.max(ms);
+        }
+        (min_ms <= max_ms).then_some(Self {
+            min_ms,
+            max_ms,
+            kind,
+        })
     }
 
-    pub fn get_smooth_gradient_color(ratio: f64, color_support: ColorSupport) -> Color {
-        let ratio = utils::math::clamp_ratio(ratio);
-
-        match color_support {
-            ColorSupport::None => Color::White,
-            ColorSupport::Basic => {
-                // Use only standard 16-color ANSI palette
-
-                if ratio < 0.17 {
-                    Color::Green // Low RTT (fast)
-                } else if ratio < 0.33 {
-                    Color::Cyan // Low-medium RTT
-                } else if ratio < 0.50 {
-                    Color::Blue // Medium RTT
-                } else if ratio < 0.67 {
-                    Color::Yellow // Medium-high RTT
-                } else if ratio < 0.83 {
-                    Color::Magenta // High RTT
-                } else {
-                    Color::Red // Maximum RTT (slow)
-                }
-            }
-            ColorSupport::Extended => {
-                // Full 256-color gradient: blue → cyan → green → yellow → orange → red
-                let color_index = if ratio < 0.1 {
-                    21 // Dark blue
-                } else if ratio < 0.2 {
-                    27 // Medium blue
-                } else if ratio < 0.3 {
-                    33 // Light blue
-                } else if ratio < 0.4 {
-                    39 // Cyan-blue
-                } else if ratio < 0.5 {
-                    51 // Cyan
-                } else if ratio < 0.6 {
-                    46 // Green
-                } else if ratio < 0.7 {
-                    226 // Yellow
-                } else if ratio < 0.8 {
-                    214 // Orange-yellow
-                } else if ratio < 0.9 {
-                    208 // Orange
-                } else {
-                    196 // Red
-                };
-                Color::Indexed(color_index)
-            }
-            ColorSupport::TrueColor => {
-                let (r, g, b) = if ratio < 0.5 {
-                    let t = ratio * 2.0;
-                    interpolate_rgb((0.0, 50.0, 150.0), (150.0, 220.0, 255.0), t)
-                } else {
-                    let t = (ratio - 0.5) * 2.0;
-                    interpolate_rgb((150.0, 220.0, 255.0), (220.0, 120.0, 0.0), t)
-                };
-                Color::Rgb(r.round() as u8, g.round() as u8, b.round() as u8)
-            }
+    fn forward(&self, ms: f64) -> f64 {
+        match self.kind {
+            SparklineScale::Linear => ms,
+            SparklineScale::Logarithmic => (ms + LOG_OFFSET_MS).ln(),
         }
     }
 
-    pub fn get_loss_color(color_support: ColorSupport) -> Color {
-        match color_support {
-            ColorSupport::None => Color::White,
-            ColorSupport::Basic => Color::Red,
-            ColorSupport::Extended => Color::Indexed(196),
-            ColorSupport::TrueColor => Color::Rgb(255, 0, 0),
+    fn inverse(&self, t: f64) -> f64 {
+        match self.kind {
+            SparklineScale::Linear => t,
+            SparklineScale::Logarithmic => t.exp() - LOG_OFFSET_MS,
         }
     }
 
-    pub fn get_pending_color(color_support: ColorSupport) -> Color {
-        match color_support {
-            ColorSupport::None => Color::White,
-            ColorSupport::Basic => Color::Blue,
-            ColorSupport::Extended => Color::Indexed(27),
-            ColorSupport::TrueColor => Color::Rgb(100, 100, 255),
+    /// Where `rtt` sits between the fastest and the slowest reply, from 0 to 1.
+    pub fn ratio(&self, rtt: Duration) -> f64 {
+        let (lo, hi) = (self.forward(self.min_ms), self.forward(self.max_ms));
+        if hi - lo <= f64::EPSILON {
+            return 0.0;
         }
+        let t = self.forward(rtt.as_secs_f64() * 1000.0);
+        ((t - lo) / (hi - lo)).clamp(0.0, 1.0)
     }
 
-    fn interpolate_rgb(
-        start: (f64, f64, f64),
-        end: (f64, f64, f64),
-        ratio: f64,
-    ) -> (f64, f64, f64) {
-        let ratio = utils::math::clamp_ratio(ratio);
-        (
-            start.0 + (end.0 - start.0) * ratio,
-            start.1 + (end.1 - start.1) * ratio,
-            start.2 + (end.2 - start.2) * ratio,
-        )
+    /// The RTT in ms at `ratio` along the axis; the inverse of [`RttScale::ratio`].
+    pub fn at(&self, ratio: f64) -> f64 {
+        let (lo, hi) = (self.forward(self.min_ms), self.forward(self.max_ms));
+        self.inverse(lo + ratio * (hi - lo))
     }
 }
 
-// ========================================
-// RTT Calculation Utilities
-// ========================================
+const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// Calculate ratio for RTT visualization scaling
-pub fn calculate_rtt_ratio(
-    rtt_ms: u64,
-    global_min: u64,
-    global_max: u64,
-    scale: SparklineScale,
-) -> f64 {
-    if global_min == global_max || rtt_ms == 0 {
-        return 0.0;
-    }
-
-    match scale {
-        SparklineScale::Linear => {
-            // Properly normalize based on the actual RTT range (min to max)
-            let normalized =
-                (rtt_ms.saturating_sub(global_min)) as f64 / (global_max - global_min) as f64;
-            normalized.clamp(0.0, 1.0)
-        }
-        SparklineScale::Logarithmic => {
-            utils::math::calculate_log_ratio(rtt_ms as f64, global_min as f64, global_max as f64)
-        }
+/// The cell for a position on the RTT scale: bar height in a sparkline, a full block in a heatmap.
+pub fn symbol(ratio: f64, mode: VisualizationMode) -> char {
+    match mode {
+        VisualizationMode::Sparkline => BARS[(ratio.clamp(0.0, 1.0) * 7.0).round() as usize],
+        VisualizationMode::Heatmap => '█',
     }
 }
 
-// ========================================
-// Sparkline Generation
-// ========================================
-
-/// Generate colored sparkline spans for RTT visualization
-pub fn create_sparkline_spans(
+/// One cell per probe in the hop's history, newest last, at most `width` of them.
+pub fn history_spans(
     hop: &HopStats,
-    global_min_rtt: u64,
-    global_max_rtt: u64,
-    scale: SparklineScale,
-    color_support: ColorSupport,
-    max_width: usize,
+    scale: Option<&RttScale>,
+    mode: VisualizationMode,
+    colors: ColorSupport,
+    width: usize,
 ) -> Vec<Span<'static>> {
-    if hop.sent == 0 || max_width == 0 {
-        return vec![];
-    }
-
-    let packet_outcomes: Vec<_> = hop.packet_history.iter().collect();
-    if packet_outcomes.is_empty() {
-        return vec![Span::raw(" ".repeat(max_width))];
-    }
-
-    let data_to_show = if packet_outcomes.len() > max_width {
-        &packet_outcomes[packet_outcomes.len() - max_width..]
-    } else {
-        &packet_outcomes[..]
-    };
-
-    let mut spans: Vec<Span<'static>> = data_to_show
+    let skip = hop.packet_history.len().saturating_sub(width);
+    hop.packet_history
         .iter()
+        .skip(skip)
         .map(|outcome| match outcome {
-            crate::hop_stats::PacketOutcome::Received(rtt) => {
-                let rtt_ms = utils::time::duration_to_ms_u64(*rtt);
-                let ratio = calculate_rtt_ratio(rtt_ms, global_min_rtt, global_max_rtt, scale);
-                // Get the character based on ratio (keep variable height)
-                let char = utils::visualization::get_sparkline_char(ratio);
-                // Use smooth gradient color like heatmap
-                let color = colors::get_smooth_gradient_color(ratio, color_support);
-                Span::styled(char.to_string(), Style::default().fg(color))
+            PacketOutcome::Received(rtt) => {
+                let ratio = scale.map_or(0.0, |s| s.ratio(*rtt));
+                Span::styled(symbol(ratio, mode).to_string(), fg(gradient(ratio, colors)))
             }
-            crate::hop_stats::PacketOutcome::Lost => {
-                let color = colors::get_loss_color(color_support);
-                Span::styled("·".to_string(), Style::default().fg(color))
-            }
-            crate::hop_stats::PacketOutcome::Pending => {
-                let color = colors::get_pending_color(color_support);
-                Span::styled("?".to_string(), Style::default().fg(color))
-            }
+            PacketOutcome::Lost => Span::styled("·", fg(loss_color(colors))),
+            PacketOutcome::Pending => Span::styled("?", fg(pending_color(colors))),
         })
-        .collect();
-
-    if spans.len() < max_width {
-        spans.push(Span::raw(" ".repeat(max_width - spans.len())));
-    }
-
-    spans
+        .collect()
 }
 
-/// Generate colored heatmap spans for RTT visualization (full-height blocks)
-pub fn create_heatmap_spans(
-    hop: &HopStats,
-    global_min_rtt: u64,
-    global_max_rtt: u64,
-    scale: SparklineScale,
-    color_support: ColorSupport,
-    max_width: usize,
-) -> Vec<Span<'static>> {
-    if hop.sent == 0 || max_width == 0 {
-        return vec![];
-    }
-
-    let packet_outcomes: Vec<_> = hop.packet_history.iter().collect();
-    if packet_outcomes.is_empty() {
-        return vec![Span::raw(" ".repeat(max_width))];
-    }
-
-    let data_to_show = if packet_outcomes.len() > max_width {
-        &packet_outcomes[packet_outcomes.len() - max_width..]
-    } else {
-        &packet_outcomes[..]
-    };
-
-    let mut spans: Vec<Span<'static>> = data_to_show
-        .iter()
-        .map(|outcome| {
-            match outcome {
-                crate::hop_stats::PacketOutcome::Received(rtt) => {
-                    let rtt_ms = utils::time::duration_to_ms_u64(*rtt);
-                    let ratio = calculate_rtt_ratio(rtt_ms, global_min_rtt, global_max_rtt, scale);
-                    // Use full-height block with color based on RTT ratio
-                    let color = colors::get_smooth_gradient_color(ratio, color_support);
-                    Span::styled("█".to_string(), Style::default().fg(color))
-                }
-                crate::hop_stats::PacketOutcome::Lost => {
-                    let color = colors::get_loss_color(color_support);
-                    Span::styled("·".to_string(), Style::default().fg(color))
-                }
-                crate::hop_stats::PacketOutcome::Pending => {
-                    let color = colors::get_pending_color(color_support);
-                    Span::styled("?".to_string(), Style::default().fg(color))
-                }
-            }
-        })
-        .collect();
-
-    if spans.len() < max_width {
-        spans.push(Span::raw(" ".repeat(max_width - spans.len())));
-    }
-
-    spans
+fn fg(color: Color) -> Style {
+    Style::default().fg(color)
 }
 
-// ========================================
-// Terminal Capability Detection
-// ========================================
+/// Colour for a position on the RTT scale: blue (fast) through light blue to orange (slow).
+pub fn gradient(ratio: f64, colors: ColorSupport) -> Color {
+    let ratio = ratio.clamp(0.0, 1.0);
+    match colors {
+        ColorSupport::None => Color::Reset,
+        ColorSupport::Basic => match ratio {
+            r if r < 0.17 => Color::Green,
+            r if r < 0.33 => Color::Cyan,
+            r if r < 0.50 => Color::Blue,
+            r if r < 0.67 => Color::Yellow,
+            r if r < 0.83 => Color::Magenta,
+            _ => Color::Red,
+        },
+        ColorSupport::Extended => {
+            const STEPS: [u8; 10] = [21, 27, 33, 39, 51, 46, 226, 214, 208, 196];
+            Color::Indexed(STEPS[((ratio * 10.0) as usize).min(STEPS.len() - 1)])
+        }
+        ColorSupport::TrueColor => {
+            let (from, to, t) = if ratio < 0.5 {
+                ((0.0, 50.0, 150.0), (150.0, 220.0, 255.0), ratio * 2.0)
+            } else {
+                (
+                    (150.0, 220.0, 255.0),
+                    (220.0, 120.0, 0.0),
+                    (ratio - 0.5) * 2.0,
+                )
+            };
+            let mix = |a: f64, b: f64| (a + (b - a) * t).round() as u8;
+            Color::Rgb(mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
+        }
+    }
+}
 
-/// Detect terminal color support capabilities
+fn loss_color(colors: ColorSupport) -> Color {
+    match colors {
+        ColorSupport::None => Color::Reset,
+        ColorSupport::Basic => Color::Red,
+        ColorSupport::Extended => Color::Indexed(196),
+        ColorSupport::TrueColor => Color::Rgb(255, 0, 0),
+    }
+}
+
+fn pending_color(colors: ColorSupport) -> Color {
+    match colors {
+        ColorSupport::None => Color::Reset,
+        ColorSupport::Basic => Color::Blue,
+        ColorSupport::Extended => Color::Indexed(27),
+        ColorSupport::TrueColor => Color::Rgb(100, 100, 255),
+    }
+}
+
+/// Colour support from the environment. `NO_COLOR` (any value) and `TERM=dumb` turn
+/// colour off; see <https://no-color.org>.
 pub fn detect_color_support() -> ColorSupport {
-    use std::env;
+    let var = |name| std::env::var(name).ok();
+    color_support_from(var("NO_COLOR"), var("COLORTERM"), var("TERM"))
+}
 
-    // Check for explicit color support environment variables
-    if let Ok(colorterm) = env::var("COLORTERM") {
-        if colorterm.contains("truecolor") || colorterm.contains("24bit") {
-            return ColorSupport::TrueColor;
+fn color_support_from(
+    no_color: Option<String>,
+    colorterm: Option<String>,
+    term: Option<String>,
+) -> ColorSupport {
+    let term = term.unwrap_or_default();
+    if no_color.is_some_and(|v| !v.is_empty()) || term == "dumb" {
+        ColorSupport::None
+    } else if colorterm.is_some_and(|c| c.contains("truecolor") || c.contains("24bit")) {
+        ColorSupport::TrueColor
+    } else if term.contains("256") {
+        ColorSupport::Extended
+    } else {
+        ColorSupport::Basic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hop_with(rtts_us: &[u64]) -> HopStats {
+        let mut hop = HopStats::new(1);
+        for &us in rtts_us {
+            hop.increment_sent();
+            hop.add_rtt(Duration::from_micros(us));
+        }
+        hop
+    }
+
+    #[test]
+    fn log_scale_spreads_sub_millisecond_rtts() {
+        // A 0.3 ms gateway next to a 20 ms hop used to flatten every bar to ▁
+        let hops = [hop_with(&[300, 600]), hop_with(&[20_000])];
+        let scale = RttScale::from_hops(&hops, SparklineScale::Logarithmic).unwrap();
+        assert_eq!(scale.ratio(Duration::from_micros(300)), 0.0);
+        assert!(scale.ratio(Duration::from_micros(600)) > 0.1);
+        assert_eq!(scale.ratio(Duration::from_millis(20)), 1.0);
+    }
+
+    #[test]
+    fn labels_use_the_same_mapping_as_bars() {
+        let hops = [hop_with(&[300, 5_000, 80_000])];
+        for kind in [SparklineScale::Linear, SparklineScale::Logarithmic] {
+            let scale = RttScale::from_hops(&hops, kind).unwrap();
+            for ms in [0.3, 5.0, 80.0] {
+                let back = scale.at(scale.ratio(Duration::from_secs_f64(ms / 1000.0)));
+                assert!((back - ms).abs() < 1e-6, "{kind:?} {ms} -> {back}");
+            }
         }
     }
 
-    // Check TERM environment variable
-    if let Ok(term) = env::var("TERM") {
-        if term.contains("256color") || term.contains("256") {
-            return ColorSupport::Extended;
-        } else if term.contains("color") {
-            return ColorSupport::Basic;
-        }
+    #[test]
+    fn history_shows_the_newest_samples_that_fit() {
+        let hop = hop_with(&[1_000, 2_000, 3_000, 4_000]);
+        let scale = RttScale::from_hops([&hop], SparklineScale::Linear);
+        let spans = history_spans(
+            &hop,
+            scale.as_ref(),
+            VisualizationMode::Sparkline,
+            ColorSupport::None,
+            2,
+        );
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "▆█");
     }
 
-    // Default to basic color support
-    ColorSupport::Basic
+    #[test]
+    fn no_color_and_dumb_terminals_get_no_colour() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            color_support_from(s("1"), s("truecolor"), s("xterm-256color")),
+            ColorSupport::None
+        );
+        assert_eq!(
+            color_support_from(None, None, s("dumb")),
+            ColorSupport::None
+        );
+        assert_eq!(
+            color_support_from(s(""), None, s("xterm-256color")),
+            ColorSupport::Extended
+        );
+        assert_eq!(
+            color_support_from(None, s("truecolor"), s("xterm")),
+            ColorSupport::TrueColor
+        );
+    }
 }

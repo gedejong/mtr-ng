@@ -1,5 +1,5 @@
 use anyhow::{bail, Context};
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use mtr_ng::{
     args::ProbeProtocol, report::run_report, ui::run_interactive, Args, MtrSession, Result,
 };
@@ -8,7 +8,13 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    args.report |= args.json || args.csv;
+    if let Err(message) = args.validate() {
+        Args::command()
+            .error(clap::error::ErrorKind::ValueValidation, message)
+            .exit();
+    }
     init_logging(&args)?;
 
     let mode = if args.report { "report" } else { "interactive" };
@@ -55,7 +61,11 @@ fn init_logging(args: &Args) -> Result<()> {
             .init();
     } else if args.report {
         tracing_subscriber::fmt()
-            .with_env_filter(filter("mtr_ng=warn"))
+            .with_env_filter(filter(if args.quiet {
+                "mtr_ng=error"
+            } else {
+                "mtr_ng=warn"
+            }))
             .with_writer(std::io::stderr)
             .init();
     }

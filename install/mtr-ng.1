@@ -1,142 +1,247 @@
-.\" Man page for mtr-ng
-.TH MTR-NG 1 "2024" "mtr-ng 0.1.0" "User Commands"
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH mtr-ng 1  "mtr-ng 0.3.0" 
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
 .SH NAME
-mtr-ng \- modern My Traceroute network diagnostic tool
+mtr\-ng \- A modern implementation of mtr (My Traceroute) with unicode and terminal graphics
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
 .SH SYNOPSIS
-.B mtr-ng
-[\fIOPTIONS\fR] \fIHOSTNAME\fR
+\fBmtr\-ng\fR [\fB\-c\fR|\fB\-\-count\fR] [\fB\-i\fR|\fB\-\-interval\fR] [\fB\-M\fR|\fB\-\-max\-hops\fR] [\fB\-r\fR|\fB\-\-report\fR] [\fB\-j\fR|\fB\-\-json\fR] [\fB\-C\fR|\fB\-\-csv\fR] [\fB\-n\fR|\fB\-\-numeric\fR] [\fB\-z\fR|\fB\-\-aslookup\fR] [\fB\-\-sparkline\-scale\fR] [\fB\-\-ema\-alpha\fR] [\fB\-\-fields\fR] [\fB\-\-show\-all\fR] [\fB\-\-simulate\fR] [\fB\-P\fR|\fB\-\-protocol\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-log\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fITARGET\fR> 
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
 .SH DESCRIPTION
-\fBmtr-ng\fR is a modern implementation of My Traceroute (MTR) that combines the functionality of traceroute and ping in a single network diagnostic tool. It provides real-time network path visualization with Unicode sparklines, jitter analysis, and advanced column customization.
-
-MTR-NG sends packets with intentionally low TTLs to discover each hop along the network path to a destination, measuring packet loss and round-trip times for network analysis and troubleshooting.
-
+A modern implementation of mtr (My Traceroute) with unicode and terminal graphics
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
 .SH OPTIONS
 .TP
-.B \-c, \-\-count \fINUM\fR
-Send NUM packets, then exit. Default is to run indefinitely in interactive mode.
+\fB\-c\fR, \fB\-\-count\fR \fI<COUNT>\fR
+Number of rounds to run (default: until quit; 10 in report mode)
 .TP
-.B \-r, \-\-report
-Generate report output instead of interactive mode. Suitable for automation and scripting.
+\fB\-i\fR, \fB\-\-interval\fR \fI<INTERVAL>\fR [default: 1000]
+Time between rounds in milliseconds (at least 100, except with \-\-simulate)
 .TP
-.B \-i, \-\-interval \fISECONDS\fR
-Specify the interval between packets in seconds. Default is 1.0 seconds.
+\fB\-M\fR, \fB\-\-max\-hops\fR \fI<MAX_HOPS>\fR [default: 30]
+Maximum number of hops (1\-255)
 .TP
-.B \-n, \-\-numeric
-Display IP addresses instead of hostnames. Skips hostname resolution for faster operation.
+\fB\-r\fR, \fB\-\-report\fR
+Enable report mode (non\-interactive)
 .TP
-.B \-f, \-\-fields \fIFIELDS\fR
-Specify which columns to display. Available fields: hop, host, loss, sent, last, avg, ema, jitter, jitter-avg, best, worst, graph.
+\fB\-j\fR, \fB\-\-json\fR
+Report as JSON, with mtr\*(Aqs field names (implies \-\-report)
 .TP
-.B \-\-show\-all
-Display all available columns and metrics.
+\fB\-C\fR, \fB\-\-csv\fR
+Report as CSV, one row per hop (implies \-\-report)
 .TP
-.B \-\-sparkline\-scale \fISCALE\fR
-Set sparkline scaling mode: linear or logarithmic. Default is linear.
+\fB\-n\fR, \fB\-\-numeric\fR
+Show IP addresses instead of hostnames
 .TP
-.B \-h, \-\-help
-Display help information and exit.
+\fB\-z\fR, \fB\-\-aslookup\fR
+Show the AS number of each hop. Asks Team Cymru\*(Aqs DNS about every public address
 .TP
-.B \-V, \-\-version
-Display version information and exit.
+\fB\-\-sparkline\-scale\fR \fI<SPARKLINE_SCALE>\fR [default: logarithmic]
+Sparkline scaling mode: linear or logarithmic (default: logarithmic)
+.br
 
-.SH INTERACTIVE CONTROLS
-When running in interactive mode, the following keyboard controls are available:
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+linear
+.IP \(bu 2
+logarithmic
+.RE
 .TP
-.B q, Esc
-Quit the application
+\fB\-\-ema\-alpha\fR \fI<EMA_ALPHA>\fR [default: 0.1]
+Smoothing factor for the EMA column, above 0 and at most 1. Higher follows recent RTTs faster
 .TP
-.B r
-Reset all statistics
+\fB\-\-fields\fR \fI<FIELDS>\fR
+Select which columns to display (default: hop,host,loss,sent,last,avg,ema,best,worst,graph)
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+hop: Hop number
+.IP \(bu 2
+host: Hostname/IP address
+.IP \(bu 2
+asn: Origin AS number (looked up with \-\-aslookup)
+.IP \(bu 2
+loss: Packet loss percentage
+.IP \(bu 2
+sent: Number of packets sent
+.IP \(bu 2
+last: Last RTT measurement
+.IP \(bu 2
+avg: Average RTT
+.IP \(bu 2
+ema: Exponential moving average RTT
+.IP \(bu 2
+jitter: Last jitter value
+.IP \(bu 2
+jitter\-avg: Average jitter
+.IP \(bu 2
+best: Best (minimum) RTT
+.IP \(bu 2
+worst: Worst (maximum) RTT
+.IP \(bu 2
+stdev: Standard deviation of the RTT
+.IP \(bu 2
+graph: RTT sparkline graph
+.RE
 .TP
-.B s
-Toggle sparkline scale between linear and logarithmic
+\fB\-\-show\-all\fR
+Display all available columns
 .TP
-.B c
-Cycle through color modes (none, basic, extended, truecolor)
+\fB\-\-simulate\fR
+Show fake data instead of probing (for demos and testing); marked SIMULATED
 .TP
-.B f
-Toggle column visibility and cycle through available fields
+\fB\-P\fR, \fB\-\-protocol\fR \fI<PROTOCOL>\fR [default: icmp]
+Probe protocol (only icmp is implemented so far)
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+icmp: ICMP Echo (ping) \- default and most common
+.IP \(bu 2
+udp: UDP probes (not implemented yet)
+.IP \(bu 2
+tcp: TCP SYN probes (not implemented yet)
+.RE
 .TP
-.B v
-Toggle visualization mode between sparkline and heatmap
+\fB\-q\fR, \fB\-\-quiet\fR
+Report mode: print errors only, no warnings
 .TP
-.B h
-Toggle display between hostnames and IP addresses
+\fB\-\-log\-file\fR \fI<PATH>\fR
+Append debug logs to this file (level can be overridden with RUST_LOG)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fITARGET\fR>
+Target hostname or IP address
+.SH KEYS
+.TP
+.B q
+Quit (also Ctrl\-C)
 .TP
 .B ?
-Show/hide help overlay
-
-.SH EXAMPLES
+Show or hide this help
 .TP
-.B mtr-ng google.com
-Start interactive trace to google.com with default settings
+.B o
+Choose and order columns
 .TP
-.B mtr-ng google.com \-\-show\-all
-Show all available metrics in interactive mode
+.B r
+Reset statistics
 .TP
-.B mtr-ng google.com \-r \-c 10
-Generate a 10-packet report to google.com
+.B h
+Host names or IP addresses
 .TP
-.B mtr-ng 8.8.8.8 \-f hop,host,loss,avg,graph
-Custom column selection with sparkline visualization
+.B s
+Linear or logarithmic RTT scale
 .TP
-.B mtr-ng example.com \-n \-i 0.5
-Numeric mode with 0.5 second intervals
-
-.SH OUTPUT COLUMNS
+.B v
+Sparkline or heatmap
+.TP
+.B c
+Cycle colour modes
+.TP
+.B ↑ k
+Select previous hop
+.TP
+.B ↓ j
+Select next hop
+.TP
+.B PgUp
+Scroll up a page
+.TP
+.B PgDn
+Scroll down a page
+.TP
+.B Home
+First hop
+.TP
+.B End
+Last hop
+.TP
+.B Esc
+Clear the selection
+.SH COLUMNS
+Pick them with \fB\-\-fields\fR, or with \fBo\fR while running. Times are in milliseconds.
 .TP
 .B hop
-Hop number in the network path
+Hop number
 .TP
 .B host
-Hostname or IP address of the hop
+Host name or address
+.TP
+.B asn
+Autonomous system
 .TP
 .B loss
-Packet loss percentage for this hop
+Packet loss
 .TP
 .B sent
-Number of packets sent to this hop
+Probes sent
 .TP
 .B last
-Most recent round-trip time
+Last RTT
 .TP
 .B avg
-Average round-trip time
+Average RTT
 .TP
 .B ema
-Exponential moving average of round-trip times
+Smoothed RTT (EMA)
 .TP
 .B jitter
-Most recent jitter (RTT variation)
+Last jitter
 .TP
-.B jitter-avg
-Average jitter over time
+.B jitter\-avg
+Average jitter
 .TP
 .B best
-Best (minimum) round-trip time observed
+Best RTT
 .TP
 .B worst
-Worst (maximum) round-trip time observed
+Worst RTT
+.TP
+.B stdev
+RTT standard deviation
 .TP
 .B graph
-Unicode sparkline showing RTT history
-
-.SH NOTES
-MTR-NG requires appropriate privileges to send raw packets. On most systems, this means running with sudo or as root.
-
-The sparkline visualization uses Unicode block characters (▁▂▃▄▅▆▇█) to show RTT trends over time with color coding for performance analysis.
-
-.SH AUTHOR
-Written by the mtr-ng contributors.
-
+RTT history graph
+.SH EXAMPLES
+.TP
+.B mtr\-ng example.com
+Trace interactively until q.
+.TP
+.B mtr\-ng \-r example.com
+Print a report after 10 rounds.
+.TP
+.B mtr\-ng \-r \-c 100 \-n 1.1.1.1
+A 100\-round report without DNS.
+.TP
+.B mtr\-ng \-\-fields hop,host,loss,avg,graph example.com
+Show fewer columns.
+.TP
+.B mtr\-ng \-i 500 example.com
+Probe every 500 ms.
+.TP
+.B mtr\-ng \-\-simulate example.com
+Fake data, marked SIMULATED.
+.SH PRIVILEGES
+On macOS mtr\-ng needs no privileges: it uses unprivileged ICMP sockets. On Linux it needs root or the CAP_NET_RAW capability (setcap cap_net_raw+ep "$(command \-v mtr\-ng)"). Windows is not supported yet. Only ICMP over IPv4 is implemented; IPv6 targets and other protocols exit with an error.
 .SH REPORTING BUGS
-Report bugs to: https://github.com/edejong-dbc/mtr-ng/issues
-
-.SH COPYRIGHT
-Copyright (c) 2024 mtr-ng contributors.
-License: MIT OR Apache-2.0
-
+https://github.com/edejong\-dbc/mtr\-ng/issues
 .SH SEE ALSO
 .BR mtr (8),
-.BR traceroute (8),
-.BR ping (8) 
+.BR traceroute (8)

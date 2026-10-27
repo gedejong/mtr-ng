@@ -1,242 +1,247 @@
 #!/bin/bash
 #
-# Setup Linux Capabilities for MTR-NG
-# This allows running mtr-ng without sudo on Linux systems
+# Grant CAP_NET_RAW to an installed mtr-ng binary so it can probe without sudo
+# on Linux.
 #
-# WARNING: This grants network raw socket capabilities to the binary.
-# Only run this if you understand the security implications.
+# A file capability is stored on one file. Rebuilding or reinstalling replaces
+# that file and drops the capability, so this script works on an installed
+# binary, never on cargo's target/ directory. Rerun it after every reinstall.
 #
+# macOS needs none of this: mtr-ng uses unprivileged ICMP sockets there.
 
-set -e
+set -eo pipefail
 
-# Colors for output  
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+if [ -t 1 ]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[1;33m'
+    BLUE=$'\033[0;34m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' NC=''
+fi
 
-log() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
+log() { printf '%s[INFO]%s %s\n' "$BLUE" "$NC" "$*"; }
+success() { printf '%s[OK]%s %s\n' "$GREEN" "$NC" "$*"; }
+warning() { printf '%s[WARNING]%s %s\n' "$YELLOW" "$NC" "$*" >&2; }
+error() { printf '%s[ERROR]%s %s\n' "$RED" "$NC" "$*" >&2; }
 
-success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Check if we're on Linux
-check_linux() {
-    if [[ "$OSTYPE" != "linux-gnu"* ]]; then
-        error "This script only works on Linux systems."
-        error "Use simulation mode instead: cargo run -- --simulate --count 3 --report google.com"
-        exit 1
-    fi
-}
-
-# Check if setcap is available
-check_setcap() {
-    if ! command -v setcap &> /dev/null; then
-        error "setcap command not found. Please install libcap-utils:"
-        echo "  Ubuntu/Debian: sudo apt install libcap2-bin"
-        echo "  RHEL/Fedora:   sudo dnf install libcap"
-        echo "  Arch Linux:    sudo pacman -S libcap"
-        exit 1
-    fi
-}
-
-# Check if getcap is available  
-check_getcap() {
-    if ! command -v getcap &> /dev/null; then
-        error "getcap command not found. Please install libcap-utils:"
-        echo "  Ubuntu/Debian: sudo apt install libcap2-bin"
-        echo "  RHEL/Fedora:   sudo dnf install libcap"
-        echo "  Arch Linux:    sudo pacman -S libcap"
-        exit 1
-    fi
-}
-
-# Build release binary
-build_binary() {
-    log "Building release binary..."
-    if ! cargo build --release; then
-        error "Failed to build binary"
-        exit 1
-    fi
-    
-    if [[ ! -f "target/release/mtr-ng" ]]; then
-        error "Binary not found at target/release/mtr-ng"
-        exit 1
-    fi
-    
-    success "Binary built successfully"
-}
-
-# Set capabilities
-set_capabilities() {
-    local binary_path="target/release/mtr-ng"
-    
-    log "Setting CAP_NET_RAW capability on $binary_path"
-    log "This requires sudo privileges..."
-    
-    if ! sudo setcap cap_net_raw+ep "$binary_path"; then
-        error "Failed to set capabilities"
-        exit 1
-    fi
-    
-    success "Capabilities set successfully"
-}
-
-# Verify capabilities
-verify_capabilities() {
-    local binary_path="target/release/mtr-ng"
-    
-    log "Verifying capabilities..."
-    local caps=$(getcap "$binary_path")
-    
-    if [[ "$caps" == *"cap_net_raw+ep"* ]]; then
-        success "Capabilities verified: $caps"
-    else
-        error "Capabilities not set correctly: $caps"
-        exit 1
-    fi
-}
-
-# Test the binary
-test_binary() {
-    local binary_path="target/release/mtr-ng"
-    
-    log "Testing binary without sudo..."
-    
-    # Test that it works
-    if timeout 5s "$binary_path" --count 1 --report google.com &>/dev/null; then
-        success "Binary works without sudo!"
-    else
-        warning "Test didn't complete successfully. Try running manually:"
-        echo "  ./target/release/mtr-ng --count 3 --report google.com"
-    fi
-}
-
-# Show security warning
-show_security_warning() {
-    cat << 'EOF'
-
-┌─────────────────────────────────────────────────────────────────┐
-│                       SECURITY WARNING                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│ This script grants CAP_NET_RAW capability to the mtr-ng binary.│
-│ This allows the binary to create raw sockets without sudo.     │
-│                                                                 │
-│ IMPLICATIONS:                                                   │
-│ • The binary can send arbitrary network packets                 │
-│ • Anyone who can execute the binary gains this capability      │
-│ • This is less secure than using sudo on each run             │
-│                                                                 │
-│ ALTERNATIVES:                                                   │
-│ • Use simulation mode: --simulate (no privileges needed)       │
-│ • Use sudo for each run: sudo mtr-ng target                   │
-│ • Use containerized testing with Docker                        │
-│                                                                 │
-│ Only proceed if you understand these security implications.    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-EOF
-}
-
-# Main function
-main() {
-    echo "MTR-NG Linux Capabilities Setup"
-    echo "================================"
-    echo ""
-    
-    show_security_warning
-    
-    read -p "Do you want to proceed? (y/N): " -n 1 -r
-    echo ""
-    
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log "Aborted by user"
-        echo ""
-        echo "Alternative: Use simulation mode (no privileges needed):"
-        echo "  cargo run -- --simulate --count 3 --report google.com"
-        exit 0
-    fi
-    
-    echo ""
-    log "Starting capabilities setup..."
-    
-    check_linux
-    check_setcap  
-    check_getcap
-    build_binary
-    set_capabilities
-    verify_capabilities
-    test_binary
-    
-    echo ""
-    success "Setup complete! You can now run mtr-ng without sudo:"
-    echo ""
-    echo "  ./target/release/mtr-ng --count 3 --report google.com"
-    echo "  ./target/release/mtr-ng google.com"
-    echo ""
-    
-    warning "Remember: This binary now has raw socket capabilities."
-    warning "Consider using simulation mode for development:"
-    echo "  cargo run -- --simulate --count 3 --report google.com"
-}
-
-# Help function
 show_help() {
-    cat << 'EOF'
-MTR-NG Linux Capabilities Setup
+    cat <<'EOF'
+Usage: scripts/setup-capabilities.sh [-y] [PATH]
 
-This script sets up Linux capabilities to allow mtr-ng to run without sudo.
+Grant CAP_NET_RAW to an installed mtr-ng binary so it runs without sudo on Linux.
 
-Usage:
-  ./scripts/setup-capabilities.sh [options]
+PATH defaults to the mtr-ng found on $PATH, then ~/.cargo/bin/mtr-ng.
+The capability is lost whenever the file is replaced (cargo install, a new
+release, a rebuild copied over it), so rerun this script after reinstalling.
 
 Options:
-  --help, -h    Show this help message
-
-Security Note:
-  This grants CAP_NET_RAW capability to the binary, allowing raw socket access.
-  Consider using simulation mode instead: --simulate
+  -y, --yes     Don't ask for confirmation
+  -h, --help    Show this help
 
 Examples:
-  # Setup capabilities (interactive)
-  ./scripts/setup-capabilities.sh
+  # Per-user install
+  cargo install --locked --path .
+  scripts/setup-capabilities.sh
 
-  # After setup, run without sudo
-  ./target/release/mtr-ng --count 3 --report google.com
+  # System-wide install
+  cargo build --release --locked
+  sudo install -m 755 target/release/mtr-ng /usr/local/bin/mtr-ng
+  scripts/setup-capabilities.sh /usr/local/bin/mtr-ng
+EOF
+}
 
-  # Alternative: Use simulation mode (no setup needed)
-  cargo run -- --simulate --count 3 --report google.com
+ASSUME_YES=0
+BINARY=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h | --help)
+            show_help
+            exit 0
+            ;;
+        -y | --yes)
+            ASSUME_YES=1
+            ;;
+        -*)
+            error "Unknown option: $1"
+            show_help >&2
+            exit 1
+            ;;
+        *)
+            if [ -n "$BINARY" ]; then
+                error "Only one PATH may be given"
+                exit 1
+            fi
+            BINARY=$1
+            ;;
+    esac
+    shift
+done
+
+# Run a command as root, through sudo unless we already are root.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+check_platform() {
+    # Test the kernel, not $OSTYPE: that is linux-musl on Alpine and other musl systems.
+    local kernel
+    kernel=$(uname -s)
+    if [ "$kernel" = "Linux" ]; then
+        return
+    fi
+    error "File capabilities are a Linux feature; this system runs $kernel."
+    if [ "$kernel" = "Darwin" ]; then
+        echo "On macOS mtr-ng needs no privileges: it uses unprivileged ICMP sockets."
+    else
+        echo "Run mtr-ng with sudo instead."
+    fi
+    exit 1
+}
+
+require_tool() {
+    if command -v "$1" >/dev/null 2>&1; then
+        return
+    fi
+    error "$1 not found. Install the libcap tools:"
+    echo "  Debian/Ubuntu: sudo apt install libcap2-bin"
+    echo "  Fedora/RHEL:   sudo dnf install libcap"
+    echo "  Arch Linux:    sudo pacman -S libcap"
+    echo "  Alpine:        sudo apk add libcap-utils"
+    exit 1
+}
+
+resolve_binary() {
+    if [ -z "$BINARY" ]; then
+        BINARY=$(command -v mtr-ng || true)
+        if [ -z "$BINARY" ]; then
+            BINARY="$HOME/.cargo/bin/mtr-ng"
+        fi
+    fi
+    if [ ! -f "$BINARY" ]; then
+        error "No mtr-ng binary at $BINARY."
+        echo "Install it first, then rerun this script:"
+        echo "  cargo install --locked --path .   # from a checkout"
+        echo "  cargo install --locked mtr-ng     # from crates.io"
+        exit 1
+    fi
+    # setcap acts on the file itself, so follow symlinks to it.
+    BINARY=$(readlink -f "$BINARY")
+
+    case "$BINARY" in
+        */target/debug/* | */target/release/* | */target/*/debug/* | */target/*/release/*)
+            warning "$BINARY is cargo build output: the next build replaces it and drops the capability."
+            warning "Install a copy instead (cargo install --locked --path .) and pass that path."
+            ;;
+    esac
+    local mount_options=""
+    if command -v findmnt >/dev/null 2>&1; then
+        mount_options=$(findmnt -n -o OPTIONS -T "$BINARY" 2>/dev/null || true)
+    fi
+    case ",$mount_options," in
+        *,nosuid,*)
+            warning "$BINARY is on a nosuid filesystem, where the kernel ignores file capabilities."
+            ;;
+    esac
+}
+
+explain() {
+    cat <<EOF
+
+This grants CAP_NET_RAW to one file:
+  $BINARY
+
+That is narrower than running mtr-ng with sudo. sudo gives the whole program
+(terminal UI, DNS resolver, argument parsing) every root privilege; the
+capability gives it raw sockets and nothing else. ping and mtr-packet are
+installed the same way by most distributions.
+
+What it does allow: anyone who can execute this file can open raw sockets
+through it. If mtr-ng had an exploitable bug, an attacker could use it to
+send arbitrary packets or read network traffic, but not to gain root. mtr-ng
+does not yet drop the capability after opening its sockets.
 
 EOF
 }
 
-# Handle command line arguments
-case "${1:-}" in
-    "--help"|"-h")
-        show_help
-        exit 0
-        ;;
-    "")
-        main
-        ;;
-    *)
-        error "Unknown option: $1"
-        echo ""
-        show_help
+confirm() {
+    if [ "$ASSUME_YES" -eq 1 ]; then
+        return
+    fi
+    if [ ! -t 0 ]; then
+        error "No terminal to ask for confirmation; rerun with --yes."
         exit 1
-        ;;
-esac 
+    fi
+    local reply
+    read -r -p "Grant CAP_NET_RAW to $BINARY? [y/N] " reply
+    case "$reply" in
+        [Yy] | [Yy][Ee][Ss]) ;;
+        *)
+            log "Aborted; nothing changed."
+            exit 0
+            ;;
+    esac
+}
+
+set_capability() {
+    log "Setting cap_net_raw+ep on $BINARY"
+    if ! as_root setcap cap_net_raw+ep "$BINARY"; then
+        error "setcap failed"
+        exit 1
+    fi
+}
+
+verify_capability() {
+    local caps re
+    caps=$(getcap "$BINARY")
+    # libcap before 2.41 prints "PATH = cap_net_raw+ep"; later versions print
+    # "PATH cap_net_raw=ep", possibly grouped with others ("cap_net_admin,cap_net_raw=ep").
+    re='cap_net_raw(,[a-z_]+)*[+=]ei?p'
+    if [[ $caps =~ $re ]]; then
+        success "Capability set: $caps"
+    else
+        error "Capability not set as expected: ${caps:-<none>}"
+        exit 1
+    fi
+}
+
+test_binary() {
+    if [ "$(id -u)" -eq 0 ]; then
+        warning "Running as root, so a test run here proves nothing. As a normal user, try:"
+        echo "  $BINARY -r -c 1 -n 127.0.0.1"
+        return
+    fi
+    log "Probing 127.0.0.1 without sudo..."
+    local output
+    # Hop 1 only shows 127.0.0.1 if a reply came back.
+    if output=$(timeout 15 "$BINARY" -r -c 1 -n 127.0.0.1 2>&1) &&
+        grep -Eq '1\.\|-- +127\.0\.0\.1' <<<"$output"; then
+        success "mtr-ng probes without sudo."
+    else
+        warning "The test run failed. Run it by hand to see the error:"
+        echo "  $BINARY -r -c 1 -n 127.0.0.1"
+        exit 1
+    fi
+}
+
+check_platform
+require_tool setcap
+require_tool getcap
+resolve_binary
+explain
+confirm
+set_capability
+verify_capability
+test_binary
+
+echo
+success "Done. Run mtr-ng without sudo, for example:"
+echo "  $BINARY example.com"
+echo
+log "Reinstalling replaces the file and drops the capability; rerun this script afterwards."

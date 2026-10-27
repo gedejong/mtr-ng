@@ -44,11 +44,16 @@ run_test "Custom Hops Simulation" "cargo run -- --simulate --count 2 --max-hops 
 run_test "Numeric Mode Simulation" "cargo run -- --simulate --count 2 --numeric --report example.com"
 run_test "All Columns Simulation" "cargo run -- --simulate --count 1 --show-all --report cloudflare.com"
 
-# 5. Protocol Tests (all use simulation mode)
-echo -e "\n${GREEN}5. Protocol Tests (Simulated)${NC}"
+# 5. Protocol Tests: only icmp is implemented; udp and tcp must be rejected
+echo -e "\n${GREEN}5. Protocol Tests${NC}"
 run_test "ICMP Protocol Simulation" "cargo run -- --simulate --protocol icmp --count 1 --report google.com"
-run_test "UDP Protocol Simulation" "cargo run -- --simulate --protocol udp --count 1 --report google.com"
-run_test "TCP Protocol Simulation" "cargo run -- --simulate --protocol tcp --count 1 --report google.com"
+for proto in udp tcp; do
+    if cargo run -q -- --simulate --protocol "$proto" --count 1 --report google.com; then
+        echo -e "${RED}--protocol $proto should be rejected until it is implemented${NC}"
+        exit 1
+    fi
+    echo "✅ --protocol $proto is rejected (not implemented yet)"
+done
 
 # 6. Field Selection Tests
 echo -e "\n${GREEN}6. Field Selection Tests${NC}"
@@ -78,8 +83,8 @@ run_test "Clippy Lints" "cargo clippy -- -D warnings"
 run_test "Format Check" "cargo fmt -- --check"
 
 echo -e "\n${GREEN}✅ All Tests Completed Successfully!${NC}"
-echo -e "${YELLOW}💡 To test with real network (requires sudo):${NC}"
-echo "   sudo cargo run -- --count 3 --report google.com"
+echo -e "${YELLOW}💡 To test with real network (Linux needs sudo, macOS doesn't):${NC}"
+echo "   cargo build && sudo ./target/debug/mtr-ng --count 3 --report google.com"
 echo ""
 echo -e "${YELLOW}💡 To run interactive mode for development:${NC}"
 echo "   cargo run -- --simulate google.com" 

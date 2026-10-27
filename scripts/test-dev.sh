@@ -40,7 +40,7 @@ Available commands:
   test          Run all unit tests (no sudo required)
   test-sim      Quick simulation test in report mode
   test-interactive  Quick simulation test in interactive mode (10s)
-  test-protocols    Test all protocols in simulation mode
+  test-protocols    Check icmp works and udp/tcp are rejected
   test-targets      Test different targets in simulation mode
   test-all      Run comprehensive test suite (no sudo required)
   build         Build the project
@@ -52,7 +52,7 @@ Available commands:
 Examples:
   $0 test-sim                    # Quick smoke test
   $0 test-all                    # Full test suite
-  $0 test-real google.com        # Real network test (requires sudo)
+  $0 test-real google.com        # Real network test (sudo on Linux)
 
 For more advanced commands, consider installing 'just':
   cargo install just && just --list
@@ -82,17 +82,19 @@ test_interactive() {
 
 # Function to test all protocols
 test_protocols() {
-    log "Testing all protocols in simulation mode..."
-    
+    log "Testing protocols in simulation mode (only icmp is implemented)..."
+
     echo -e "\n${BLUE}Testing ICMP simulation...${NC}"
     cargo run -- --simulate --count 2 --report -P icmp google.com
-    
-    echo -e "\n${BLUE}Testing UDP simulation...${NC}"
-    cargo run -- --simulate --count 2 --report -P udp google.com
-    
-    echo -e "\n${BLUE}Testing TCP simulation...${NC}"
-    cargo run -- --simulate --count 2 --report -P tcp google.com
-    
+
+    for proto in udp tcp; do
+        echo -e "\n${BLUE}Checking that -P $proto is rejected...${NC}"
+        if cargo run -q -- --simulate --count 1 --report -P "$proto" google.com; then
+            error "-P $proto should be rejected until it is implemented"
+            exit 1
+        fi
+    done
+
     success "Protocol tests completed"
 }
 
@@ -159,9 +161,15 @@ benchmark_simulation() {
 # Function to run real network test (requires sudo)
 test_real() {
     local target=${1:-google.com}
-    warning "This requires sudo permissions..."
+    # Build as the user so target/ stays user-owned; only the binary runs as root.
+    cargo build
     log "Running real network test to $target"
-    sudo cargo run -- --count 3 --report "$target"
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        ./target/debug/mtr-ng --count 3 --report "$target"
+    else
+        warning "Raw sockets need root; running the binary with sudo..."
+        sudo ./target/debug/mtr-ng --count 3 --report "$target"
+    fi
     success "Real network test completed"
 }
 

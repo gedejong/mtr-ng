@@ -17,7 +17,6 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use rand::Rng;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc;
 
@@ -138,7 +137,7 @@ impl ProbeEngine {
 
         Ok(Self {
             // Random start so concurrent instances don't walk the same sequence numbers.
-            next_seq: rand::thread_rng().gen_range(INITIAL_SEQUENCE..=MAX_SEQUENCE),
+            next_seq: rand::random_range(INITIAL_SEQUENCE..=MAX_SEQUENCE),
             icmp_socket,
             icmp6_socket,
             packet_id,
@@ -168,7 +167,7 @@ impl Prober for ProbeEngine {
         let seq = self.alloc_seq();
         let (socket, packet) = match dst {
             IpAddr::V4(_) => {
-                self.icmp_socket.set_ttl(ttl.into())?;
+                self.icmp_socket.set_ttl_v4(ttl.into())?;
                 (
                     &self.icmp_socket,
                     construct_icmp_packet(seq, self.packet_id),

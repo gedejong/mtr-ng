@@ -1,209 +1,166 @@
-//! UI State Management Module
-//!
-//! This module manages all UI state including display settings, column configuration,
-//! and user interface modes for the mtr-ng terminal application.
+//! What the TUI shows and how: the active mode, the columns, the display toggles,
+//! and the table's selection and scroll position.
 
 use crate::args::Column;
 use crate::ui::visualization::{detect_color_support, ColorSupport, VisualizationMode};
-use crate::ui::widgets::ColumnSelectorState;
-use crate::SparklineScale;
+use crate::{Args, SparklineScale};
+use ratatui::widgets::TableState;
 
-// ========================================
-// UI State Management
-// ========================================
+/// One mode at a time, so keys always mean one thing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    Table,
+    Help,
+    Columns,
+}
+
+/// The column chooser: every column, shown ones first in their current order.
+#[derive(Debug, Clone)]
+pub struct ColumnChooser {
+    pub entries: Vec<(Column, bool)>,
+    pub cursor: usize,
+}
+
+impl ColumnChooser {
+    pub fn new(shown: &[Column]) -> Self {
+        let hidden = Column::all().into_iter().filter(|c| !shown.contains(c));
+        let entries = shown
+            .iter()
+            .map(|&c| (c, true))
+            .chain(hidden.map(|c| (c, false)))
+            .collect();
+        Self { entries, cursor: 0 }
+    }
+
+    pub fn move_cursor(&mut self, delta: isize) {
+        self.cursor = self
+            .cursor
+            .saturating_add_signed(delta)
+            .min(self.entries.len() - 1);
+    }
+
+    /// Show or hide the column under the cursor. The last shown column stays.
+    pub fn toggle(&mut self) {
+        let shown = self.entries.iter().filter(|(_, on)| *on).count();
+        let (_, on) = &mut self.entries[self.cursor];
+        if !*on || shown > 1 {
+            *on = !*on;
+        }
+    }
+
+    /// Move the column under the cursor earlier (-1) or later (+1); the cursor follows.
+    pub fn shift(&mut self, delta: isize) {
+        let to = self
+            .cursor
+            .saturating_add_signed(delta)
+            .min(self.entries.len() - 1);
+        self.entries.swap(self.cursor, to);
+        self.cursor = to;
+    }
+
+    pub fn shown(&self) -> Vec<Column> {
+        self.entries
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(c, _)| *c)
+            .collect()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct UiState {
-    pub current_sparkline_scale: SparklineScale,
-    pub color_support: ColorSupport,
+    pub mode: Mode,
     pub columns: Vec<Column>,
-    pub current_column_index: usize,
-    pub show_help: bool,
-    pub visualization_mode: VisualizationMode,
-    pub show_hostnames: bool, // Toggle between hostnames and IP addresses
-    pub show_column_selector: bool, // Show column selection popup
-    pub column_selector_state: ColumnSelectorState, // State for column selector
+    pub chooser: ColumnChooser,
+    pub scale: SparklineScale,
+    pub colors: ColorSupport,
+    pub visualization: VisualizationMode,
+    pub show_hostnames: bool,
+    /// Selected row and scroll offset of the hop table.
+    pub table: TableState,
+    /// The trace ran all its `--count` rounds.
+    pub finished: bool,
 }
 
 impl UiState {
-    /// Create a new UI state with default settings
-    pub fn new(scale: SparklineScale, columns: Vec<Column>) -> Self {
-        let column_selector_state = ColumnSelectorState::new(&columns);
+    pub fn new(args: &Args) -> Self {
+        let columns = args.get_columns();
         Self {
-            current_sparkline_scale: scale,
-            color_support: detect_color_support(),
+            mode: Mode::Table,
+            chooser: ColumnChooser::new(&columns),
             columns,
-            current_column_index: 0,
-            show_help: false,
-            visualization_mode: VisualizationMode::Sparkline,
-            show_hostnames: true, // Start with hostnames enabled by default
-            show_column_selector: false,
-            column_selector_state,
+            scale: args.sparkline_scale,
+            colors: detect_color_support(),
+            visualization: VisualizationMode::Sparkline,
+            show_hostnames: !args.numeric,
+            table: TableState::default(),
+            finished: false,
         }
     }
 
-    // ========================================
-    // Popup and Overlay Management
-    // ========================================
-
-    /// Toggle the help overlay visibility
-    pub fn toggle_help(&mut self) {
-        self.show_help = !self.show_help;
+    pub fn open_chooser(&mut self) {
+        self.chooser = ColumnChooser::new(&self.columns);
+        self.mode = Mode::Columns;
     }
 
-    /// Toggle the column selector popup visibility
-    pub fn toggle_column_selector(&mut self) {
-        if self.show_column_selector {
-            // Just close - changes were already applied immediately
-        } else {
-            // Reset selector state when opening
-            self.column_selector_state = ColumnSelectorState::new(&self.columns);
-        }
-        self.show_column_selector = !self.show_column_selector;
+    /// Changes in the chooser show up in the table straight away.
+    pub fn apply_chooser(&mut self) {
+        self.columns = self.chooser.shown();
     }
 
-    // ========================================
-    // Column Selector Immediate Update Methods
-    // ========================================
-
-    /// Toggle the selected column in the column selector with immediate UI update
-    pub fn toggle_selected_column_immediate(&mut self) {
-        self.column_selector_state.toggle_selected();
-        self.apply_column_changes_immediate();
-    }
-
-    /// Move the selected column up in the column selector with immediate UI update
-    pub fn move_selected_column_up_immediate(&mut self) {
-        self.column_selector_state.move_selected_up();
-        self.apply_column_changes_immediate();
-    }
-
-    /// Move the selected column down in the column selector with immediate UI update
-    pub fn move_selected_column_down_immediate(&mut self) {
-        self.column_selector_state.move_selected_down();
-        self.apply_column_changes_immediate();
-    }
-
-    /// Apply column changes immediately for live preview
-    fn apply_column_changes_immediate(&mut self) {
-        self.columns = self.column_selector_state.get_enabled_columns();
-        // Ensure at least one column remains
-        if self.columns.is_empty() {
-            self.columns.push(Column::Host);
-            if let Some((_, enabled)) = self
-                .column_selector_state
-                .available_columns
-                .iter_mut()
-                .find(|(col, _)| matches!(col, Column::Host))
-            {
-                *enabled = true;
-            }
-        }
-    }
-
-    // ========================================
-    // Display Mode Management
-    // ========================================
-
-    /// Toggle between sparkline and heatmap visualization modes
-    pub fn toggle_visualization_mode(&mut self) {
-        self.visualization_mode = match self.visualization_mode {
-            VisualizationMode::Sparkline => VisualizationMode::Heatmap,
-            VisualizationMode::Heatmap => VisualizationMode::Sparkline,
-        };
-    }
-
-    /// Toggle between showing hostnames and IP addresses
-    pub fn toggle_hostnames(&mut self) {
-        self.show_hostnames = !self.show_hostnames;
-    }
-
-    /// Toggle between linear and logarithmic sparkline scales
-    pub fn toggle_sparkline_scale(&mut self) {
-        self.current_sparkline_scale = match self.current_sparkline_scale {
+    pub fn toggle_scale(&mut self) {
+        self.scale = match self.scale {
             SparklineScale::Linear => SparklineScale::Logarithmic,
             SparklineScale::Logarithmic => SparklineScale::Linear,
         };
     }
 
-    /// Cycle through available color support modes
-    pub fn cycle_color_mode(&mut self) {
-        self.color_support = match self.color_support {
+    pub fn toggle_visualization(&mut self) {
+        self.visualization = match self.visualization {
+            VisualizationMode::Sparkline => VisualizationMode::Heatmap,
+            VisualizationMode::Heatmap => VisualizationMode::Sparkline,
+        };
+    }
+
+    pub fn cycle_colors(&mut self) {
+        self.colors = match self.colors {
             ColorSupport::None => ColorSupport::Basic,
             ColorSupport::Basic => ColorSupport::Extended,
             ColorSupport::Extended => ColorSupport::TrueColor,
             ColorSupport::TrueColor => ColorSupport::None,
         };
     }
+}
 
-    // ========================================
-    // Column Management
-    // ========================================
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Toggle through available columns (legacy method)
-    pub fn toggle_column(&mut self) {
-        if !self.columns.is_empty() {
-            self.current_column_index = (self.current_column_index + 1) % self.columns.len();
-            let all_columns = Column::all();
-            let removed_column = self.columns.remove(self.current_column_index);
-
-            for col in &all_columns {
-                if !self.columns.contains(col) && *col != removed_column {
-                    self.columns.insert(self.current_column_index, *col);
-                    break;
-                }
-            }
-
-            if self.current_column_index >= self.columns.len() {
-                self.current_column_index = 0;
-            }
-        }
+    #[test]
+    fn chooser_keeps_the_current_order() {
+        let shown = [Column::Avg, Column::Host, Column::Hop];
+        let chooser = ColumnChooser::new(&shown);
+        assert_eq!(chooser.shown(), shown);
+        assert_eq!(chooser.entries.len(), Column::all().len());
+        assert!(
+            !chooser.entries[3].1,
+            "hidden columns follow the shown ones"
+        );
     }
 
-    /// Add a column to the display if not already present
-    pub fn add_column(&mut self, column: Column) {
-        if !self.columns.contains(&column) {
-            self.columns.push(column);
-        }
-    }
-
-    /// Remove a column from the display
-    pub fn remove_column(&mut self, column: Column) {
-        if let Some(pos) = self.columns.iter().position(|&c| c == column) {
-            self.columns.remove(pos);
-            if self.current_column_index >= self.columns.len() && self.current_column_index > 0 {
-                self.current_column_index = self.columns.len() - 1;
-            }
-        }
-    }
-
-    // ========================================
-    // Header Generation (Legacy)
-    // ========================================
-
-    /// Generate header string for the current column configuration
-    ///
-    /// Note: This method is legacy and may be removed in favor of widget-based headers
-    pub fn get_header(&self) -> String {
-        let mut header = String::from("  ");
-        for (i, column) in self.columns.iter().enumerate() {
-            if i > 0 {
-                header.push(' ');
-            }
-            match column {
-                Column::Hop => {} // No header for hop number column (3 chars: "XX.")
-                Column::Host => header.push_str(&format!("{:21}", column.header())), // 21 chars
-                Column::Loss => header.push_str(&format!("{:>7}", column.header())), // 7 chars for "XX.X%"
-                Column::Sent => header.push_str(&format!("{:>4}", column.header())), // 4 chars
-                Column::Last | Column::Avg | Column::Ema | Column::Best | Column::Worst => {
-                    header.push_str(&format!("{:>9}", column.header())); // 9 chars for "XXX.Xms"
-                }
-                Column::Jitter | Column::JitterAvg => {
-                    header.push_str(&format!("{:>9}", column.header())); // 9 chars for "XXX.Xms"
-                }
-                Column::Graph => header.push_str(column.header()), // Variable width
-            }
-        }
-        header
+    #[test]
+    fn chooser_reorders_and_never_hides_the_last_column() {
+        let mut chooser = ColumnChooser::new(&[Column::Hop, Column::Host]);
+        chooser.shift(1);
+        assert_eq!(chooser.shown(), [Column::Host, Column::Hop]);
+        assert_eq!(chooser.cursor, 1);
+        chooser.toggle(); // hide Hop
+        chooser.move_cursor(-1);
+        chooser.toggle(); // Host is the last one shown: stays
+        assert_eq!(chooser.shown(), [Column::Host]);
+        chooser.move_cursor(-5);
+        assert_eq!(chooser.cursor, 0);
+        chooser.move_cursor(100);
+        assert_eq!(chooser.cursor, chooser.entries.len() - 1);
     }
 }

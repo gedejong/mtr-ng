@@ -21,6 +21,8 @@ pub enum PacketOutcome {
 pub struct ResponderStats {
     pub addr: IpAddr,
     pub hostname: Option<String>,
+    /// Origin AS number, with `--aslookup`
+    pub asn: Option<u32>,
     pub replies: usize,
     pub last_seen: Instant,
     pub last_rtt: Option<Duration>,
@@ -33,6 +35,7 @@ impl ResponderStats {
         Self {
             addr,
             hostname: None,
+            asn: None,
             replies: 0,
             last_seen: Instant::now(),
             last_rtt: None,
@@ -64,6 +67,7 @@ pub struct HopStats {
     /// Primary responder (the address with the most replies)
     pub addr: Option<IpAddr>,
     pub hostname: Option<String>,
+    pub asn: Option<u32>,
     pub sent: usize,
     pub received: usize,
     pub last_rtt: Option<Duration>,
@@ -108,6 +112,7 @@ impl HopStats {
             hop,
             addr: None,
             hostname: None,
+            asn: None,
             sent: 0,
             received: 0,
             last_rtt: None,
@@ -222,6 +227,7 @@ impl HopStats {
         if switch {
             self.addr = Some(addr);
             self.hostname = self.responders[&addr].hostname.clone();
+            self.asn = self.responders[&addr].asn;
         }
     }
 
@@ -329,6 +335,15 @@ impl HopStats {
         }
         if let Some(responder) = self.responders.get_mut(&addr) {
             responder.hostname = Some(hostname);
+        }
+    }
+
+    pub fn set_asn_for_addr(&mut self, addr: IpAddr, asn: u32) {
+        if Some(addr) == self.addr {
+            self.asn = Some(asn);
+        }
+        if let Some(responder) = self.responders.get_mut(&addr) {
+            responder.asn = Some(asn);
         }
     }
 
@@ -593,12 +608,12 @@ mod tests {
 
         // Second RTT: EMA = 0.5 * 200 + 0.5 * 100 = 150
         hop.add_rtt(Duration::from_millis(200));
-        let ema_ms = utils::time::duration_to_ms_u64(hop.ema_rtt.unwrap());
+        let ema_ms = hop.ema_rtt.unwrap().as_millis() as u64;
         assert_eq!(ema_ms, 150);
 
         // Third RTT: EMA = 0.5 * 100 + 0.5 * 150 = 125
         hop.add_rtt(Duration::from_millis(100));
-        let ema_ms = utils::time::duration_to_ms_u64(hop.ema_rtt.unwrap());
+        let ema_ms = hop.ema_rtt.unwrap().as_millis() as u64;
         assert_eq!(ema_ms, 125);
     }
 
@@ -641,7 +656,7 @@ mod tests {
         hop.add_rtt(Duration::from_millis(150));
         assert_eq!(hop.last_jitter, Some(Duration::from_millis(40))); // |150 - 110| = 40
                                                                       // Average of jitter values: (20 + 10 + 40) / 3 = 23.333... ms
-        let expected_avg_ms = utils::time::duration_to_ms_u64(hop.jitter_avg.unwrap());
+        let expected_avg_ms = hop.jitter_avg.unwrap().as_millis() as u64;
         assert_eq!(expected_avg_ms, 23); // Rounded to nearest ms
     }
 

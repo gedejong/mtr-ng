@@ -23,6 +23,8 @@ pub enum Column {
     Hop,
     /// Hostname/IP address
     Host,
+    /// Origin AS number (looked up with --aslookup)
+    Asn,
     /// Packet loss percentage
     Loss,
     /// Number of packets sent
@@ -41,6 +43,8 @@ pub enum Column {
     Best,
     /// Worst (maximum) RTT
     Worst,
+    /// Standard deviation of the RTT
+    Stdev,
     /// RTT sparkline graph
     Graph,
 }
@@ -51,6 +55,7 @@ impl Column {
         vec![
             Column::Hop,
             Column::Host,
+            Column::Asn,
             Column::Loss,
             Column::Sent,
             Column::Last,
@@ -60,6 +65,7 @@ impl Column {
             Column::JitterAvg,
             Column::Best,
             Column::Worst,
+            Column::Stdev,
             Column::Graph,
         ]
     }
@@ -79,42 +85,6 @@ impl Column {
             Column::Graph,
         ]
     }
-
-    /// Get column header text
-    pub fn header(&self) -> &'static str {
-        match self {
-            Column::Hop => "",
-            Column::Host => "Hostname",
-            Column::Loss => "Loss%",
-            Column::Sent => "Pkts",
-            Column::Last => "LastRTT",
-            Column::Avg => "AvgRTT",
-            Column::Ema => "EmaRTT",
-            Column::Jitter => "Jitter",
-            Column::JitterAvg => "JitAvg",
-            Column::Best => "BestRTT",
-            Column::Worst => "WorstRTT",
-            Column::Graph => "RTT History",
-        }
-    }
-
-    /// Get column width for formatting
-    pub fn width(&self) -> usize {
-        match self {
-            Column::Hop => 3,
-            Column::Host => 21,
-            Column::Loss => 7,
-            Column::Sent => 4,
-            Column::Last => 8,
-            Column::Avg => 8,
-            Column::Ema => 8,
-            Column::Jitter => 8,
-            Column::JitterAvg => 8,
-            Column::Best => 8,
-            Column::Worst => 8,
-            Column::Graph => 20, // Minimum width for sparkline
-        }
-    }
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -128,31 +98,43 @@ pub struct Args {
     pub target: String,
 
     /// Number of rounds to run (default: until quit; 10 in report mode)
-    #[arg(short, long)]
+    #[arg(short, long, value_parser = at_least_one)]
     pub count: Option<usize>,
 
-    /// Wait time between pings in milliseconds
-    #[arg(short, long, default_value = "1000")]
+    /// Time between rounds in milliseconds (at least 100, except with --simulate)
+    #[arg(short, long, default_value = "1000", value_parser = clap::value_parser!(u64).range(1..))]
     pub interval: u64,
 
-    /// Maximum number of hops
-    #[arg(short = 'M', long, default_value = "30")]
+    /// Maximum number of hops (1-255)
+    #[arg(short = 'M', long, default_value = "30", value_parser = clap::value_parser!(u8).range(1..))]
     pub max_hops: u8,
 
     /// Enable report mode (non-interactive)
     #[arg(short, long)]
     pub report: bool,
 
+    /// Report as JSON, with mtr's field names (implies --report)
+    #[arg(short = 'j', long, conflicts_with = "csv")]
+    pub json: bool,
+
+    /// Report as CSV, one row per hop (implies --report)
+    #[arg(short = 'C', long)]
+    pub csv: bool,
+
     /// Show IP addresses instead of hostnames
     #[arg(short, long)]
     pub numeric: bool,
+
+    /// Show the AS number of each hop. Asks Team Cymru's DNS about every public address
+    #[arg(short = 'z', long)]
+    pub aslookup: bool,
 
     /// Sparkline scaling mode: linear or logarithmic (default: logarithmic)
     #[arg(long, value_enum, default_value = "logarithmic")]
     pub sparkline_scale: SparklineScale,
 
-    /// Exponential smoothing factor for EMA (0.0-1.0). Higher values = more responsive to recent changes
-    #[arg(long, default_value = "0.1")]
+    /// Smoothing factor for the EMA column, above 0 and at most 1. Higher follows recent RTTs faster
+    #[arg(long, default_value = "0.1", value_parser = smoothing_factor)]
     pub ema_alpha: f64,
 
     /// Select which columns to display (default: hop,host,loss,sent,last,avg,ema,best,worst,graph)
@@ -163,24 +145,16 @@ pub struct Args {
     #[arg(long, help = "Display all available columns")]
     pub show_all: bool,
 
-    /// Enable simulation mode (generate fake network data for testing/demo)
-    #[arg(long, help = "Run in simulation mode with fake network data")]
+    /// Show fake data instead of probing (for demos and testing); marked SIMULATED
+    #[arg(long, alias = "force-simulate")]
     pub simulate: bool,
 
     /// Probe protocol (only icmp is implemented so far)
     #[arg(short = 'P', long, value_enum, default_value = "icmp")]
     pub protocol: ProbeProtocol,
 
-    /// Force simulation mode even when run as root (useful for testing)
-    #[arg(long, help = "Force simulation mode even with root privileges")]
-    pub force_simulate: bool,
-
-    /// Output timing information for performance analysis
-    #[arg(long, help = "Include timing statistics in output")]
-    pub timing: bool,
-
-    /// Quiet mode - reduce output verbosity
-    #[arg(short, long, help = "Quiet mode - minimal output")]
+    /// Report mode: print errors only, no warnings
+    #[arg(short, long)]
     pub quiet: bool,
 
     /// Append debug logs to this file (level can be overridden with RUST_LOG)
@@ -188,16 +162,57 @@ pub struct Args {
     pub log_file: Option<PathBuf>,
 }
 
+fn at_least_one(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(0) => Err("must be at least 1".to_string()),
+        Ok(n) => Ok(n),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn smoothing_factor(s: &str) -> Result<f64, String> {
+    let alpha: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if alpha > 0.0 && alpha <= 1.0 {
+        Ok(alpha)
+    } else {
+        Err("must be above 0 and at most 1".to_string())
+    }
+}
+
+/// Shortest interval for real probes: every round sends one probe per hop.
+pub const MIN_INTERVAL_MS: u64 = 100;
+
 impl Args {
+    /// Checks that depend on more than one flag.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.interval < MIN_INTERVAL_MS && !self.simulate {
+            return Err(format!(
+                "--interval {} is too short for real probes: each round sends one probe per hop. \
+                 Use at least {MIN_INTERVAL_MS} ms (any value works with --simulate)",
+                self.interval
+            ));
+        }
+        Ok(())
+    }
+
     /// Get the columns to display based on command-line arguments
     pub fn get_columns(&self) -> Vec<Column> {
         if self.show_all {
             Column::all()
         } else if let Some(ref fields) = self.fields {
             fields.clone()
+        } else if self.aslookup {
+            let mut columns = Column::default_columns();
+            columns.insert(2, Column::Asn);
+            columns
         } else {
             Column::default_columns()
         }
+    }
+
+    /// AS numbers are looked up for `--aslookup`, or when the ASN column is chosen.
+    pub fn wants_asn(&self) -> bool {
+        self.aslookup || self.get_columns().contains(&Column::Asn)
     }
 }
 
@@ -220,9 +235,36 @@ mod tests {
         assert!(!args.show_all);
         assert!(!args.simulate);
         assert_eq!(args.protocol, ProbeProtocol::Icmp);
-        assert!(!args.force_simulate);
-        assert!(!args.timing);
         assert!(!args.quiet);
+    }
+
+    #[test]
+    fn nonsense_values_are_rejected() {
+        for bad in [
+            &["--ema-alpha", "NaN"][..],
+            &["--ema-alpha", "0"],
+            &["--ema-alpha", "-1"],
+            &["--ema-alpha", "1.5"],
+            &["-i", "0"],
+            &["-c", "0"],
+            &["-M", "0"],
+            &["-M", "256"],
+        ] {
+            let argv = ["mtr-ng"].iter().chain(bad).chain(&["example.com"]);
+            assert!(Args::try_parse_from(argv).is_err(), "{bad:?} accepted");
+        }
+        let args =
+            Args::try_parse_from(["mtr-ng", "--ema-alpha", "1", "--force-simulate", "x"]).unwrap();
+        assert_eq!(args.ema_alpha, 1.0);
+        assert!(args.simulate, "--force-simulate is an alias of --simulate");
+    }
+
+    #[test]
+    fn short_intervals_only_for_simulation() {
+        let parse = |argv: &[&str]| Args::try_parse_from(argv).unwrap().validate();
+        assert!(parse(&["mtr-ng", "-i", "50", "x"]).is_err());
+        assert!(parse(&["mtr-ng", "-i", "100", "x"]).is_ok());
+        assert!(parse(&["mtr-ng", "-i", "10", "--simulate", "x"]).is_ok());
     }
 
     #[test]

@@ -2,9 +2,13 @@
 /target/
 # Cargo.lock is committed: this is a binary crate and builds must be reproducible
 
-# Log files  
-mtr-ng.log
+# Log files (--log-file, RUST_LOG runs)
 *.log
+
+# Local test and report output (just report writes to target/ instead)
+/test[-_]output*.txt
+/test[-_]results*.txt
+/lcov.info
 
 # IDE files
 .vscode/
@@ -16,5 +20,5 @@ mtr-ng.log
 .DS_Store
 Thumbs.db
 
-# Keep .cursor directory for development instructions
-# .cursor/
+# Claude Code agent worktrees
+/.claude/worktrees/

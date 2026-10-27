@@ -1,22 +1,23 @@
 # Development Guide
 
-This guide covers development workflows, version management, and quality assurance for mtr-ng.
+This guide covers development workflows, how probing works, CI, and releases for mtr-ng. Where it disagrees with the code, the code wins.
 
 ## Prerequisites
 
-- Rust 1.70+ with `rustfmt` and `clippy` components
+- Rust 1.89 or newer (the MSRV, set as `rust-version` in `Cargo.toml`) with the `rustfmt` and `clippy` components
 - Git
-- Pre-commit (optional but recommended)
+- Pre-commit (optional)
+- `just` (optional): `just --list` shows the convenience recipes
 
 ## Development Setup
 
-1. **Clone and setup:**
+1. **Clone:**
    ```bash
-   git clone https://github.com/edejong-dbc/mtr-ng.git  
+   git clone https://github.com/edejong-dbc/mtr-ng.git
    cd mtr-ng
    ```
 
-2. **Install pre-commit hooks (recommended):**
+2. **Install pre-commit hooks (optional):**
    ```bash
    pip install pre-commit
    pre-commit install
@@ -24,176 +25,113 @@ This guide covers development workflows, version management, and quality assuran
 
 3. **Build and test:**
    ```bash
-   cargo build
-   cargo test
+   cargo build --locked
+   cargo test --locked
    ```
+
+## Running Against the Real Network
+
+- **macOS** needs no privileges: mtr-ng uses an unprivileged ICMP datagram socket.
+  ```bash
+  ./target/debug/mtr-ng -r -c 3 -n 1.1.1.1
+  ```
+- **Linux** needs root or `CAP_NET_RAW`. Build as yourself and run only the binary as root:
+  ```bash
+  cargo build
+  sudo ./target/debug/mtr-ng -r -c 3 -n 1.1.1.1
+  ```
+  Never `sudo cargo run`: it leaves root-owned files in `target/` and `~/.cargo`. To skip sudo, install a copy and give it the capability with `scripts/setup-capabilities.sh`. A capability on `target/debug/mtr-ng` is wiped by the next build.
+- **Simulation** (`--simulate`) produces fake data for UI work and demos. mtr-ng never falls back to it on its own: if it can't probe, it exits with an error.
+
+Only IPv4 ICMP is implemented. IPv6 targets and `-P udp|tcp` exit with an error.
+
+## How a Trace Works
+
+mtr-ng follows the original mtr algorithm.
+
+- **Probing.** Every interval (`-i`, in milliseconds) it sends one ICMP echo request per TTL, from 1 up to the end of the path. Routers along the way answer with Time Exceeded, the target with Echo Reply, and some hops with Destination Unreachable.
+- **Matching.** An ICMP error quotes the IP header and first 8 bytes of the probe that caused it, so the quoted echo id and sequence number identify our probe. The id filters out other processes' pings; the sequence number maps the reply to its hop and probe. A probe with no reply after the probe timeout (2 s) counts as lost.
+- **RTT.** Each probe records its own send time, and a dedicated receive thread timestamps each reply the moment it arrives, so RTT = arrival − send for that probe. Never derive RTT from loop or batch timing: an early version measured from the start of a batch and reported RTTs about 8x too high.
+- **Parsing.** Raw sockets, and datagram ICMP sockets on macOS, deliver the IP header too, so one parser serves both. It reads the header length from the IHL field and validates every length before indexing.
+- **Reverse DNS** runs off the probing path, so slow lookups never delay probes. `-n` turns it off.
+- **Report and TUI** share the same probing loop; report mode stops after `--count` rounds (10 by default).
+
+`CLAUDE.md` has a map of the source files.
+
+## Debugging
+
+- Report mode logs warnings to stderr. Interactive mode owns the terminal, so it logs only with `--log-file PATH`. `RUST_LOG` sets the level in both:
+  ```bash
+  RUST_LOG=mtr_ng=debug ./target/debug/mtr-ng -r -c 3 -n 1.1.1.1
+  ./target/debug/mtr-ng --log-file /tmp/mtr-ng.log 1.1.1.1
+  ```
+- Compare with the original mtr: `just compare <target>` (builds as you; sudo only where needed).
+- Symptoms and usual causes:
+  - RTTs close to the probe interval: replies matched to the wrong probe, or a timestamp taken in the wrong place.
+  - No replies at all: privileges (see above), or the parser rejecting valid packets.
+  - Wrong hops: TTL not set per probe, or replies accepted without checking the quoted id and sequence.
+- TUI changes: the `tui-check` skill runs the TUI headless in tmux and captures the screen as text.
 
 ## Quality Assurance
 
-### Code Formatting
-```bash
-# Check formatting
-cargo fmt --all -- --check
+The CI gate, run before every commit:
 
-# Auto-format code
-cargo fmt --all
+```bash
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-### Linting
-```bash
-# Run clippy with strict linting
-cargo clippy --all-targets --all-features -- -D warnings
-```
+(`just ci` runs the same.) Ground rules:
 
-### Testing
-```bash
-# Run all tests
-cargo test --verbose
+- Fix clippy findings instead of silencing them with `#[allow]`.
+- Delete dead code rather than hiding the warning.
+- Name protocol numbers and magic constants.
+- Validate every field of a received packet before using it.
 
-# Run tests with coverage
+### Coverage
+
+```bash
 cargo install cargo-llvm-cov
-cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+cargo llvm-cov --locked --lcov --output-path lcov.info
 ```
 
-### Security Audit
+### Advisories
+
+CI does not check advisories yet (see `BACKLOG.md`, C8). Locally:
+
 ```bash
-# Install and run security audit
-cargo install cargo-audit
-cargo audit
+cargo install cargo-deny
+cargo deny check advisories
 ```
+
+## CI (.github/workflows/ci.yml)
+
+Runs on pushes to `master` and on pull requests:
+
+- **Lint**: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on stable.
+- **Test**: `cargo test --locked` on ubuntu-latest (x86_64), ubuntu-24.04-arm, macos-15 and windows-latest.
+- **Smoke test**: real probes to 127.0.0.1 (`mtr-ng -r -c 2 -n 127.0.0.1`), with sudo on Linux and without on macOS. It fails unless hop 1 answers.
+- **FreeBSD**: `cargo check --target x86_64-unknown-freebsd` (type-check only).
+- **MSRV**: `cargo check --all-targets` with the toolchain named by `rust-version` in `Cargo.toml`.
+
+Every job uses `--locked`, so `Cargo.lock` must be committed and current.
 
 ## Version Management
 
-### Manual Approach
-1. Update `Cargo.toml` version
-2. Commit and tag manually
-3. Push both commit and tag
-
-### Automated Approach (Recommended)
-Use the provided version bump script:
+`scripts/bump-version.sh` edits `Cargo.toml`, commits, pushes, waits for CI and tags a release:
 
 ```bash
-# Patch version (0.1.3 → 0.1.4)
-./scripts/bump-version.sh 0.1.4
-
-# Minor version (0.1.4 → 0.2.0)  
-./scripts/bump-version.sh 0.2.0
-
-# Major version (0.2.0 → 1.0.0)
-./scripts/bump-version.sh 1.0.0
+./scripts/bump-version.sh 0.3.1
 ```
 
-The script will:
-- ✅ Validate version format
-- ✅ Check working directory is clean
-- ✅ Update `Cargo.toml`
-- ✅ Build to verify changes
-- ✅ Create commit and push
-- ✅ Wait for CI to pass
-- ✅ Create tag to trigger release
+Or by hand: edit the version in `Cargo.toml`, commit, then `git tag vX.Y.Z && git push origin master vX.Y.Z`.
 
-## CI/CD Pipeline
+## Release Pipeline (.github/workflows/release.yml)
 
-### Continuous Integration (.github/workflows/ci.yml)
-Runs on every push and PR:
-
-- **Code Quality**: `cargo fmt --check` and `cargo clippy`
-- **Testing**: Cross-platform tests (Linux, macOS, Windows)
-- **Security**: `cargo audit` for vulnerability scanning  
-- **Coverage**: Code coverage reporting with codecov
-
-### Release Pipeline (.github/workflows/release.yml)
-Triggered by version tags (v*):
-
-- **Version Sync**: Verifies `Cargo.toml` matches git tag
-- **Cross-platform Builds**: Linux (x64, ARM64, musl), macOS (Intel, Apple Silicon), Windows
-- **Package Generation**: DEB packages for Debian/Ubuntu
-- **Distribution**: 
-  - GitHub Releases with binaries
-  - crates.io publishing
-  - Homebrew formula updates
-
-## Release Process
-
-### 1. Prepare Release
-```bash
-# Ensure all changes are committed
-git status
-
-# Run quality checks locally
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-```
-
-### 2. Version Bump
-```bash
-# Use the version script (recommended)
-./scripts/bump-version.sh 0.1.4
-
-# OR manual process:
-# 1. Edit Cargo.toml version
-# 2. git add Cargo.toml && git commit -m "Bump version to 0.1.4"
-# 3. git tag v0.1.4 && git push origin master && git push origin v0.1.4
-```
-
-### 3. Monitor Release
-1. Check [GitHub Actions](https://github.com/edejong-dbc/mtr-ng/actions) for build status
-2. Verify [GitHub Release](https://github.com/edejong-dbc/mtr-ng/releases) creation
-3. Confirm [crates.io](https://crates.io/crates/mtr-ng) publishing
-4. Test Homebrew formula update
-
-## Troubleshooting
-
-### Version Mismatch Error
-If you see version mismatch errors in CI:
-
-```bash
-# Check current versions
-grep "^version" Cargo.toml
-git tag --sort=-version:refname | head -5
-
-# Fix mismatched version
-./scripts/bump-version.sh <correct_version>
-```
-
-### Failed CI Checks
-- **Formatting**: Run `cargo fmt --all`
-- **Linting**: Fix issues reported by `cargo clippy --all-targets --all-features -- -D warnings`
-- **Tests**: Debug with `cargo test --verbose`
-
-### Release Build Failures
-- Check platform-specific requirements (especially Windows Npcap SDK)
-- Verify cross-compilation setup for ARM64 targets
-- Review build logs in GitHub Actions
+Triggered by `v*` tags. It checks that the tag matches the `Cargo.toml` version, builds release binaries, builds a `.deb` with `cargo deb` (configured by `[package.metadata.deb]` in `Cargo.toml`), publishes to crates.io and updates the Homebrew tap. Parts of it are broken; see `BACKLOG.md`, C4.
 
 ## Adding New Features
 
-1. **Create feature branch**: `git checkout -b feature/new-feature`
-2. **Implement with tests**: Write code and corresponding tests
-3. **Quality check**: `cargo fmt && cargo clippy && cargo test`
-4. **Create PR**: Submit pull request with clear description
-5. **CI validation**: Ensure all CI checks pass
-6. **Code review**: Address reviewer feedback
-7. **Merge**: Squash and merge into main branch
-
-## Performance Optimization
-
-For performance-critical changes:
-
-```bash
-# Profile with different optimization levels
-cargo build --release
-cargo build --profile bench
-
-# Use criterion for benchmarking
-cargo install criterion
-# Add benchmark tests as needed
-```
-
-## Documentation
-
-- Update README.md for user-facing changes
-- Add inline documentation for new public APIs
-- Update this DEVELOPMENT.md for workflow changes
-- Consider adding examples for complex features 
+1. Create a branch: `git checkout -b feature/new-feature`
+2. Implement with tests
+3. Run the CI gate
+4. Open a pull request and wait for CI

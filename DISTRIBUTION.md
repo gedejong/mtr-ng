@@ -66,7 +66,7 @@ cargo install mtr-ng
 - Root/administrator privileges for raw socket access
 
 ### Build Dependencies
-- Rust 1.70+ (MSRV)
+- Rust 1.89+ (MSRV, `rust-version` in `Cargo.toml`)
 - Cargo
 - Standard C library and development headers
 - pkg-config (Linux)
@@ -92,7 +92,7 @@ This repository includes packaging files for various distributions:
 
 - **Homebrew**: `Formula/mtr-ng.rb`
 - **Arch Linux**: `packaging/PKGBUILD`
-- **Debian**: `packaging/debian/control`
+- **Debian**: `[package.metadata.deb]` in `Cargo.toml`, built with `cargo deb`
 - **Universal**: `install/install.sh`
 
 ## Release Process

@@ -2,6 +2,7 @@
 name = "mtr-ng"
 version = "0.3.0"
 edition = "2021"
+rust-version = "1.89"
 description = "A modern, feature-rich implementation of My Traceroute (MTR) with real-time network path visualization"
 license = "MIT OR Apache-2.0"
 authors = ["Edwin de Jong <edejong@fastmail.fm>"]
@@ -11,15 +12,16 @@ documentation = "https://github.com/edejong-dbc/mtr-ng#readme"
 readme = "README.md"
 keywords = ["network", "traceroute", "mtr", "networking", "diagnostics"]
 categories = ["command-line-utilities", "network-programming"]
-exclude = [
-    "test_*.txt",
-    "target/",
-    ".git/",
-    ".github/",
-    "*.log"
+include = [
+    "/src",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "/install/mtr-ng.1",
 ]
 
-# Metadata for package managers
+# Read by `cargo deb` in the build-packages job of .github/workflows/release.yml.
 [package.metadata.deb]
 maintainer = "Edwin de Jong <edejong@fastmail.fm>"
 copyright = "2024, Edwin de Jong <edejong@fastmail.fm>"
@@ -40,35 +42,28 @@ assets = [
     ["install/mtr-ng.1", "usr/share/man/man1/", "644"],
 ]
 
-[package.metadata.generate-rpm]
-assets = [
-    { source = "target/release/mtr-ng", dest = "/usr/bin/mtr-ng", mode = "755" },
-    { source = "README.md", dest = "/usr/share/doc/mtr-ng/README.md", mode = "644" },
-    { source = "LICENSE", dest = "/usr/share/doc/mtr-ng/LICENSE", mode = "644" },
-    { source = "install/mtr-ng.1", dest = "/usr/share/man/man1/mtr-ng.1", mode = "644" },
-]
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 tokio = { version = "1.45", features = ["full"] }
 # "all" is required for Type::RAW / ICMP datagram sockets; don't rely on tokio enabling it.
-socket2 = { version = "0.5", features = ["all"] }
-crossterm = "0.28"
-ratatui = "0.29"
+socket2 = { version = "0.6", features = ["all"] }
+# crossterm comes re-exported from ratatui, so the two versions cannot drift apart
+ratatui = "0.30"
 unicode-width = "0.2"
+gethostname = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
-rand = "0.8"
-hickory-resolver = "0.24"
+rand = "0.10"
+hickory-resolver = "0.26"
 
 [[bin]]
 name = "mtr-ng"
 path = "src/main.rs"
 
-
-
-
+[dev-dependencies]
+clap_mangen = "0.3"

@@ -7,6 +7,7 @@
 use crate::probe::{IcmpResponseType, ProbeResponse, Prober};
 use crate::session::{MtrSession, DEFAULT_REPORT_CYCLES};
 use crate::Result;
+use hickory_resolver::proto::rr::RData;
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -81,14 +82,18 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                     receive_time: reply.received_at,
                     precise_rtt_ns: rtt.as_nanos(),
                 };
-                let lookup = {
+                let (name, asn, resolver) = {
                     let mut s = session.lock().unwrap();
                     s.apply_response(&response);
                     s.notify();
-                    (!s.args.numeric && s.want_lookup(reply.source)).then(|| s.resolver.clone())
+                    let name = !s.args.numeric && s.want_lookup(reply.source);
+                    (name, s.want_asn(reply.source), s.resolver.clone())
                 };
-                if let Some(resolver) = lookup {
-                    dns.spawn(reverse_lookup(Arc::clone(&session), resolver, reply.source));
+                if name {
+                    dns.spawn(reverse_lookup(Arc::clone(&session), resolver.clone(), reply.source));
+                }
+                if asn {
+                    dns.spawn(asn_lookup(Arc::clone(&session), resolver, reply.source));
                 }
             }
             _ = sweep.tick() => expire(&session, &mut in_flight, timeout),
@@ -165,16 +170,27 @@ fn expire(session: &Shared, in_flight: &mut HashMap<u16, InFlight>, timeout: Dur
     s.notify();
 }
 
-async fn reverse_lookup(
-    session: Shared,
-    resolver: hickory_resolver::TokioAsyncResolver,
-    addr: IpAddr,
-) {
+async fn asn_lookup(session: Shared, resolver: hickory_resolver::TokioResolver, addr: IpAddr) {
+    let asn = crate::asn::lookup(&resolver, addr).await;
+    let mut s = session.lock().unwrap();
+    s.set_asn(addr, asn);
+    s.notify();
+}
+
+async fn reverse_lookup(session: Shared, resolver: hickory_resolver::TokioResolver, addr: IpAddr) {
     let name = resolver
         .reverse_lookup(addr)
         .await
         .ok()
-        .and_then(|names| names.iter().next().map(|n| n.to_utf8()))
+        .and_then(|lookup| {
+            lookup
+                .answers()
+                .iter()
+                .find_map(|record| match &record.data {
+                    RData::PTR(ptr) => Some(ptr.0.to_utf8()),
+                    _ => None,
+                })
+        })
         .map(|name| name.trim_end_matches('.').to_string())
         .filter(|name| *name != addr.to_string());
     let mut s = session.lock().unwrap();
@@ -251,7 +267,8 @@ mod tests {
 
     /// Run 3 rounds against a 12-hop path (target at TTL 12, TTL 4 silent).
     async fn trace(prober: FakeProber) -> MtrSession {
-        let args = Args::parse_from(["mtr-ng", "-n", "-c", "3", "-i", "5", "192.0.2.1"]);
+        let mut args = Args::parse_from(["mtr-ng", "-n", "-c", "3", "192.0.2.1"]);
+        args.interval = 5; // below the CLI minimum, to keep the test fast
         let mut session = MtrSession::new(args).await.unwrap();
         session.probe_timeout = Duration::from_millis(100);
         let shared = Arc::new(Mutex::new(session));

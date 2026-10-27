@@ -2,6 +2,9 @@
 # Install with: cargo install just
 # Run with: just <command>
 
+# Real probes need root on Linux and FreeBSD; macOS uses unprivileged ICMP sockets.
+sudo := if os() == "macos" { "" } else { "sudo" }
+
 # Default recipe lists all available commands
 default:
     @just --list
@@ -25,13 +28,6 @@ demo target="google.com":
 # Fast simulation test for CI/development
 quick target="8.8.8.8":
     cargo run -- --simulate --count 1 --interval 100 --report {{target}}
-
-# Test all protocols in simulation mode
-protocols:
-    @echo "🌐 Testing all protocols in simulation mode"
-    cargo run -- --simulate --protocol icmp --count 1 --report google.com
-    cargo run -- --simulate --protocol udp --count 1 --report google.com  
-    cargo run -- --simulate --protocol tcp --count 1 --report google.com
 
 # Test different output formats
 formats:
@@ -58,10 +54,10 @@ release:
     @echo "🎯 Testing release build performance"
     time ./target/release/mtr-ng --simulate --count 10 --interval 50 --report google.com
 
-# Check code quality
+# Check code quality (the lint job in CI)
 lint:
-    cargo clippy -- -D warnings
     cargo fmt --check
+    cargo clippy --all-targets -- -D warnings
 
 # Fix code formatting
 fmt:
@@ -77,13 +73,15 @@ clean:
     cargo build
     cargo test
 
-# Compare with original mtr (requires sudo and mtr to be installed)
+# Compare real probes with mtr (builds as you; sudo only for the binaries that need it)
 compare target="google.com":
-    @echo "📈 Comparing with original mtr (requires sudo)"
-    @echo "Our implementation:"
-    sudo cargo run -- --count 3 --report {{target}} || cargo run -- --simulate --count 3 --report {{target}}
-    @echo "\nOriginal mtr:"
-    sudo mtr -c 3 -r {{target}} || echo "❌ Original mtr not installed"
+    cargo build
+    @echo "mtr-ng:"
+    {{sudo}} ./target/debug/mtr-ng --count 3 --report {{target}}
+    @echo ""
+    @echo "mtr:"
+    @command -v mtr >/dev/null || { echo "mtr is not installed"; exit 1; }
+    sudo mtr -c 3 -r {{target}}
 
 # Show help for all CLI options
 help:
@@ -103,13 +101,13 @@ bench:
 audit:
     cargo audit
 
-# Full CI pipeline (what runs in GitHub Actions)
-ci: test lint audit
-    @echo "✅ CI pipeline completed successfully"
+# The CI gate: formatting, clippy and tests
+ci: lint test
+    @echo "CI gate passed"
 
-# Create a test report
+# Save unit test and simulation output to target/test-report.txt
 report:
-    @echo "📋 Generating test report"
-    cargo test 2>&1 | tee test-output.txt
-    just quick 2>&1 | tee -a test-output.txt
-    @echo "📄 Test report saved to test-output.txt" 
+    @mkdir -p target
+    cargo test 2>&1 | tee target/test-report.txt
+    just quick 2>&1 | tee -a target/test-report.txt
+    @echo "Test report saved to target/test-report.txt"

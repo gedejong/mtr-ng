@@ -2,8 +2,9 @@ use crate::probe::{IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
 use crate::{tracer, utils, Args, HopStats, Result};
 use anyhow::{anyhow, bail};
 use hickory_resolver::{
-    config::{ResolverConfig, ResolverOpts},
-    TokioAsyncResolver,
+    config::{LookupIpStrategy, ResolverConfig, CLOUDFLARE},
+    net::runtime::TokioRuntimeProvider,
+    TokioResolver,
 };
 use rand;
 
@@ -31,33 +32,48 @@ pub struct MtrSession {
     pub target_addr: IpAddr,
     pub hops: Vec<HopStats>,
     pub args: Args,
-    pub resolver: TokioAsyncResolver,
+    pub resolver: TokioResolver,
     pub num_hosts: usize, // TTLs probed each round (trimmed once the path end is known)
     pub update_callback: Option<UpdateCallback>, // callback for real-time updates
     /// How long a probe may stay unanswered before it counts as lost
     pub probe_timeout: Duration,
     /// Reverse DNS results per address; `None` while pending or when there is no name
     dns_names: HashMap<IpAddr, Option<String>>,
+    /// Origin AS per address, with `--aslookup`; `None` while pending or unknown
+    asns: HashMap<IpAddr, Option<u32>>,
 }
 
 impl MtrSession {
     pub async fn new(args: Args) -> Result<Self> {
         // The system resolver honours /etc/hosts, VPN and split-horizon DNS and keeps
         // private PTR lookups inside the network.
-        let resolver = TokioAsyncResolver::tokio_from_system_conf().unwrap_or_else(|e| {
+        let mut builder = TokioResolver::builder_tokio().unwrap_or_else(|e| {
             warn!("Cannot read the system DNS configuration ({e}); using public resolvers");
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+            TokioResolver::builder_with_config(
+                ResolverConfig::udp_and_tcp(&CLOUDFLARE),
+                TokioRuntimeProvider::default(),
+            )
         });
+        // Only IPv4 can be probed so far, and hickory 0.26 puts AAAA first by default
+        builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+        let resolver = builder.build()?;
 
         // Resolve target hostname to IP
         let target_addr = if let Ok(ip) = args.target.parse::<IpAddr>() {
             ip
         } else {
-            let response = resolver.lookup_ip(&args.target).await?;
+            let target = &args.target;
+            let response = resolver.lookup_ip(target).await.map_err(|e| {
+                if e.is_nx_domain() || e.is_no_records_found() {
+                    anyhow!("{target}: no such host")
+                } else {
+                    anyhow!("cannot resolve {target}: {e}")
+                }
+            })?;
             response
                 .iter()
                 .next()
-                .ok_or_else(|| anyhow!("Failed to resolve hostname"))?
+                .ok_or_else(|| anyhow!("{target}: no such host"))?
         };
 
         let mut hops: Vec<HopStats> = (1..=args.max_hops).map(HopStats::new).collect();
@@ -78,11 +94,12 @@ impl MtrSession {
             update_callback: None,
             probe_timeout: tracer::PROBE_TIMEOUT,
             dns_names: HashMap::new(),
+            asns: HashMap::new(),
         })
     }
 
     pub fn is_simulated(&self) -> bool {
-        self.args.simulate || self.args.force_simulate
+        self.args.simulate
     }
 
     /// Open the prober for a real trace, or return `None` in simulation mode.
@@ -147,6 +164,9 @@ impl MtrSession {
         if let Some(Some(name)) = self.dns_names.get(&addr) {
             self.hops[index].set_hostname_for_addr(addr, name.clone());
         }
+        if let Some(Some(asn)) = self.asns.get(&addr) {
+            self.hops[index].set_asn_for_addr(addr, *asn);
+        }
         true
     }
 
@@ -170,6 +190,38 @@ impl MtrSession {
             }
         }
         self.dns_names.insert(addr, name);
+    }
+
+    /// Start the statistics over, keeping what is known about the path itself.
+    pub fn reset_statistics(&mut self) {
+        for hop in &mut self.hops {
+            let mut fresh = HopStats::new(hop.hop);
+            fresh.set_ema_alpha(hop.ema_alpha);
+            fresh.is_target = hop.is_target;
+            *hop = fresh;
+        }
+    }
+
+    /// True the first time a public address is seen with `--aslookup`: the caller
+    /// should look up its AS. Private and special addresses are never sent out.
+    pub fn want_asn(&mut self, addr: IpAddr) -> bool {
+        if !self.args.wants_asn() || !crate::asn::is_public(addr) || self.asns.contains_key(&addr) {
+            return false;
+        }
+        self.asns.insert(addr, None);
+        true
+    }
+
+    /// Store an AS lookup result and show it on every hop where `addr` answered.
+    pub fn set_asn(&mut self, addr: IpAddr, asn: Option<u32>) {
+        if let Some(asn) = asn {
+            for hop in &mut self.hops {
+                if hop.responders.contains_key(&addr) {
+                    hop.set_asn_for_addr(addr, asn);
+                }
+            }
+        }
+        self.asns.insert(addr, asn);
     }
 
     /// Tell the UI that something changed.
@@ -411,9 +463,10 @@ mod tests {
             show_all: false,
             simulate: false,
             protocol: crate::args::ProbeProtocol::Icmp,
-            force_simulate: false,
-            timing: false,
             quiet: false,
+            aslookup: false,
+            json: false,
+            csv: false,
             log_file: None,
         };
 
@@ -443,9 +496,10 @@ mod tests {
             show_all: false,
             simulate: false,
             protocol: crate::args::ProbeProtocol::Icmp,
-            force_simulate: false,
-            timing: false,
             quiet: false,
+            aslookup: false,
+            json: false,
+            csv: false,
             log_file: None,
         };
 
@@ -558,9 +612,10 @@ mod tests {
             show_all: false,
             simulate: false,
             protocol: crate::args::ProbeProtocol::Icmp,
-            force_simulate: false,
-            timing: false,
             quiet: false,
+            aslookup: false,
+            json: false,
+            csv: false,
             log_file: None,
         };
 
