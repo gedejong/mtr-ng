@@ -214,7 +214,9 @@ pub fn render_map(
     ));
     let [map_area, legend_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(legend.len() as u16)]).areas(area);
-    let crosses_date_line = arcs.iter().any(|arc| arc.windows(2).any(wraps));
+    let crosses_date_line = arcs
+        .iter()
+        .any(|arc| geo::split_at_antimeridian(arc).len() > 1);
     let (x, y) = match crosses_date_line {
         true => WORLD,
         false => bounds(&points, map_area.width, map_area.height),
@@ -244,8 +246,9 @@ pub fn render_map(
                 }
             }
             ctx.layer();
-            for pair in arcs.iter().flat_map(|arc| arc.windows(2)) {
-                if !wraps(pair) {
+            let lines = arcs.iter().flat_map(|arc| geo::split_at_antimeridian(arc));
+            for line in lines {
+                for pair in line.windows(2) {
                     let (from, to) = (pair[0], pair[1]);
                     ctx.draw(&Segment::new(
                         from.1,
@@ -328,10 +331,6 @@ fn place_labels(spots: &[Spot], grid: &Grid) -> Vec<(u16, u16)> {
 }
 
 /// A step between two points that jumps across the date line.
-fn wraps(pair: &[(f64, f64)]) -> bool {
-    (pair[0].1 - pair[1].1).abs() > 180.0
-}
-
 /// Longitude and latitude ranges that show `points` (latitude, longitude) with a
 /// margin on a canvas `cols` × `rows` cells, stretched so a kilometre looks as
 /// long across as up. A cell is about twice as tall as it is wide.

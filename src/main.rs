@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = Args::parse();
-    args.report |= args.json || args.csv || args.dot;
+    args.report |= args.json || args.csv || args.dot || args.geojson;
     if let Err(message) = args.validate() {
         Args::command()
             .error(clap::error::ErrorKind::ValueValidation, message)

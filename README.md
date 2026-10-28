@@ -28,6 +28,7 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Light-speed check**: a reply can't come from farther than light in fibre travels in its round trip, about 100 km per ms. A location the hop's best RTT rules out is marked `!`, which catches routers placed at their owner's head office and anycast addresses placed at their registrant's
 - **Router names**: backbones name routers after their city, in codes of their own (`adm-b3-link.ip.twelve99.net` is Arelion in Amsterdam). For Arelion, Cogent, Hurricane Electric and Lumen that city goes before the database, which often places routers at a head office
 - **Map**: `m` draws the located hops on a world map, joined along great circles. Locations the RTT rules out stay off it
+- **GeoJSON**: `--geojson` writes the same as a file for map tools: a point per located hop with its statistics, and the path along great circles
 - **Origin**: distances are measured from `--origin LAT,LON`, or else from the first hop placed in a city
 
 ### Column Selection System
@@ -144,6 +145,9 @@ mtr-ng google.com --report --fields hop,host,loss,avg
 mtr-ng google.com --json
 mtr-ng google.com --csv > trace.csv
 
+# The located hops and the path as GeoJSON, for geojson.io, QGIS or GitHub
+mtr-ng -c 20 --geojson google.com > path.geojson
+
 # AS numbers via Team Cymru's DNS (public addresses only)
 mtr-ng -z google.com
 
@@ -174,6 +178,8 @@ mv ~/.local/share/mtr-ng/dbip.part ~/.local/share/mtr-ng/dbip-city-lite.mmdb
 Both licences ask for credit wherever the data is shown, so the report, the map and the hop details name the database's source. The map's coastlines are Natural Earth's 1:50m set, which is in the public domain.
 
 A database places a router where its owner registered it, often a head office a continent away, and anycast addresses wherever their registrant sits. mtr-ng therefore treats a location as a claim to test: a hop farther from the origin than its best RTT allows, granting both locations their accuracy, is marked `!`. Without `--origin` the origin is the first hop placed in a city, and the probing host is somewhere within that hop's reach, which widens the margin; with `--origin` the check is tighter. The check can only rule a location out: one without `!` is possible, not confirmed.
+
+In `--json` each hub carries a `geo` object (city, country, lat, lon, accuracy_km, distance_km, impossible, from_name), and `mtr.geo` says whose locations they are and where distances are measured from. `--geojson` is RFC 7946: coordinates are [longitude, latitude], ruled-out hops are points with `"impossible": true` (red in viewers that read simplestyle-spec) and stay off the path, and a path across the date line is cut there.
 
 Router names are often better evidence. Large networks name their routers after the city they stand in, each in codes of its own: Arelion's `adm` is Amsterdam, `win` Vienna and `san` San Antonio, while to Cogent, which uses airport codes, `san` is San Diego. mtr-ng carries the codes of Arelion, Cogent, Hurricane Electric and Lumen, taken from the router lists in their looking glasses (and, for Cogent's other sites, OurAirports' list of large airports). When a hop's name has one, that city goes before the database, unless the RTT rules it out and not the database's location; the hop details say `adm in its name`. The names come from reverse DNS, so `-n` turns this off.
 

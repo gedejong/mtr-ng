@@ -44,6 +44,10 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Measure distances from Amsterdam, which also tightens the light-speed check.",
     ),
     (
+        "mtr-ng -c 20 --geojson example.com > path.geojson",
+        "Save the located hops and the path for a map viewer such as geojson.io.",
+    ),
+    (
         "mtr-ng --simulate example.com",
         "Fake data, marked SIMULATED.",
     ),

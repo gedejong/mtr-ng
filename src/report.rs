@@ -1,5 +1,5 @@
 use crate::args::Column;
-use crate::geo::Origin;
+use crate::geo::{self, Origin};
 use crate::hop_stats::FlowStats;
 use crate::icmp_ext::MplsLabel;
 use crate::utils::network;
@@ -328,6 +328,87 @@ fn csv_rows(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Vec<St
         .collect()
 }
 
+/// What the hubs' `geo` objects rest on: whose locations they are and where
+/// distances are measured from (`hop` is null for `--origin`). None without
+/// a location source.
+fn json_geo(attribution: Option<&str>, origin: Option<&Origin>) -> Option<Value> {
+    Some(json!({
+        "attribution": attribution?,
+        "origin": origin.map(|o| json!({"lat": o.lat, "lon": o.lon, "hop": o.hop})),
+    }))
+}
+
+/// Map viewers' colours (simplestyle-spec): a hop its RTT rules out, and the path
+const IMPOSSIBLE_MARKER: &str = "#d32f2f";
+const PATH_STROKE: &str = "#e6a100";
+
+/// The located hops as GeoJSON (RFC 7946): a point per hop, and the path through
+/// the locations their RTT allows, along great circles and cut at the date line.
+/// Coordinates are [longitude, latitude]. `title`, `marker-color` and `stroke`
+/// follow simplestyle-spec, which map viewers such as geojson.io read.
+fn geojson(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Value {
+    let lon_lat = |(lat, lon): (f64, f64)| {
+        let round = |degrees: f64| (degrees * 1e4).round() / 1e4;
+        [round(lon), round(lat)]
+    };
+    let point = |at| json!({"type": "Point", "coordinates": lon_lat(at)});
+    let feature = |geometry, properties| json!({"type": "Feature", "geometry": geometry, "properties": properties});
+    let mut features = Vec::new();
+    let mut stops = Vec::new();
+    for hop in hops.iter().filter(|hop| hop.sent > 0) {
+        let (Some(fix), Some(addr)) = (&hop.geo, hop.addr) else {
+            continue;
+        };
+        let assessment = hop.assess(origin);
+        let impossible = assessment.is_some_and(|a| a.impossible);
+        let mut properties = json!({
+            "title": format!("{}. {}", hop.hop, host_label(hop, numeric)),
+            "hop": hop.hop,
+            "host": host_label(hop, numeric),
+            "ip": addr.to_string(),
+            "city": fix.city,
+            "country": fix.country,
+            "accuracy_km": fix.accuracy_km,
+            "distance_km": assessment.map(|a| a.distance_km.round()),
+            "impossible": impossible,
+            "from_name": fix.from_name,
+            "loss_pct": (hop.loss_percent * 10.0).round() / 10.0,
+            "sent": hop.sent,
+            "best_ms": json_ms(hop.best_rtt),
+            "avg_ms": json_ms(hop.avg_rtt),
+        });
+        match impossible {
+            true => properties["marker-color"] = json!(IMPOSSIBLE_MARKER),
+            false => stops.push((fix.lat, fix.lon)),
+        }
+        features.push(feature(point((fix.lat, fix.lon)), properties));
+    }
+    if let Some(o) = origin.filter(|o| o.hop.is_none()) {
+        let properties = json!({"title": "--origin", "marker-symbol": "star"});
+        features.push(feature(point((o.lat, o.lon)), properties));
+    }
+    let mut path: Vec<(f64, f64)> = Vec::new();
+    for pair in stops.windows(2) {
+        let arc = geo::great_circle(pair[0], pair[1], 1.0);
+        // Each arc starts where the one before ended
+        path.extend(&arc[usize::from(!path.is_empty())..]);
+    }
+    if path.len() >= 2 {
+        let lines: Vec<Vec<[f64; 2]>> = geo::split_at_antimeridian(&path)
+            .into_iter()
+            .map(|line| line.into_iter().map(lon_lat).collect())
+            .collect();
+        let geometry = match lines.as_slice() {
+            [line] => json!({"type": "LineString", "coordinates": line}),
+            _ => json!({"type": "MultiLineString", "coordinates": lines}),
+        };
+        let properties = json!({"title": "Path", "stroke": PATH_STROKE, "stroke-width": 2});
+        // First, so viewers draw the hops over it
+        features.insert(0, feature(geometry, properties));
+    }
+    json!({"type": "FeatureCollection", "features": features})
+}
+
 pub async fn run_report(mut session: MtrSession) -> Result<()> {
     let start = chrono::Utc::now();
     let prober = session.open_probe_engine()?;
@@ -342,7 +423,7 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
     let source = gethostname::gethostname().to_string_lossy().into_owned();
 
     if args.json {
-        let report = json!({
+        let mut report = json!({
             "report": {
                 "mtr": {
                     "src": source,
@@ -352,13 +433,25 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
                     "start": start.to_rfc3339(),
                     "simulated": session.is_simulated(),
                     "version": env!("CARGO_PKG_VERSION"),
-                    "geolocation": session.geo_attribution(),
-                    "origin": origin.map(|o| json!({"lat": o.lat, "lon": o.lon, "hop": o.hop})),
                 },
                 "hubs": json_hubs(hops, args.numeric, args.wants_asn(), args.flows, origin),
             }
         });
+        if let Some(geo) = json_geo(session.geo_attribution(), origin) {
+            report["report"]["mtr"]["geo"] = geo;
+        }
         println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if args.geojson {
+        let mut collection = geojson(hops, args.numeric, origin);
+        collection["target"] = json!(session.target);
+        collection["start"] = json!(start.to_rfc3339());
+        collection["simulated"] = json!(session.is_simulated());
+        if let Some(geo) = json_geo(session.geo_attribution(), origin) {
+            collection["geo"] = geo;
+        }
+        println!("{}", serde_json::to_string_pretty(&collection)?);
         return Ok(());
     }
     if args.csv {
@@ -545,6 +638,72 @@ mod tests {
     }
 
     #[test]
+    fn geojson_draws_the_path_through_the_locations_rtt_allows() {
+        let (mut hops, origin) = located();
+        let collection = geojson(&hops, true, Some(&origin));
+        assert_eq!(collection["type"], "FeatureCollection");
+        let features = collection["features"].as_array().unwrap();
+        assert_eq!(features.len(), 3, "the path, then hops 3 and 4");
+        let path = &features[0]["geometry"];
+        assert_eq!(path["type"], "LineString");
+        let coordinates = path["coordinates"].as_array().unwrap();
+        assert_eq!(coordinates[0], json!([4.31, 52.08]), "longitude first");
+        assert_eq!(coordinates.last(), Some(&json!([136.59, 36.44])));
+        assert!(
+            coordinates.iter().any(|c| c[1].as_f64().unwrap() > 60.0),
+            "along the great circle, over Siberia"
+        );
+        let hague = &features[1];
+        assert_eq!(
+            hague["geometry"],
+            json!({"type": "Point", "coordinates": [4.31, 52.08]})
+        );
+        assert_eq!(hague["properties"]["title"], "3. 195.190.228.107");
+        assert_eq!(hague["properties"]["city"], "The Hague");
+        assert_eq!(hague["properties"]["impossible"], false);
+        assert!(hague["properties"].get("marker-color").is_none());
+
+        // 10 ms rules Nomi out: red, and no path through it
+        hops[3].best_rtt = Some(ms(10.0));
+        let given = Origin {
+            hop: None,
+            ..origin
+        };
+        let collection = geojson(&hops, true, Some(&given));
+        let features = collection["features"].as_array().unwrap();
+        let titles: Vec<&str> = features
+            .iter()
+            .map(|f| f["properties"]["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            titles,
+            ["3. 195.190.228.107", "4. 150.65.7.130", "--origin"]
+        );
+        assert_eq!(features[1]["properties"]["impossible"], true);
+        assert_eq!(features[1]["properties"]["marker-color"], IMPOSSIBLE_MARKER);
+
+        // Tokyo to San Francisco: two lines, meeting at the date line
+        use crate::geo::tests::city;
+        hops[2].set_geo_for_addr(
+            IpAddr::from([195, 190, 228, 107]),
+            city("Tokyo", "JP", 35.69, 139.75),
+        );
+        hops[3].set_geo_for_addr(
+            IpAddr::from([150, 65, 7, 130]),
+            city("San Francisco", "US", 37.77, -122.42),
+        );
+        hops[3].best_rtt = Some(ms(200.0));
+        let collection = geojson(&hops, true, None);
+        let path = &collection["features"][0]["geometry"];
+        assert_eq!(path["type"], "MultiLineString");
+        let lines = path["coordinates"].as_array().unwrap();
+        assert_eq!(lines.len(), 2);
+        let (end, start) = (lines[0].as_array().unwrap().last().unwrap(), &lines[1][0]);
+        assert_eq!((&end[0], &start[0]), (&json!(180.0), &json!(-180.0)));
+        assert_eq!(end[1], start[1], "the same latitude on both sides");
+    }
+
+    #[test]
     fn locations_are_checked_against_the_rtt_and_credited() {
         let (mut hops, origin) = located();
         let columns = [
@@ -613,6 +772,14 @@ mod tests {
         let hubs = json_hubs(&hops, true, false, 1, Some(&origin));
         assert_eq!(hubs[3]["geo"]["from_name"], "tyo");
         assert_eq!(hubs[2]["geo"]["from_name"], Value::Null);
+        assert_eq!(
+            json_geo(Some("Test credit"), Some(&origin)),
+            Some(json!({
+                "attribution": "Test credit",
+                "origin": {"lat": 52.08, "lon": 4.31, "hop": 3},
+            }))
+        );
+        assert_eq!(json_geo(None, Some(&origin)), None, "no locations at all");
     }
 
     #[test]

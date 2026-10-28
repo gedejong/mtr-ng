@@ -8,7 +8,7 @@ mtr\-ng \- A modern implementation of mtr (My Traceroute) with unicode and termi
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .SH SYNOPSIS
-\fBmtr\-ng\fR [\fB\-c\fR|\fB\-\-count\fR] [\fB\-i\fR|\fB\-\-interval\fR] [\fB\-M\fR|\fB\-\-max\-hops\fR] [\fB\-r\fR|\fB\-\-report\fR] [\fB\-j\fR|\fB\-\-json\fR] [\fB\-C\fR|\fB\-\-csv\fR] [\fB\-\-dot\fR] [\fB\-n\fR|\fB\-\-numeric\fR] [\fB\-z\fR|\fB\-\-aslookup\fR] [\fB\-g\fR|\fB\-\-geo\fR] [\fB\-\-geoip\-mmdb\fR] [\fB\-\-origin\fR] [\fB\-e\fR|\fB\-\-mpls\fR] [\fB\-\-flows\fR] [\fB\-\-sparkline\-scale\fR] [\fB\-\-ema\-alpha\fR] [\fB\-\-fields\fR] [\fB\-\-show\-all\fR] [\fB\-\-simulate\fR] [\fB\-P\fR|\fB\-\-protocol\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-log\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fITARGET\fR> 
+\fBmtr\-ng\fR [\fB\-c\fR|\fB\-\-count\fR] [\fB\-i\fR|\fB\-\-interval\fR] [\fB\-M\fR|\fB\-\-max\-hops\fR] [\fB\-r\fR|\fB\-\-report\fR] [\fB\-j\fR|\fB\-\-json\fR] [\fB\-C\fR|\fB\-\-csv\fR] [\fB\-\-dot\fR] [\fB\-\-geojson\fR] [\fB\-n\fR|\fB\-\-numeric\fR] [\fB\-z\fR|\fB\-\-aslookup\fR] [\fB\-g\fR|\fB\-\-geo\fR] [\fB\-\-geoip\-mmdb\fR] [\fB\-\-origin\fR] [\fB\-e\fR|\fB\-\-mpls\fR] [\fB\-\-flows\fR] [\fB\-\-sparkline\-scale\fR] [\fB\-\-ema\-alpha\fR] [\fB\-\-fields\fR] [\fB\-\-show\-all\fR] [\fB\-\-simulate\fR] [\fB\-P\fR|\fB\-\-protocol\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-log\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fITARGET\fR> 
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .SH DESCRIPTION
@@ -37,6 +37,9 @@ Report as CSV, one row per hop (implies \-\-report)
 .TP
 \fB\-\-dot\fR
 Print the routes as a Graphviz graph instead of a table (implies \-\-report). Most useful with \-\-flows
+.TP
+\fB\-\-geojson\fR
+Print the located hops and the path between them as GeoJSON, for map tools (implies \-\-report; needs a geolocation database, see \-\-geo)
 .TP
 \fB\-n\fR, \fB\-\-numeric\fR
 Show IP addresses instead of hostnames
@@ -324,6 +327,9 @@ Show where each hop is; m draws the path on a map. See GEOLOCATION.
 .TP
 .B mtr\-ng \-r \-g \-\-origin 52.37,4.89 example.com
 Measure distances from Amsterdam, which also tightens the light\-speed check.
+.TP
+.B mtr\-ng \-c 20 \-\-geojson example.com > path.geojson
+Save the located hops and the path for a map viewer such as geojson.io.
 .TP
 .B mtr\-ng \-\-simulate example.com
 Fake data, marked SIMULATED.

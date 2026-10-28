@@ -135,6 +135,11 @@ pub struct Args {
     #[arg(long, conflicts_with_all = ["json", "csv"])]
     pub dot: bool,
 
+    /// Print the located hops and the path between them as GeoJSON, for map tools
+    /// (implies --report; needs a geolocation database, see --geo)
+    #[arg(long, conflicts_with_all = ["json", "csv", "dot"])]
+    pub geojson: bool,
+
     /// Show IP addresses instead of hostnames
     #[arg(short, long)]
     pub numeric: bool,
@@ -268,15 +273,15 @@ impl Args {
         }
     }
 
-    /// Locations were asked for: `--geo`, or `--fields` naming a column that shows
-    /// them. `--show-all` doesn't count, so it works without a database.
+    /// Locations were asked for: `--geo`, `--geojson`, or `--fields` naming a column
+    /// that shows them. `--show-all` doesn't count, so it works without a database.
     pub fn wants_geo(&self) -> bool {
         let named = |fields: &Vec<Column>| {
             fields
                 .iter()
                 .any(|c| matches!(c, Column::Geo | Column::Dist))
         };
-        self.geo || self.fields.as_ref().is_some_and(named)
+        self.geo || self.geojson || self.fields.as_ref().is_some_and(named)
     }
 
     /// AS numbers are looked up for `--aslookup`, or when the ASN column is chosen.
@@ -417,5 +422,8 @@ mod tests {
                 "{bad}"
             );
         }
+        let geojson = Args::try_parse_from(["mtr-ng", "--geojson", "x"]).unwrap();
+        assert!(geojson.wants_geo(), "a map file needs locations");
+        assert!(Args::try_parse_from(["mtr-ng", "--geojson", "--json", "x"]).is_err());
     }
 }

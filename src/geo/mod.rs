@@ -111,6 +111,28 @@ pub fn great_circle(from: (f64, f64), to: (f64, f64), step_deg: f64) -> Vec<(f64
         .collect()
 }
 
+/// `points` (latitude, longitude) as lines that don't cross the antimeridian:
+/// where a step jumps across ±180°, one line ends on it and the next starts on
+/// the other side, at the latitude where the step crosses. GeoJSON asks for this
+/// (RFC 7946, 3.1.9), and a map drawn from -180° to 180° needs it too.
+pub fn split_at_antimeridian(points: &[(f64, f64)]) -> Vec<Vec<(f64, f64)>> {
+    let mut lines = vec![Vec::new()];
+    for (i, &(lat, lon)) in points.iter().enumerate() {
+        if let Some(&(prev_lat, prev_lon)) = i.checked_sub(1).map(|j| &points[j]) {
+            if (lon - prev_lon).abs() > 180.0 {
+                let edge = 180f64.copysign(prev_lon);
+                let unwrapped = lon + 360f64.copysign(prev_lon);
+                let t = (edge - prev_lon) / (unwrapped - prev_lon);
+                let cut = prev_lat + t * (lat - prev_lat);
+                lines.last_mut().unwrap().push((cut, edge));
+                lines.push(vec![(cut, -edge)]);
+            }
+        }
+        lines.last_mut().unwrap().push((lat, lon));
+    }
+    lines
+}
+
 /// Farthest away a reply can have come from, given its round trip.
 pub fn reach_km(rtt: Duration) -> f64 {
     rtt.as_secs_f64() * 1000.0 * KM_PER_RTT_MS
@@ -504,6 +526,29 @@ pub mod tests {
             .windows(2)
             .all(|w| distance_km(w[0], w[1]) < 2.0 * 111.2 + 1.0));
         assert_eq!(great_circle(tokyo, tokyo, 2.0).len(), 2);
+    }
+
+    #[test]
+    fn lines_across_the_date_line_end_on_it() {
+        let tokyo_sf = great_circle((35.69, 139.75), (37.77, -122.42), 2.0);
+        let lines = split_at_antimeridian(&tokyo_sf);
+        assert_eq!(lines.len(), 2);
+        let (end, start) = (*lines[0].last().unwrap(), lines[1][0]);
+        assert_eq!((end.1, start.1), (180.0, -180.0));
+        assert_eq!(end.0, start.0, "cut at one latitude");
+        assert!(end.0 > 45.0, "the arc bows north: {}", end.0);
+        assert_eq!(lines.concat().len(), tokyo_sf.len() + 2);
+
+        let westward = split_at_antimeridian(&[(0.0, -179.0), (2.0, 179.0)]);
+        assert_eq!(
+            westward,
+            [
+                vec![(0.0, -179.0), (1.0, -180.0)],
+                vec![(1.0, 180.0), (2.0, 179.0)]
+            ]
+        );
+        let amsterdam_tokyo = great_circle((52.37, 4.89), (35.69, 139.75), 2.0);
+        assert_eq!(split_at_antimeridian(&amsterdam_tokyo), [amsterdam_tokyo]);
     }
 
     #[test]
