@@ -25,6 +25,12 @@ pub enum Column {
     Host,
     /// Origin AS number (looked up with --aslookup)
     Asn,
+    /// Where the hop is, from the geolocation database (see --geo)
+    Geo,
+    /// Distance from the origin in km (see --origin)
+    Dist,
+    /// Farthest from here a reply can come in the best RTT, in km
+    Reach,
     /// Packet loss percentage
     Loss,
     /// Number of packets sent
@@ -56,6 +62,9 @@ impl Column {
             Column::Hop,
             Column::Host,
             Column::Asn,
+            Column::Geo,
+            Column::Dist,
+            Column::Reach,
             Column::Loss,
             Column::Sent,
             Column::Last,
@@ -134,6 +143,22 @@ pub struct Args {
     #[arg(short = 'z', long)]
     pub aslookup: bool,
 
+    /// Show where each hop is (Location and Dist columns), from a local
+    /// geolocation database: nothing is sent anywhere. A location farther away
+    /// than light in fibre gets in the hop's best RTT is marked with !
+    #[arg(short = 'g', long)]
+    pub geo: bool,
+
+    /// Geolocation database in MaxMind's format: DB-IP City Lite or GeoLite2 City.
+    /// Default: the newest .mmdb in ~/.local/share/mtr-ng, then the usual system places
+    #[arg(long, value_name = "PATH")]
+    pub geoip_mmdb: Option<PathBuf>,
+
+    /// Where you are, in degrees, for distances and the plausibility check.
+    /// Default: the first hop the database places in a city, with its uncertainty
+    #[arg(long, value_name = "LAT,LON", value_parser = coordinates, allow_hyphen_values = true)]
+    pub origin: Option<(f64, f64)>,
+
     /// Show the MPLS labels routers report (RFC 4950) under their hop
     #[arg(short = 'e', long)]
     pub mpls: bool,
@@ -185,6 +210,19 @@ fn at_least_one(s: &str) -> Result<usize, String> {
     }
 }
 
+/// `52.37,4.89`: latitude and longitude in degrees.
+fn coordinates(s: &str) -> Result<(f64, f64), String> {
+    let (lat, lon) = s
+        .split_once(',')
+        .ok_or("expected LAT,LON, such as 52.37,4.89")?;
+    let parse = |v: &str| v.trim().parse::<f64>().map_err(|e| format!("{v}: {e}"));
+    let (lat, lon) = (parse(lat)?, parse(lon)?);
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return Err("latitude must be within ±90 and longitude within ±180".to_string());
+    }
+    Ok((lat, lon))
+}
+
 fn smoothing_factor(s: &str) -> Result<f64, String> {
     let alpha: f64 = s.parse().map_err(|e| format!("{e}"))?;
     if alpha > 0.0 && alpha <= 1.0 {
@@ -216,13 +254,29 @@ impl Args {
             Column::all()
         } else if let Some(ref fields) = self.fields {
             fields.clone()
-        } else if self.aslookup {
-            let mut columns = Column::default_columns();
-            columns.insert(2, Column::Asn);
-            columns
         } else {
-            Column::default_columns()
+            let mut columns = Column::default_columns();
+            let mut extra = Vec::new();
+            if self.aslookup {
+                extra.push(Column::Asn);
+            }
+            if self.geo {
+                extra.extend([Column::Geo, Column::Dist]);
+            }
+            columns.splice(2..2, extra);
+            columns
         }
+    }
+
+    /// Locations were asked for: `--geo`, or `--fields` naming a column that shows
+    /// them. `--show-all` doesn't count, so it works without a database.
+    pub fn wants_geo(&self) -> bool {
+        let named = |fields: &Vec<Column>| {
+            fields
+                .iter()
+                .any(|c| matches!(c, Column::Geo | Column::Dist))
+        };
+        self.geo || self.fields.as_ref().is_some_and(named)
     }
 
     /// AS numbers are looked up for `--aslookup`, or when the ASN column is chosen.
@@ -336,5 +390,32 @@ mod tests {
         assert_eq!(args.ema_alpha, 0.1);
         assert!(args.fields.is_none());
         assert!(!args.show_all);
+    }
+
+    #[test]
+    fn geo_adds_its_columns_and_origin_takes_negative_coordinates() {
+        let args = Args::try_parse_from(["mtr-ng", "-z", "-g", "x"]).unwrap();
+        let columns = args.get_columns();
+        assert_eq!(
+            columns[1..5],
+            [Column::Host, Column::Asn, Column::Geo, Column::Dist]
+        );
+        assert!(args.wants_geo());
+        let wants = |argv: &[&str]| Args::try_parse_from(argv).unwrap().wants_geo();
+        assert!(!wants(&["mtr-ng", "--fields", "hop,reach", "x"]));
+        assert!(wants(&["mtr-ng", "--fields", "hop,geo", "x"]));
+        assert!(
+            !wants(&["mtr-ng", "--show-all", "x"]),
+            "works without a database"
+        );
+
+        let args = Args::try_parse_from(["mtr-ng", "--origin", "-33.87,151.21", "x"]).unwrap();
+        assert_eq!(args.origin, Some((-33.87, 151.21)));
+        for bad in ["52.3", "91,0", "0,181", "a,b"] {
+            assert!(
+                Args::try_parse_from(["mtr-ng", "--origin", bad, "x"]).is_err(),
+                "{bad}"
+            );
+        }
     }
 }

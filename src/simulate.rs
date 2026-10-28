@@ -2,6 +2,7 @@
 //! as the real engine, so a simulated trace runs through the real probing loop
 //! (flows, timeouts, loss) without sockets or privileges.
 
+use crate::geo::{GeoFix, GeoSource};
 use crate::icmp_ext::MplsLabel;
 use crate::probe::{IcmpResponseType, Prober, Reply};
 use std::{
@@ -86,6 +87,58 @@ const PATH: [SimHop; 8] = [
 
 /// RTT of the target, which answers every TTL past the end of `PATH`.
 const TARGET_RTT_MS: f64 = 25.0;
+
+/// Where the made-up routers are: (address, city, country, latitude, longitude).
+/// edge-4 claims Ashburn although it answers within 25 ms of Amsterdam, the kind
+/// of registrant-address mistake the plausibility check exists for.
+const PLACES: [([u8; 4], &str, &str, f64, f64); 8] = [
+    ([198, 51, 100, 1], "Amsterdam", "NL", 52.37, 4.89),
+    ([198, 51, 100, 9], "Amsterdam", "NL", 52.35, 4.92),
+    ([198, 51, 100, 41], "Amsterdam", "NL", 52.30, 4.94),
+    ([198, 51, 100, 42], "Amsterdam", "NL", 52.30, 4.94),
+    ([198, 51, 100, 51], "Frankfurt am Main", "DE", 50.11, 8.68),
+    ([198, 51, 100, 52], "Frankfurt am Main", "DE", 50.11, 8.68),
+    ([203, 0, 113, 7], "London", "GB", 51.51, -0.13),
+    ([203, 0, 113, 30], "Ashburn", "US", 39.04, -77.49),
+];
+
+/// The target, wherever it really is
+const TARGET_PLACE: (&str, &str, f64, f64) = ("London", "GB", 51.50, -0.12);
+
+/// Locations for the made-up path, without a database.
+pub struct SimGeo {
+    target: IpAddr,
+}
+
+impl SimGeo {
+    pub fn new(target: IpAddr) -> Self {
+        Self { target }
+    }
+}
+
+impl GeoSource for SimGeo {
+    fn locate(&self, addr: IpAddr) -> Option<GeoFix> {
+        let (city, country, lat, lon) = match addr == self.target {
+            true => TARGET_PLACE,
+            false => PLACES
+                .iter()
+                .find(|place| IpAddr::from(place.0) == addr)
+                .map(|&(_, city, country, lat, lon)| (city, country, lat, lon))?,
+        };
+        Some(GeoFix {
+            lat,
+            lon,
+            accuracy_km: None,
+            city: Some(city.to_string()),
+            country: Some(country.to_string()),
+            from_name: None,
+        })
+    }
+
+    fn attribution(&self) -> &str {
+        "made-up locations (--simulate)"
+    }
+}
 
 /// Host names of the made-up routers, for the DNS cache: a simulation sends no
 /// lookups.

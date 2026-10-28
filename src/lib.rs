@@ -1,6 +1,7 @@
 pub mod args;
 pub mod asn;
 pub mod columns;
+pub mod geo;
 pub mod hop_stats;
 pub mod icmp_ext;
 pub mod probe;

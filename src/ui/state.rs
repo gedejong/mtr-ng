@@ -23,6 +23,8 @@ pub enum View {
     Hops,
     /// Which address each flow met at each hop (`--flows`)
     Flows,
+    /// The located hops on a world map
+    Map,
 }
 
 /// The column chooser: every column, shown ones first in their current order.
@@ -141,14 +143,12 @@ impl UiState {
             .copied()
     }
 
-    /// Switch between the table and the flow matrix, keeping the selected hop.
-    pub fn toggle_view(&mut self) {
+    /// Show `view`, or the table again if it is showing; the selected hop stays
+    /// selected.
+    pub fn toggle_view(&mut self, view: View) {
         self.follow = self.selected_hop();
         self.table = TableState::default();
-        self.view = match self.view {
-            View::Hops => View::Flows,
-            View::Flows => View::Hops,
-        };
+        self.view = if self.view == view { View::Hops } else { view };
     }
 
     /// Details of the selected hop, or of the first one when none is selected.
@@ -222,11 +222,15 @@ mod tests {
         // Hop 2 has an alternate address, so it fills two rows
         ui.row_hops = vec![1, 2, 2, 3];
         ui.table.select(Some(2));
-        ui.toggle_view();
+        ui.toggle_view(View::Flows);
         assert_eq!(
             (ui.view, ui.follow, ui.table.selected()),
             (View::Flows, Some(2), None)
         );
+        ui.toggle_view(View::Map);
+        assert_eq!(ui.view, View::Map, "straight from one view to another");
+        ui.toggle_view(View::Map);
+        assert_eq!(ui.view, View::Hops);
 
         ui.row_hops = vec![1, 2, 3];
         ui.table.select(Some(1));

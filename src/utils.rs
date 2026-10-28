@@ -77,6 +77,27 @@ pub mod network {
     }
 }
 
+/// Text layout
+pub mod text {
+    use unicode_width::UnicodeWidthStr;
+
+    /// `items` joined by `sep`, wrapped between items to lines of at most `width`
+    /// columns. An item wider than that gets a line to itself.
+    pub fn pack(items: &[String], sep: &str, width: usize) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        for item in items {
+            match lines.last_mut() {
+                Some(line) if line.width() + sep.width() + item.width() <= width => {
+                    line.push_str(sep);
+                    line.push_str(item);
+                }
+                _ => lines.push(item.clone()),
+            }
+        }
+        lines
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +133,21 @@ mod tests {
             "路由器..."
         );
         assert_eq!(network::truncate_hostname("short", 20), "short");
+    }
+
+    #[test]
+    fn packed_lines_break_between_items() {
+        let key = ["●n hop n", "◆ --origin", "not placed: 1, 3-9"].map(String::from);
+        assert_eq!(
+            text::pack(&key, " · ", 80),
+            ["●n hop n · ◆ --origin · not placed: 1, 3-9"]
+        );
+        assert_eq!(
+            text::pack(&key, " · ", 30),
+            ["●n hop n · ◆ --origin", "not placed: 1, 3-9"],
+            "the ● and ◆ are one column each"
+        );
+        assert_eq!(text::pack(&key, " · ", 5), key, "too wide: one per line");
     }
 
     #[test]

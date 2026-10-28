@@ -2,6 +2,7 @@
 
 pub mod events;
 mod main;
+mod map;
 mod render;
 pub mod state;
 pub mod visualization;

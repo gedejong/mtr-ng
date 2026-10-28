@@ -2,6 +2,7 @@
 //! column or hop detail overlay.
 
 use super::events::{Binding, COLUMN_KEYS, DETAIL_KEYS, TABLE_KEYS};
+use super::map::render_map;
 use super::state::{Mode, UiState, View};
 use super::visualization::{
     gradient, histogram, histogram_spans, history_spans, letter_color, loss_color, symbol,
@@ -9,10 +10,12 @@ use super::visualization::{
 };
 use crate::args::Column;
 use crate::columns::format_ms;
+use crate::geo::{self, Origin};
 use crate::hop_stats::ResponderStats;
 use crate::icmp_ext::MplsLabel;
 use crate::topology;
 use crate::utils::network::truncate_hostname;
+use crate::utils::text::pack;
 use crate::{HopStats, MtrSession, SparklineScale};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -71,6 +74,13 @@ pub fn render(f: &mut Frame, session: &MtrSession, ui: &mut UiState) {
             render_flows(f, table, session, hops, ui);
             render_flow_legend(f, scale_area, session);
         }
+        View::Map => {
+            let below = Rect {
+                height: table.height + scale_area.height,
+                ..table
+            };
+            render_map(f, below, session, hops, ui);
+        }
     }
     match ui.mode {
         Mode::Table => {}
@@ -81,7 +91,7 @@ pub fn render(f: &mut Frame, session: &MtrSession, ui: &mut UiState) {
 }
 
 /// Remember which hop each row shows, and select the row `ui.follow` asks for.
-fn track_rows(ui: &mut UiState, row_hops: Vec<u8>) {
+pub(super) fn track_rows(ui: &mut UiState, row_hops: Vec<u8>) {
     if let Some(hop) = ui.follow.take() {
         if let Some(row) = row_hops.iter().position(|&h| h == hop) {
             ui.table.select(Some(row));
@@ -212,12 +222,21 @@ fn mpls_rows<'a>(hop: &'a HopStats, labels: &[MplsLabel]) -> Vec<HostRow<'a>> {
         .collect()
 }
 
-fn cell_text(column: Column, row: &HostRow) -> String {
+fn cell_text(column: Column, row: &HostRow, origin: Option<&Origin>) -> String {
     match (column, &row.kind) {
         (Column::Host, _) => row.host.clone(),
         (Column::Graph, _) => String::new(),
         (Column::Hop, RowKind::Hop) => format!("{}.", row.hop.hop),
-        (_, RowKind::Hop) => column.value(row.hop),
+        (_, RowKind::Hop) => column.value(row.hop, origin),
+        (Column::Geo, RowKind::Alternate(alt)) => alt.geo.as_ref().map_or(String::new(), |fix| {
+            let assessment = origin.and_then(|o| geo::assess(fix, alt.best_rtt, o));
+            let mark = if assessment.is_some_and(|a| a.impossible) {
+                "!"
+            } else {
+                ""
+            };
+            format!("{}{mark}", fix.place())
+        }),
         (Column::Last, RowKind::Alternate(alt)) => format_ms(alt.last_rtt),
         (Column::Avg, RowKind::Alternate(alt)) => format_ms(alt.avg_rtt()),
         (Column::Best, RowKind::Alternate(alt)) => format_ms(alt.best_rtt),
@@ -294,9 +313,15 @@ fn render_table(
     let rows = host_rows(session, hops, ui);
     track_rows(ui, rows.iter().map(|row| row.hop.hop).collect());
     let columns = &ui.columns;
+    let origin = session.origin();
     let texts: Vec<Vec<String>> = rows
         .iter()
-        .map(|row| columns.iter().map(|&c| cell_text(c, row)).collect())
+        .map(|row| {
+            columns
+                .iter()
+                .map(|&c| cell_text(c, row, origin.as_ref()))
+                .collect()
+        })
         .collect();
     let natural: Vec<usize> = columns
         .iter()
@@ -314,7 +339,7 @@ fn render_table(
     let columns = &columns[..widths.len()];
 
     let header = Row::new(columns.iter().map(|&c| match c {
-        Column::Host | Column::Asn | Column::Graph => Line::from(c.header()),
+        Column::Host | Column::Asn | Column::Geo | Column::Graph => Line::from(c.header()),
         _ => right(c.header()),
     }))
     .style(Style::default().add_modifier(Modifier::BOLD));
@@ -335,7 +360,14 @@ fn render_table(
                     )))
                 }
                 Column::Host => Cell::from(truncate_hostname(&text, usize::from(width))),
-                Column::Asn => Cell::from(text),
+                Column::Geo | Column::Dist if text.ends_with('!') => {
+                    let line = Line::styled(text, Style::default().fg(loss_color(ui.colors)));
+                    Cell::from(match c {
+                        Column::Geo => line,
+                        _ => line.alignment(Alignment::Right),
+                    })
+                }
+                Column::Asn | Column::Geo => Cell::from(text),
                 _ => Cell::from(right(text)),
             });
         let style = match row.kind {
@@ -571,6 +603,7 @@ fn detail_lines(
             hop, &letters, names, flows, width, ui.colors,
         ));
     }
+    lines.extend(location_lines(hop, &letters, session, ui.colors, width));
 
     lines.push(Line::from(""));
     match hop.rtt_spread() {
@@ -632,6 +665,82 @@ fn detail_lines(
             ),
             dim,
         ));
+    }
+    lines
+}
+
+/// Where each responder is, how far from the origin, and whether its best RTT
+/// allows that, then the database's credit. Nothing without a location.
+fn location_lines(
+    hop: &HopStats,
+    letters: &[(char, IpAddr)],
+    session: &MtrSession,
+    colors: ColorSupport,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let placed: Vec<_> = letters
+        .iter()
+        .filter_map(|&(letter, addr)| {
+            let responder = &hop.responders[&addr];
+            Some((letter, responder, responder.geo.as_ref()?))
+        })
+        .collect();
+    if placed.is_empty() {
+        return Vec::new();
+    }
+    let origin = session.origin();
+    let from = match origin.and_then(|o| o.hop) {
+        Some(n) => format!("hop {n}"),
+        None => "--origin".to_string(),
+    };
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(""), Line::styled("Location", bold)];
+    for &(letter, responder, fix) in &placed {
+        let mut place = fix.place();
+        if let Some(km) = fix.accuracy_km {
+            place.push_str(&format!(" ±{km} km"));
+        }
+        if let Some(code) = &fix.from_name {
+            place.push_str(&format!(" ({code} in its name)"));
+        }
+        let mut facts = vec![place];
+        let assessment = origin.and_then(|o| geo::assess(fix, responder.best_rtt, &o));
+        if let Some(a) = assessment {
+            facts.push(format!("{:.0} km from {from}", a.distance_km));
+        }
+        if let Some(rtt) = responder.best_rtt {
+            let reach = geo::reach_km(rtt);
+            facts.push(format!("{} ms reaches {reach:.0} km", format_ms(Some(rtt))));
+        }
+        let style = match assessment.is_some_and(|a| a.impossible) {
+            true => {
+                if let Some(last) = facts.last_mut() {
+                    last.push_str(": too far, the location is wrong");
+                }
+                Style::default().fg(loss_color(colors))
+            }
+            false => Style::default(),
+        };
+        // Continuation lines line up under the first, past the letter
+        for (i, text) in pack(&facts, " · ", width.saturating_sub(3))
+            .into_iter()
+            .enumerate()
+        {
+            let lead = match i {
+                0 => letter_span(letter, colors),
+                _ => Span::raw(" "),
+            };
+            lines.push(Line::from(vec![
+                lead,
+                Span::styled(format!("  {text}"), style),
+            ]));
+        }
+    }
+    // Credit the database where it placed something; names need none
+    let from_database = placed.iter().any(|(_, _, fix)| fix.from_name.is_none());
+    if let Some(credit) = session.geo_attribution().filter(|_| from_database) {
+        let dim = Style::default().add_modifier(Modifier::DIM);
+        lines.push(Line::styled(credit.to_string(), dim));
     }
     lines
 }
@@ -849,10 +958,12 @@ fn render_chooser(f: &mut Frame, area: Rect, ui: &UiState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geo::tests::{city, FakeGeo};
     use crate::Args;
     use clap::Parser;
     use ratatui::{backend::TestBackend, Terminal};
     use std::time::Duration;
+    use std::{collections::HashMap, sync::Arc};
 
     const PATH: [&str; 3] = ["192.168.1.1", "203.0.113.254", "198.51.100.7"];
 
@@ -1020,11 +1131,11 @@ mod tests {
     async fn every_mode_survives_every_size() {
         let mut s = diamond().await;
         s.args.simulate = true;
+        s.set_geo_source(Arc::new(FakeGeo(HashMap::new())));
+        s.hops[1].set_geo_for_addr(PATH[1].parse().unwrap(), city("London", "GB", 51.5, -0.1));
         let modes = [Mode::Table, Mode::Help, Mode::Columns, Mode::Detail];
-        for (mode, view) in modes
-            .into_iter()
-            .flat_map(|m| [(m, View::Hops), (m, View::Flows)])
-        {
+        let views = [View::Hops, View::Flows, View::Map];
+        for (mode, view) in modes.into_iter().flat_map(|m| views.map(|v| (m, v))) {
             for (w, h) in [(1, 1), (39, 5), (40, 6), (50, 10), (80, 24), (200, 60)] {
                 let mut ui = UiState::new(&s.args);
                 (ui.mode, ui.view, ui.detail_hop, ui.show_mpls) = (mode, view, 2, true);
@@ -1035,6 +1146,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn the_detail_pane_says_where_a_location_comes_from() {
+        let mut s = session(&["-n"]).await;
+        s.set_geo_source(Arc::new(FakeGeo(HashMap::new())));
+        let addr = PATH[1].parse().unwrap();
+        s.hops[1].set_geo_for_addr(addr, city("London", "GB", 51.5, -0.1));
+        let mut ui = UiState::new(&s.args);
+        (ui.mode, ui.detail_hop) = (Mode::Detail, 2);
+        let text = screen(&s, &mut ui, 100, 30).join("\n");
+        assert!(text.contains("London, GB ±20 km ·"), "{text}");
+        assert!(
+            text.contains("test locations"),
+            "the database's credit: {text}"
+        );
+
+        let named = crate::geo::names::locate("core1.ams1.he.net").unwrap();
+        s.hops[1].set_geo_for_addr(addr, named);
+        let text = screen(&s, &mut ui, 100, 30).join("\n");
+        assert!(
+            text.contains("Amsterdam, NL ±50 km (ams in its name)"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("test locations"),
+            "nothing to credit: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_map_numbers_located_hops_and_leaves_out_ruled_out_ones() {
+        let mut s = session(&["-n"]).await;
+        let mut ui = UiState::new(&s.args);
+        ui.view = View::Map;
+        let text = screen(&s, &mut ui, 100, 30).join("\n");
+        assert!(text.contains("No geolocation database"), "{text}");
+        assert!(text.contains("download.db-ip.com"), "{text}");
+
+        s.set_geo_source(Arc::new(FakeGeo(HashMap::new())));
+        let at = |s: &mut MtrSession, hop: usize, fix| {
+            s.hops[hop].set_geo_for_addr(PATH[hop].parse().unwrap(), fix)
+        };
+        at(&mut s, 1, city("Amsterdam", "NL", 52.37, 4.89));
+        at(&mut s, 2, city("Sydney", "AU", -33.87, 151.21));
+        let text = screen(&s, &mut ui, 100, 30).join("\n");
+        assert!(text.contains("●2"), "{text}");
+        assert!(
+            !text.contains("●3"),
+            "6 ms from Amsterdam to Sydney: {text}"
+        );
+        assert!(
+            text.contains("not placed: 1 · ruled out by RTT: 3"),
+            "{text}"
+        );
+        assert!(text.contains("test locations"), "the credit: {text}");
+        assert_eq!(ui.row_hops, [1, 2, 3], "Enter and the arrows work here too");
     }
 
     #[tokio::test]

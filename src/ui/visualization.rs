@@ -234,6 +234,17 @@ pub fn loss_color(colors: ColorSupport) -> Color {
     }
 }
 
+/// Coastlines on the map: a mid grey, as clear on a dark background as on a light
+/// one and still behind the path. The 16 basic colours have no mid grey.
+pub fn coast_color(colors: ColorSupport) -> Color {
+    match colors {
+        ColorSupport::None => Color::Reset,
+        ColorSupport::Basic => Color::DarkGray,
+        ColorSupport::Extended => Color::Indexed(244),
+        ColorSupport::TrueColor => Color::Rgb(128, 128, 128),
+    }
+}
+
 fn pending_color(colors: ColorSupport) -> Color {
     match colors {
         ColorSupport::None => Color::Reset,

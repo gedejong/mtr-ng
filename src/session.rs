@@ -1,3 +1,4 @@
+use crate::geo::{self, GeoFix, GeoSource, Origin};
 use crate::probe::{IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
 use crate::simulate::{self, SimProber};
 use crate::{tracer, Args, HopStats, Result};
@@ -32,6 +33,10 @@ pub struct MtrSession {
     dns_names: HashMap<IpAddr, Option<String>>,
     /// Origin AS per address, with `--aslookup`; `None` while pending or unknown
     asns: HashMap<IpAddr, Option<u32>>,
+    /// The geolocation database, if there is one
+    geo_source: Option<Arc<dyn GeoSource>>,
+    /// Locations per address; `None` when the database doesn't know it
+    locations: HashMap<IpAddr, Option<GeoFix>>,
 }
 
 impl MtrSession {
@@ -86,6 +91,8 @@ impl MtrSession {
             probe_timeout: tracer::PROBE_TIMEOUT,
             dns_names: HashMap::new(),
             asns: HashMap::new(),
+            geo_source: None,
+            locations: HashMap::new(),
         })
     }
 
@@ -93,9 +100,10 @@ impl MtrSession {
         self.args.simulate
     }
 
-    /// Open the prober for a real trace, or return `None` in simulation mode.
+    /// Open the prober (simulated with `--simulate`) and the geolocation database.
     /// Fails instead of falling back to simulated data when real probing is impossible.
     pub fn open_probe_engine(&mut self) -> Result<Box<dyn Prober>> {
+        self.open_geo()?;
         if self.is_simulated() {
             // Names come with the made-up path; a simulation sends no lookups.
             let target = (self.target != self.target_addr.to_string()).then(|| self.target.clone());
@@ -113,6 +121,80 @@ impl MtrSession {
             );
         }
         Ok(Box::new(ProbeEngine::new()?))
+    }
+
+    /// The made-up locations with `--simulate`, else `--geoip-mmdb` or the first
+    /// database found. Asking for locations when there is none is an error.
+    fn open_geo(&mut self) -> Result<()> {
+        self.geo_source = match self.is_simulated() {
+            true => Some(Arc::new(simulate::SimGeo::new(self.target_addr))),
+            false => geo::open(self.args.geoip_mmdb.as_deref())?,
+        };
+        if self.geo_source.is_none() && self.args.wants_geo() {
+            bail!(
+                "no geolocation database found. Get DB-IP's free one with\n  {}\nor pass --geoip-mmdb PATH",
+                geo::DOWNLOAD
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_geo_source(&mut self, source: Arc<dyn GeoSource>) {
+        self.geo_source = Some(source);
+    }
+
+    /// Whose data the locations are, as its licence asks to be credited.
+    pub fn geo_attribution(&self) -> Option<&str> {
+        self.geo_source.as_deref().map(GeoSource::attribution)
+    }
+
+    /// Where `addr` is, looked up once. Private and special addresses are never
+    /// looked up; the simulation's documentation addresses are.
+    fn locate(&mut self, addr: IpAddr) -> Option<GeoFix> {
+        let source = self.geo_source.as_ref()?;
+        let public = crate::asn::is_public(addr) || self.args.simulate;
+        self.locations
+            .entry(addr)
+            .or_insert_with(|| public.then(|| source.locate(addr)).flatten())
+            .clone()
+    }
+
+    /// Whether the best RTT `addr` answered with puts `fix` out of reach.
+    fn ruled_out(&self, addr: IpAddr, fix: &GeoFix) -> bool {
+        let best = self
+            .hops
+            .iter()
+            .filter_map(|hop| hop.responders.get(&addr)?.best_rtt)
+            .min();
+        self.origin()
+            .and_then(|origin| geo::assess(fix, best, &origin))
+            .is_some_and(|a| a.impossible)
+    }
+
+    /// Where distances are measured from: `--origin`, or else the first hop the
+    /// database places in a city. The probing host is somewhere within that hop's
+    /// reach and accuracy, so both count as slack.
+    pub fn origin(&self) -> Option<Origin> {
+        if let Some((lat, lon)) = self.args.origin {
+            return Some(Origin {
+                lat,
+                lon,
+                slack_km: 0.0,
+                hop: None,
+            });
+        }
+        self.hops[..self.display_hop_count()]
+            .iter()
+            .find_map(|hop| {
+                let fix = hop.geo.as_ref().filter(|fix| fix.is_city())?;
+                Some(Origin {
+                    lat: fix.lat,
+                    lon: fix.lon,
+                    slack_km: fix.accuracy() + hop.best_rtt.map_or(0.0, geo::reach_km),
+                    hop: Some(hop.hop),
+                })
+            })
     }
 
     /// Hops worth showing: up to the end of the path once it is known, otherwise
@@ -164,6 +246,9 @@ impl MtrSession {
         if let Some(Some(asn)) = self.asns.get(&addr) {
             self.hops[index].set_asn_for_addr(addr, *asn);
         }
+        if let Some(fix) = self.locate(addr) {
+            self.hops[index].set_geo_for_addr(addr, fix);
+        }
         true
     }
 
@@ -177,12 +262,28 @@ impl MtrSession {
     }
 
     /// Store a reverse DNS result and show it on every hop where `addr` answered.
+    /// A city code in the name goes before the database's location, unless the
+    /// RTT so far rules the name's city out and not the database's.
     pub fn set_hostname(&mut self, addr: IpAddr, name: Option<String>) {
         if let Some(name) = &name {
             debug!("Resolved {} to {}", addr, name);
+            let ruled_out = |fix: &GeoFix| self.ruled_out(addr, fix);
+            let database = self.locations.get(&addr).cloned().flatten();
+            let named = self
+                .geo_source
+                .is_some()
+                .then(|| geo::names::locate(name))
+                .flatten()
+                .filter(|fix| !ruled_out(fix) || database.as_ref().is_none_or(ruled_out));
+            if let Some(fix) = &named {
+                self.locations.insert(addr, Some(fix.clone()));
+            }
             for hop in &mut self.hops {
                 if hop.responders.contains_key(&addr) {
                     hop.set_hostname_for_addr(addr, name.clone());
+                    if let Some(fix) = &named {
+                        hop.set_geo_for_addr(addr, fix.clone());
+                    }
                 }
             }
         }
@@ -264,6 +365,9 @@ mod tests {
             json: false,
             csv: false,
             dot: false,
+            geo: false,
+            geoip_mmdb: None,
+            origin: None,
             log_file: None,
         };
 
@@ -300,6 +404,9 @@ mod tests {
             json: false,
             csv: false,
             dot: false,
+            geo: false,
+            geoip_mmdb: None,
+            origin: None,
             log_file: None,
         };
 
@@ -393,6 +500,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn locations_skip_private_addresses_and_the_first_city_is_the_origin() {
+        use crate::geo::tests::{city, FakeGeo};
+        let mut session = session_for(&["-n", "1.1.1.1"]).await;
+        let country_only = GeoFix {
+            city: None,
+            ..city("-", "US", 37.75, -97.82)
+        };
+        let known = [
+            ([192, 168, 1, 1], city("Home", "NL", 52.0, 5.0)),
+            ([9, 9, 9, 9], country_only),
+            ([8, 8, 8, 8], city("Amsterdam", "NL", 52.37, 4.89)),
+            ([1, 1, 1, 1], city("Sydney", "AU", -33.87, 151.21)),
+        ];
+        let known = known.into_iter().map(|(a, fix)| (IpAddr::from(a), fix));
+        session.set_geo_source(Arc::new(FakeGeo(known.collect())));
+        let path = [[192, 168, 1, 1], [9, 9, 9, 9], [8, 8, 8, 8], [1, 1, 1, 1]];
+        for (ttl, from) in path.into_iter().enumerate() {
+            session.apply_response(&response(ttl, IcmpResponseType::TimeExceeded, from));
+        }
+
+        assert_eq!(session.hops[0].geo, None, "private: never looked up");
+        assert_eq!(
+            session.hops[1].geo.as_ref().map(GeoFix::place),
+            Some("US".into())
+        );
+        let origin = session.origin().unwrap();
+        assert_eq!(
+            (origin.hop, origin.lat),
+            (Some(3), 52.37),
+            "first city, not a country"
+        );
+        assert_eq!(
+            origin.slack_km,
+            20.0 + 1000.0,
+            "its accuracy and 10 ms of reach"
+        );
+        let sydney = session.hops[3].assess(Some(&origin)).unwrap();
+        assert!(sydney.impossible, "16,600 km in 10 ms");
+
+        // The router's name says Amsterdam, and outlasts the next reply
+        let one = IpAddr::from([1, 1, 1, 1]);
+        session.set_hostname(one, Some("adm-b3-link.ip.twelve99.net".into()));
+        session.apply_response(&response(3, IcmpResponseType::TimeExceeded, [1, 1, 1, 1]));
+        let fix = session.hops[3].geo.clone().unwrap();
+        assert_eq!(
+            (fix.place(), fix.from_name.as_deref()),
+            ("Amsterdam, NL".into(), Some("adm"))
+        );
+        assert_eq!(session.hops[3].responders[&one].geo, Some(fix));
+        assert!(!session.hops[3].assess(Some(&origin)).unwrap().impossible);
+        session.set_hostname(one, Some("dns.example".into()));
+        assert_eq!(
+            session.hops[3]
+                .geo
+                .as_ref()
+                .and_then(|f| f.from_name.as_deref()),
+            Some("adm"),
+            "a name without a code changes nothing"
+        );
+        // A name 10 ms rules out doesn't replace a database location it allows
+        let eight = IpAddr::from([8, 8, 8, 8]);
+        session.set_hostname(eight, Some("sng-b7-link.ip.twelve99.net".into()));
+        assert_eq!(
+            session.hops[2].geo.as_ref().map(GeoFix::place),
+            Some("Amsterdam, NL".into())
+        );
+
+        session.args.origin = Some((48.85, 2.35));
+        assert_eq!(session.origin().unwrap().hop, None, "--origin wins");
+    }
+
+    #[tokio::test]
+    async fn a_named_database_that_cannot_be_read_is_an_error() {
+        let mut session =
+            session_for(&["-g", "--geoip-mmdb", "/nonexistent/x.mmdb", "1.1.1.1"]).await;
+        let err = session
+            .open_probe_engine()
+            .err()
+            .expect("must not run without it");
+        assert!(
+            format!("{err:#}").contains("/nonexistent/x.mmdb"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn simulation_only_when_asked() {
         let mut session = session_for(&["--simulate", "::1"]).await;
         assert!(session.is_simulated());
@@ -424,6 +617,9 @@ mod tests {
             json: false,
             csv: false,
             dot: false,
+            geo: false,
+            geoip_mmdb: None,
+            origin: None,
             log_file: None,
         };
 

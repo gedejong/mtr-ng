@@ -23,6 +23,13 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **MPLS labels**: `-e` (or `e` while running) shows the label stacks routers report in ICMP extensions (RFC 4950)
 - **Hop details**: `Enter` opens every responder of a hop with its share, RTTs, routers on the way back and flows, plus RTT percentiles and a histogram
 
+### Where Is It
+- **Locations**: `-g` adds a Location and a Dist column, from a local geolocation database (DB-IP City Lite or MaxMind GeoLite2 City). Lookups never leave the machine; private addresses are never looked up
+- **Light-speed check**: a reply can't come from farther than light in fibre travels in its round trip, about 100 km per ms. A location the hop's best RTT rules out is marked `!`, which catches routers placed at their owner's head office and anycast addresses placed at their registrant's
+- **Router names**: backbones name routers after their city, in codes of their own (`adm-b3-link.ip.twelve99.net` is Arelion in Amsterdam). For Arelion, Cogent, Hurricane Electric and Lumen that city goes before the database, which often places routers at a head office
+- **Map**: `m` draws the located hops on a world map, joined along great circles. Locations the RTT rules out stay off it
+- **Origin**: distances are measured from `--origin LAT,LON`, or else from the first hop placed in a city
+
 ### Column Selection System
 - **Flexible Fields**: Choose from 14 columns
   - `hop`, `host`, `asn`, `loss`, `sent`, `last`, `avg`, `ema`
@@ -117,6 +124,7 @@ mtr-ng google.com
 # h           Host names or IP addresses
 # s, v, c     RTT scale, sparkline/heatmap, colour mode
 # f           Hop table or flow matrix
+# m           Hop table or map
 # e           Show or hide MPLS labels
 # ↑ ↓ PgUp PgDn Home End  Select and scroll hops
 # Enter       Details of the selected hop (↑ ↓ for the others)
@@ -147,12 +155,30 @@ mtr-ng -c 40 --flows 8 --dot google.com | dot -Tsvg > routes.svg
 
 # MPLS labels under their hop
 mtr-ng -r -e google.com
+
+# Where each hop is, and whether its RTT allows it
+mtr-ng -r -g google.com
+mtr-ng -r -g --origin 52.37,4.89 google.com
 ```
 
 ## Advanced Features
 
+### Geolocation
+`-g`, the `geo` and `dist` columns and the map need a database in MaxMind's format. mtr-ng uses `--geoip-mmdb PATH`, else the newest `.mmdb` in `~/.local/share/mtr-ng`, else `dbip-city-lite.mmdb` or `GeoLite2-City.mmdb` in `/usr/share/GeoIP`, `/var/lib/GeoIP` or Homebrew's `var/GeoIP`. DB-IP's free City Lite database (CC BY 4.0, about 130 MB) is updated monthly:
+```bash
+mkdir -p ~/.local/share/mtr-ng && \
+curl -fL "https://download.db-ip.com/free/dbip-city-lite-$(date +%Y-%m).mmdb.gz" | \
+gunzip > ~/.local/share/mtr-ng/dbip.part && \
+mv ~/.local/share/mtr-ng/dbip.part ~/.local/share/mtr-ng/dbip-city-lite.mmdb
+```
+Both licences ask for credit wherever the data is shown, so the report, the map and the hop details name the database's source. The map's coastlines are Natural Earth's 1:50m set, which is in the public domain.
+
+A database places a router where its owner registered it, often a head office a continent away, and anycast addresses wherever their registrant sits. mtr-ng therefore treats a location as a claim to test: a hop farther from the origin than its best RTT allows, granting both locations their accuracy, is marked `!`. Without `--origin` the origin is the first hop placed in a city, and the probing host is somewhere within that hop's reach, which widens the margin; with `--origin` the check is tighter. The check can only rule a location out: one without `!` is possible, not confirmed.
+
+Router names are often better evidence. Large networks name their routers after the city they stand in, each in codes of its own: Arelion's `adm` is Amsterdam, `win` Vienna and `san` San Antonio, while to Cogent, which uses airport codes, `san` is San Diego. mtr-ng carries the codes of Arelion, Cogent, Hurricane Electric and Lumen, taken from the router lists in their looking glasses (and, for Cogent's other sites, OurAirports' list of large airports). When a hop's name has one, that city goes before the database, unless the RTT rules it out and not the database's location; the hop details say `adm in its name`. The names come from reverse DNS, so `-n` turns this off.
+
 ### Simulation Mode
-`--simulate` answers probes from a made-up path instead of the network, through the same probing loop as real probes, and marks the screen SIMULATED. The path has a load-balanced pair of routers inside an MPLS tunnel, a router that never answers, some loss and the odd latency spike. Its addresses come from the documentation ranges and its names end in `.example`.
+`--simulate` answers probes from a made-up path instead of the network, through the same probing loop as real probes, and marks the screen SIMULATED. The path has a load-balanced pair of routers inside an MPLS tunnel, a router that never answers, some loss and the odd latency spike. Its addresses come from the documentation ranges and its names end in `.example`. It comes with made-up locations, including one the light-speed check rules out, so `-g` and the map work without a database.
 ```bash
 # No network, no privileges
 mtr-ng --simulate example.com

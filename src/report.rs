@@ -1,4 +1,5 @@
 use crate::args::Column;
+use crate::geo::Origin;
 use crate::hop_stats::FlowStats;
 use crate::icmp_ext::MplsLabel;
 use crate::utils::network;
@@ -22,11 +23,11 @@ fn header(column: Column) -> &'static str {
     }
 }
 
-fn cell(hop: &HopStats, host: &str, column: Column) -> String {
+fn cell(hop: &HopStats, host: &str, column: Column, origin: Option<&Origin>) -> String {
     match column {
         Column::Hop => format!("{:2}.|--", hop.hop),
         Column::Host => host.to_string(),
-        _ => column.value(hop),
+        _ => column.value(hop, origin),
     }
 }
 
@@ -46,17 +47,26 @@ fn report_columns(columns: &[Column]) -> Vec<Column> {
     shown
 }
 
-/// The header line and one line per probed hop, aligned however long the names are.
-/// The report table. With `mpls`, each hop is followed by the labels its router
-/// reported, as `mtr -e` prints them.
-fn format_table(hops: &[HopStats], columns: &[Column], numeric: bool, mpls: bool) -> Vec<String> {
+/// The header line and one line per probed hop, aligned however long the names
+/// are. With `mpls`, each hop is followed by the labels its router reported, as
+/// `mtr -e` prints them. Distances are from `origin`.
+fn format_table(
+    hops: &[HopStats],
+    columns: &[Column],
+    numeric: bool,
+    mpls: bool,
+    origin: Option<&Origin>,
+) -> Vec<String> {
     let columns = &report_columns(columns);
     let hops: Vec<&HopStats> = hops.iter().filter(|hop| hop.sent > 0).collect();
     let rows: Vec<Vec<String>> = hops
         .iter()
         .map(|hop| {
             let host = host_label(hop, numeric);
-            columns.iter().map(|&c| cell(hop, &host, c)).collect()
+            columns
+                .iter()
+                .map(|&c| cell(hop, &host, c, origin))
+                .collect()
         })
         .collect();
 
@@ -88,7 +98,8 @@ fn format_table(hops: &[HopStats], columns: &[Column], numeric: bool, mpls: bool
     lines
 }
 
-/// Host and ASN left-aligned, numbers right-aligned, one space between columns.
+/// Host, ASN and location left-aligned, numbers right-aligned, one space between
+/// columns.
 fn align(cells: &[String], columns: &[Column], widths: &[usize]) -> String {
     let mut line = String::new();
     for (i, ((cell, &column), &width)) in cells.iter().zip(columns).zip(widths).enumerate() {
@@ -96,7 +107,7 @@ fn align(cells: &[String], columns: &[Column], widths: &[usize]) -> String {
             line.push(' ');
         }
         let pad = " ".repeat(width.saturating_sub(cell.width()));
-        if matches!(column, Column::Host | Column::Asn) {
+        if matches!(column, Column::Host | Column::Asn | Column::Geo) {
             line.push_str(cell);
             line.push_str(&pad);
         } else {
@@ -105,6 +116,55 @@ fn align(cells: &[String], columns: &[Column], widths: &[usize]) -> String {
         }
     }
     line.trim_end().to_string()
+}
+
+/// What the location columns rest on: where distances are measured from, what
+/// `!` means when it appears, and the database's credit.
+fn geo_notes(
+    hops: &[HopStats],
+    columns: &[Column],
+    origin: Option<&Origin>,
+    attribution: Option<&str>,
+) -> Vec<String> {
+    if !columns
+        .iter()
+        .any(|c| matches!(c, Column::Geo | Column::Dist))
+    {
+        return Vec::new();
+    }
+    let mut notes = Vec::new();
+    match origin {
+        Some(Origin { hop: Some(n), .. }) => notes.push(format!(
+            "Distances from hop {n}, the first one placed in a city"
+        )),
+        Some(o) => notes.push(format!("Distances from {:.2},{:.2}", o.lat, o.lon)),
+        None => {}
+    }
+    if hops
+        .iter()
+        .any(|hop| hop.assess(origin).is_some_and(|a| a.impossible))
+    {
+        notes.push(
+            "! The hop's best RTT rules its location out: light in fibre covers \
+             about 100 km per ms of round trip"
+                .to_string(),
+        );
+    }
+    let named: std::collections::BTreeSet<u16> = hops
+        .iter()
+        .filter(|hop| hop.geo.as_ref().is_some_and(|fix| fix.from_name.is_some()))
+        .map(|hop| u16::from(hop.hop))
+        .collect();
+    if !named.is_empty() {
+        notes.push(format!(
+            "Placed by the city code in the router's name: hop {}",
+            topology::ranges(&named)
+        ));
+    }
+    if let Some(credit) = attribution {
+        notes.push(format!("Locations: {credit}"));
+    }
+    notes
 }
 
 fn host_label(hop: &HopStats, numeric: bool) -> String {
@@ -133,8 +193,15 @@ fn json_mpls(labels: &[MplsLabel]) -> Value {
 }
 
 /// mtr's hub fields, plus our own. With more than one flow, `flows[f]` is the
-/// address flow `f` met here most often.
-fn json_hubs(hops: &[HopStats], numeric: bool, asn: bool, flows: u16) -> Vec<Value> {
+/// address flow `f` met here most often. `geo` holds the location, when known,
+/// with the distance from `origin` and the light-speed verdict.
+fn json_hubs(
+    hops: &[HopStats],
+    numeric: bool,
+    asn: bool,
+    flows: u16,
+    origin: Option<&Origin>,
+) -> Vec<Value> {
     let asn_of = |n: Option<u32>| n.map_or("AS???".to_string(), |n| format!("AS{n}"));
     hops.iter()
         .filter(|hop| hop.sent > 0)
@@ -159,6 +226,19 @@ fn json_hubs(hops: &[HopStats], numeric: bool, asn: bool, flows: u16) -> Vec<Val
             }
             if !hop.mpls().is_empty() {
                 hub["MPLS"] = json_mpls(hop.mpls());
+            }
+            if let Some(fix) = &hop.geo {
+                let assessment = hop.assess(origin);
+                hub["geo"] = json!({
+                    "city": fix.city,
+                    "country": fix.country,
+                    "lat": fix.lat,
+                    "lon": fix.lon,
+                    "accuracy_km": fix.accuracy_km,
+                    "distance_km": assessment.map(|a| a.distance_km.round()),
+                    "impossible": assessment.is_some_and(|a| a.impossible),
+                    "from_name": fix.from_name,
+                });
             }
             if flows > 1 {
                 let per_flow: Vec<Option<String>> = (0..flows)
@@ -202,10 +282,11 @@ fn csv_field(text: &str) -> String {
     }
 }
 
-const CSV_HEADER: &str = "hop,host,ip,asn,loss_pct,sent,last_ms,avg_ms,ema_ms,best_ms,worst_ms,stdev_ms,jitter_ms,jitter_avg_ms";
+const CSV_HEADER: &str = "hop,host,ip,asn,loss_pct,sent,last_ms,avg_ms,ema_ms,best_ms,worst_ms,stdev_ms,jitter_ms,jitter_avg_ms,location,lat,lon,dist_km,impossible";
 
-/// A header row, then one row per probed hop. Empty fields mean no reply (or no ASN).
-fn csv_rows(hops: &[HopStats], numeric: bool) -> Vec<String> {
+/// A header row, then one row per probed hop. Empty fields mean no reply, or no
+/// ASN or location.
+fn csv_rows(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Vec<String> {
     let ms = |rtt: Option<Duration>| {
         rtt.map_or(String::new(), |rtt| {
             format!("{:.3}", rtt.as_secs_f64() * 1e3)
@@ -213,6 +294,8 @@ fn csv_rows(hops: &[HopStats], numeric: bool) -> Vec<String> {
     };
     let rows = hops.iter().filter(|hop| hop.sent > 0).map(|hop| {
         let stdev = (hop.received > 0).then(|| format!("{:.3}", hop.stddev_ms()));
+        let fix = hop.geo.as_ref();
+        let assessment = hop.assess(origin);
         [
             hop.hop.to_string(),
             csv_field(&host_label(hop, numeric)),
@@ -228,6 +311,15 @@ fn csv_rows(hops: &[HopStats], numeric: bool) -> Vec<String> {
             stdev.unwrap_or_default(),
             ms(hop.last_jitter),
             ms(hop.jitter_avg),
+            fix.map(|f| csv_field(&f.place())).unwrap_or_default(),
+            fix.map(|f| f.lat.to_string()).unwrap_or_default(),
+            fix.map(|f| f.lon.to_string()).unwrap_or_default(),
+            assessment
+                .map(|a| format!("{:.0}", a.distance_km))
+                .unwrap_or_default(),
+            assessment
+                .map(|a| a.impossible.to_string())
+                .unwrap_or_default(),
         ]
         .join(",")
     });
@@ -245,6 +337,8 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
 
     let args = &session.args;
     let hops = &session.hops[..session.display_hop_count()];
+    let origin = session.origin();
+    let origin = origin.as_ref();
     let source = gethostname::gethostname().to_string_lossy().into_owned();
 
     if args.json {
@@ -258,15 +352,17 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
                     "start": start.to_rfc3339(),
                     "simulated": session.is_simulated(),
                     "version": env!("CARGO_PKG_VERSION"),
+                    "geolocation": session.geo_attribution(),
+                    "origin": origin.map(|o| json!({"lat": o.lat, "lon": o.lon, "hop": o.hop})),
                 },
-                "hubs": json_hubs(hops, args.numeric, args.wants_asn(), args.flows),
+                "hubs": json_hubs(hops, args.numeric, args.wants_asn(), args.flows, origin),
             }
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
     if args.csv {
-        for line in csv_rows(hops, args.numeric) {
+        for line in csv_rows(hops, args.numeric, origin) {
             println!("{line}");
         }
         return Ok(());
@@ -285,8 +381,14 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         println!("SIMULATED: fake data from --simulate, not a real trace");
     }
     println!();
-    for line in format_table(hops, &args.get_columns(), args.numeric, args.mpls) {
+    let columns = args.get_columns();
+    for line in format_table(hops, &columns, args.numeric, args.mpls, origin) {
         println!("{line}");
+    }
+    let notes = geo_notes(hops, &columns, origin, session.geo_attribution());
+    if !notes.is_empty() {
+        println!();
+        notes.iter().for_each(|note| println!("{note}"));
     }
     if args.flows > 1 {
         println!();
@@ -355,7 +457,7 @@ mod tests {
 
     #[test]
     fn long_names_widen_the_host_column_and_keep_everything_aligned() {
-        let lines = format_table(&path(), &Column::default_columns(), false, false);
+        let lines = format_table(&path(), &Column::default_columns(), false, false, None);
         let expected = [
             "                                      Loss%   Snt   Last    Avg    EMA  Best   Wrst StDev",
             " 1.|-- gateway.lan                     0.0%     3    3.0    2.0    1.3   1.0    3.0   1.0",
@@ -369,7 +471,7 @@ mod tests {
     #[test]
     fn numeric_mode_and_custom_fields() {
         let columns = [Column::Hop, Column::Host, Column::Avg, Column::Loss];
-        let lines = format_table(&path(), &columns, true, false);
+        let lines = format_table(&path(), &columns, true, false, None);
         let expected = [
             "                               Avg  Loss%",
             " 1.|-- 192.168.1.1             2.0   0.0%",
@@ -382,7 +484,7 @@ mod tests {
 
     #[test]
     fn json_uses_mtr_field_names_and_null_for_no_reply() {
-        let hubs = json_hubs(&path(), false, false, 1);
+        let hubs = json_hubs(&path(), false, false, 1, None);
         assert_eq!(hubs.len(), 4);
         assert_eq!(hubs[0]["count"], 1);
         assert_eq!(hubs[0]["host"], "gateway.lan");
@@ -394,7 +496,7 @@ mod tests {
         assert_eq!(hubs[2]["Loss%"], 33.3);
         assert_eq!(hubs[3]["Wrst"], 1005.2);
         assert!(hubs[0].get("ASN").is_none(), "ASN only with --aslookup");
-        let with_asn = json_hubs(&path(), false, true, 1);
+        let with_asn = json_hubs(&path(), false, true, 1, None);
         assert_eq!(with_asn[0]["ASN"], "AS???");
         assert!(hubs[0].get("flows").is_none(), "flows only with --flows");
     }
@@ -411,8 +513,8 @@ mod tests {
         let addr = hops[2].addr.unwrap();
         hops[2].record_reply_details(addr, Some(250), &[label]);
 
-        let plain = format_table(&hops, &Column::default_columns(), true, false);
-        let with_mpls = format_table(&hops, &Column::default_columns(), true, true);
+        let plain = format_table(&hops, &Column::default_columns(), true, false, None);
+        let with_mpls = format_table(&hops, &Column::default_columns(), true, true, None);
         assert_eq!(with_mpls.len(), plain.len() + 1);
         assert_eq!(with_mpls[4], "       [MPLS: Lbl 24005 TC 0 S 1 TTL 1]");
         assert!(
@@ -420,22 +522,110 @@ mod tests {
             "under hop 3: {with_mpls:?}"
         );
 
-        let hubs = json_hubs(&hops, true, false, 1);
+        let hubs = json_hubs(&hops, true, false, 1, None);
         assert_eq!(hubs[2]["MPLS"][0]["label"], 24005);
         assert!(hubs[1].get("MPLS").is_none());
+    }
+
+    /// `path()` with hop 3 in The Hague and hop 4 in Tokyo, as seen from hop 3.
+    fn located() -> (Vec<HopStats>, Origin) {
+        use crate::geo::tests::city;
+        let mut hops = path();
+        let kpn = IpAddr::from([195, 190, 228, 107]);
+        hops[2].set_geo_for_addr(kpn, city("The Hague", "NL", 52.08, 4.31));
+        let jaist = IpAddr::from([150, 65, 7, 130]);
+        hops[3].set_geo_for_addr(jaist, city("Nomi", "JP", 36.44, 136.59));
+        let origin = Origin {
+            lat: 52.08,
+            lon: 4.31,
+            slack_km: 1020.0,
+            hop: Some(3),
+        };
+        (hops, origin)
+    }
+
+    #[test]
+    fn locations_are_checked_against_the_rtt_and_credited() {
+        let (mut hops, origin) = located();
+        let columns = [
+            Column::Hop,
+            Column::Host,
+            Column::Geo,
+            Column::Dist,
+            Column::Best,
+        ];
+        let lines = format_table(&hops, &columns, true, false, Some(&origin));
+        let expected = [
+            "                            Location       Dist  Best",
+            " 1.|-- 192.168.1.1          ???             ???   1.0",
+            " 2.|-- ???                                  ???   ???",
+            " 3.|-- 195.190.228.107      The Hague, NL     0  10.0",
+            " 4.|-- 150.65.7.130         Nomi, JP       9139 998.0",
+        ];
+        assert_eq!(lines, expected);
+        let notes = geo_notes(&hops, &columns, Some(&origin), Some("Test credit"));
+        assert_eq!(
+            notes,
+            [
+                "Distances from hop 3, the first one placed in a city",
+                "Locations: Test credit"
+            ]
+        );
+        assert!(geo_notes(&hops, &[Column::Hop], Some(&origin), Some("x")).is_empty());
+
+        // A 9139 km hop answering in 10 ms is somewhere else
+        hops[3].best_rtt = Some(ms(10.0));
+        let lines = format_table(&hops, &columns, true, false, Some(&origin));
+        assert!(
+            lines[4].contains("Nomi, JP!") && lines[4].contains("9139!"),
+            "{}",
+            lines[4]
+        );
+        let notes = geo_notes(&hops, &columns, Some(&origin), None);
+        assert!(
+            notes[1].starts_with("! The hop's best RTT rules"),
+            "{notes:?}"
+        );
+
+        let hubs = json_hubs(&hops, true, false, 1, Some(&origin));
+        assert_eq!(hubs[2]["geo"]["city"], "The Hague");
+        assert_eq!(hubs[3]["geo"]["distance_km"], 9139.0);
+        assert_eq!(hubs[3]["geo"]["impossible"], true);
+        assert!(hubs[0].get("geo").is_none());
+        let rows = csv_rows(&hops, true, Some(&origin));
+        assert!(
+            rows[4].ends_with(",\"Nomi, JP\",36.44,136.59,9139,true"),
+            "{}",
+            rows[4]
+        );
+
+        // Its name places it in Tokyo, which 10 ms rules out too
+        let tokyo = crate::geo::names::locate("core1.tyo1.he.net").unwrap();
+        hops[3].set_geo_for_addr(IpAddr::from([150, 65, 7, 130]), tokyo);
+        let notes = geo_notes(&hops, &columns, Some(&origin), Some("Test credit"));
+        assert_eq!(
+            notes[2..],
+            [
+                "Placed by the city code in the router's name: hop 4",
+                "Locations: Test credit"
+            ]
+        );
+        let hubs = json_hubs(&hops, true, false, 1, Some(&origin));
+        assert_eq!(hubs[3]["geo"]["from_name"], "tyo");
+        assert_eq!(hubs[2]["geo"]["from_name"], Value::Null);
     }
 
     #[test]
     fn csv_has_a_header_and_quotes_awkward_names() {
         let mut hops = path();
         hops[0].set_hostname_for_addr(IpAddr::from([192, 168, 1, 1]), "a,\"b\"".to_string());
-        let rows = csv_rows(&hops, false);
+        let rows = csv_rows(&hops, false, None);
         assert_eq!(rows[0], CSV_HEADER);
         assert_eq!(
             rows[1],
-            r#"1,"a,""b""",192.168.1.1,,0.0,3,3.000,2.000,1.290,1.000,3.000,1.000,1.000,1.000"#
+            r#"1,"a,""b""",192.168.1.1,,0.0,3,3.000,2.000,1.290,1.000,3.000,1.000,1.000,1.000,,,,,"#
         );
-        assert_eq!(rows[2], "2,???,,,100.0,3,,,,,,,,");
+        assert_eq!(rows[2], "2,???,,,100.0,3,,,,,,,,,,,,,");
         assert_eq!(rows.len(), 5);
     }
 }

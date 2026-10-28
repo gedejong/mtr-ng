@@ -1,7 +1,7 @@
 //! Key bindings. One table per mode drives both key handling and the help screen,
 //! so the two cannot disagree.
 
-use super::state::{Mode, UiState};
+use super::state::{Mode, UiState, View};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -15,6 +15,7 @@ pub enum Action {
     ToggleVisualization,
     CycleColors,
     ToggleFlows,
+    ToggleMap,
     ToggleMpls,
     OpenDetail,
     PreviousHop,
@@ -97,6 +98,7 @@ pub const TABLE_KEYS: &[Binding] = &[
         "Hop table or flow matrix",
         Action::ToggleFlows,
     ),
+    bind(&[Char('m')], "m", "Hop table or map", Action::ToggleMap),
     bind(
         &[Char('e')],
         "e",
@@ -221,7 +223,8 @@ pub fn apply(action: Action, ui: &mut UiState) -> Effect {
         Action::ToggleScale => ui.toggle_scale(),
         Action::ToggleVisualization => ui.toggle_visualization(),
         Action::CycleColors => ui.cycle_colors(),
-        Action::ToggleFlows => ui.toggle_view(),
+        Action::ToggleFlows => ui.toggle_view(View::Flows),
+        Action::ToggleMap => ui.toggle_view(View::Map),
         Action::ToggleMpls => ui.show_mpls = !ui.show_mpls,
         Action::OpenDetail => ui.open_detail(),
         Action::PreviousHop => ui.step_detail(-1),

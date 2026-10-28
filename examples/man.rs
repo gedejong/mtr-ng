@@ -5,6 +5,7 @@
 use clap::{CommandFactory, ValueEnum};
 use mtr_ng::{
     args::Column,
+    geo,
     ui::events::{COLUMN_KEYS, DETAIL_KEYS, TABLE_KEYS},
     Args,
 };
@@ -35,6 +36,14 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Show MPLS labels under their hop.",
     ),
     (
+        "mtr-ng -g example.com",
+        "Show where each hop is; m draws the path on a map. See GEOLOCATION.",
+    ),
+    (
+        "mtr-ng -r -g --origin 52.37,4.89 example.com",
+        "Measure distances from Amsterdam, which also tightens the light-speed check.",
+    ),
+    (
         "mtr-ng --simulate example.com",
         "Fake data, marked SIMULATED.",
     ),
@@ -45,6 +54,24 @@ On Linux it needs root or the CAP_NET_RAW capability \
 (setcap cap_net_raw+ep \"$(command -v mtr-ng)\"). \
 Windows is not supported yet. Only ICMP over IPv4 is implemented; \
 IPv6 targets and other protocols exit with an error.";
+
+const GEOLOCATION: [&str; 3] = [
+    "With -g, the geo or dist columns, or the map (m), mtr-ng places hops with a local \
+     database in MaxMind's format: --geoip-mmdb, else the newest .mmdb in \
+     ~/.local/share/mtr-ng, else dbip-city-lite.mmdb or GeoLite2-City.mmdb in \
+     /usr/share/GeoIP, /var/lib/GeoIP or Homebrew's var/GeoIP. Lookups never leave the \
+     machine, and private addresses are never looked up. DB-IP's free City Lite \
+     database (CC BY 4.0) can be fetched with:",
+    "A database places a router where its owner registered it, which can be a continent \
+     away. Where a router's name carries its network's city code, as Arelion's \
+     adm-b3-link.ip.twelve99.net does, that city goes before the database; mtr-ng knows \
+     the codes of Arelion, Cogent, Hurricane Electric and Lumen. Either way, a reply \
+     cannot come from farther than light in fibre travels in its round trip, about \
+     100 km per ms, so a location farther from the origin than the hop's best RTT \
+     allows, granting both locations their accuracy, is marked ! and left off the map.",
+    "Distances are measured from --origin, or else from the first hop placed in a city. \
+     The probing host is then somewhere within that hop's reach, which widens the margin.",
+];
 
 /// Escapes text for roff, where a backslash starts an escape and `-` is a hyphen.
 fn roff(text: &str) -> String {
@@ -91,6 +118,12 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, ".SH EXAMPLES")?;
     for (command, what) in EXAMPLES {
         tagged(out, command, what)?;
+    }
+
+    writeln!(out, ".SH GEOLOCATION\n{}", roff(GEOLOCATION[0]))?;
+    writeln!(out, ".PP\n.nf\n{}\n.fi", roff(geo::DOWNLOAD))?;
+    for paragraph in &GEOLOCATION[1..] {
+        writeln!(out, ".PP\n{}", roff(paragraph))?;
     }
 
     writeln!(out, ".SH PRIVILEGES\n{}", roff(PRIVILEGES))?;

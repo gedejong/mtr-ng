@@ -1,3 +1,4 @@
+use crate::geo::{self, Assessment, GeoFix, Origin};
 use crate::icmp_ext::MplsLabel;
 use crate::utils;
 use std::{
@@ -73,6 +74,8 @@ pub struct ResponderStats {
     pub reply_ttl: Option<u8>,
     /// MPLS labels in its latest reply
     pub mpls: Vec<MplsLabel>,
+    /// Where the geolocation database puts it
+    pub geo: Option<GeoFix>,
     rtt_sum_ns: u128,
 }
 
@@ -88,6 +91,7 @@ impl ResponderStats {
             best_rtt: None,
             reply_ttl: None,
             mpls: Vec::new(),
+            geo: None,
             rtt_sum_ns: 0,
         }
     }
@@ -134,6 +138,8 @@ pub struct HopStats {
     pub addr: Option<IpAddr>,
     pub hostname: Option<String>,
     pub asn: Option<u32>,
+    /// Where the geolocation database puts the primary responder
+    pub geo: Option<GeoFix>,
     pub sent: usize,
     pub received: usize,
     pub last_rtt: Option<Duration>,
@@ -180,6 +186,7 @@ impl HopStats {
             addr: None,
             hostname: None,
             asn: None,
+            geo: None,
             sent: 0,
             received: 0,
             last_rtt: None,
@@ -317,6 +324,7 @@ impl HopStats {
             self.addr = Some(addr);
             self.hostname = self.responders[&addr].hostname.clone();
             self.asn = self.responders[&addr].asn;
+            self.geo = self.responders[&addr].geo.clone();
         }
     }
 
@@ -379,6 +387,12 @@ impl HopStats {
         self.addr
             .and_then(|addr| self.responders.get(&addr))
             .map_or(&[], |r| &r.mpls)
+    }
+
+    /// How the primary responder's location squares with its best RTT, seen
+    /// from `origin`.
+    pub fn assess(&self, origin: Option<&Origin>) -> Option<Assessment> {
+        geo::assess(self.geo.as_ref()?, self.best_rtt, origin?)
     }
 
     /// Flows probed at this hop.
@@ -457,6 +471,15 @@ impl HopStats {
         }
         if let Some(responder) = self.responders.get_mut(&addr) {
             responder.hostname = Some(hostname);
+        }
+    }
+
+    pub fn set_geo_for_addr(&mut self, addr: IpAddr, fix: GeoFix) {
+        if Some(addr) == self.addr {
+            self.geo = Some(fix.clone());
+        }
+        if let Some(responder) = self.responders.get_mut(&addr) {
+            responder.geo = Some(fix);
         }
     }
 
