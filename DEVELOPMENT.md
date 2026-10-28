@@ -13,7 +13,7 @@ This guide covers development workflows, how probing works, CI, and releases for
 
 1. **Clone:**
    ```bash
-   git clone https://github.com/edejong-dbc/mtr-ng.git
+   git clone https://github.com/gedejong/mtr-ng.git
    cd mtr-ng
    ```
 

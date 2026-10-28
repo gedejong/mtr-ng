@@ -4,11 +4,11 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Modern My Traceroute with real-time network path visualization"
 arch=('x86_64' 'aarch64' 'armv7h')
-url="https://github.com/edejong-dbc/mtr-ng"
+url="https://github.com/gedejong/mtr-ng"
 license=('MIT OR Apache-2.0')
 depends=('glibc')
 makedepends=('rust' 'cargo')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/edejong-dbc/$pkgname/archive/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/gedejong/$pkgname/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP') # This should be updated with actual checksum
 
 prepare() {

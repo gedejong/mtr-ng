@@ -220,7 +220,7 @@ At the time of the review every install path was broken and CI was red.
   - The tag/version check (`ci.yml:40-57`) never runs, because the workflow isn't triggered by tags.
   - Target matrix: ubuntu x64 + arm, macos-15, windows; `cargo check` for FreeBSD; an MSRV job; a privileged loopback smoke test (`-r -c 2 -n 127.0.0.1`).
   - Size: *S-M*
-- [x] **C4 Release pipeline.** *(m3: dist 0.32 (`dist-workspace.toml`, generated `release.yml`) builds macOS x86_64/arm64, Linux gnu x86_64/arm64 and musl x86_64 archives with checksums, a shell installer and the Homebrew formula for `edejong-dbc/homebrew-tap`. Our `build-deb.yml` adds amd64/arm64 `.deb`s; `publish-crates.yml` publishes to crates.io. `bump-version.sh` now runs the gate locally, also bumps `Cargo.lock` (the old one didn't, so every `--locked` release build would have failed), and pushes commit and tag atomically. Windows is no longer shipped until X3e. `publish-homebrew.yml` replaces dist's Homebrew job: it adds the man page to dist's formula and pushes with the existing `COMMITTER_TOKEN` secret. Also needs `CARGO_REGISTRY_TOKEN`.)*
+- [x] **C4 Release pipeline.** *(m3: dist 0.32 (`dist-workspace.toml`, generated `release.yml`) builds macOS x86_64/arm64, Linux gnu x86_64/arm64 and musl x86_64 archives with checksums, a shell installer and the Homebrew formula for `gedejong/homebrew-tap`. Our `build-deb.yml` adds amd64/arm64 `.deb`s; `publish-crates.yml` publishes to crates.io. `bump-version.sh` now runs the gate locally, also bumps `Cargo.lock` (the old one didn't, so every `--locked` release build would have failed), and pushes commit and tag atomically. Windows is no longer shipped until X3e. `publish-homebrew.yml` replaces dist's Homebrew job: it adds the man page to dist's formula and pushes with the `HOMEBREW_TAP_TOKEN_PAT` secret. Also needs `CARGO_REGISTRY_TOKEN`.)*
   - `release.yml:109-113` uses `macos-13`, which was retired 2025-12-04.
   - `workflow_dispatch` derives the version from the branch ref, so the verify step fails.
   - The release is published before the builds run.
@@ -257,6 +257,8 @@ At the time of the review every install path was broken and CI was red.
     - lines 229-263 are a pasted tap README;
     - it claims Windows works.
   - `packaging/debian/control` and the `generate-rpm` metadata are dead. *S*
+- [ ] **C10 New home.** Up to 0.3.0 the repository, the tap and the crate belonged to `edejong-dbc`, which can no longer be reached; from 0.4.0 they live under `gedejong`. The old repository and `edejong-dbc/tap` stay at 0.3.0 without a pointer to the new home, and the 0.1.5-0.3.0 releases stay there (the tags are here).
+  - crates.io: `edejong-dbc` is the only owner of `mtr-ng`, so nothing newer can be published. Ask help@crates.io to add `gedejong` as an owner, or pick a new crate name. Then put `./publish-crates` back in `publish-jobs`, run `dist generate`, set `CARGO_REGISTRY_TOKEN`, and restore `cargo install --locked mtr-ng` in the README and DISTRIBUTION.md. *S*
 
 ## Features
 

@@ -51,17 +51,18 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 
 ## Installation
 
-Each [release](https://github.com/edejong-dbc/mtr-ng/releases) after 0.3.0 has binaries for macOS and Linux, x86_64 and ARM, with checksums.
+Each [release](https://github.com/gedejong/mtr-ng/releases) from 0.4.0 on has binaries for macOS and Linux, x86_64 and ARM, with checksums. Up to 0.3.0 mtr-ng lived at `edejong-dbc/mtr-ng`, an account that can no longer be reached, so the old repository, tap and crate stay at 0.3.0.
 
 #### Shell installer (macOS, Linux)
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/edejong-dbc/mtr-ng/releases/latest/download/mtr-ng-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/gedejong/mtr-ng/releases/latest/download/mtr-ng-installer.sh | sh
 ```
 
 #### Homebrew (macOS, Linux)
 ```bash
-brew install edejong-dbc/tap/mtr-ng
+brew install gedejong/tap/mtr-ng
 ```
+Installed from the old `edejong-dbc/tap`? Run `brew uninstall mtr-ng && brew untap edejong-dbc/tap` first.
 
 #### Debian/Ubuntu (amd64, arm64)
 Download the `.deb` from the release, then:
@@ -70,13 +71,14 @@ sudo dpkg -i mtr-ng_*.deb
 ```
 
 #### Cargo
+The crate on crates.io is stuck at 0.3.0 for now, so install from GitHub:
 ```bash
-cargo install --locked mtr-ng
+cargo install --locked --git https://github.com/gedejong/mtr-ng
 ```
 
 ### From Source
 ```bash
-git clone https://github.com/edejong-dbc/mtr-ng
+git clone https://github.com/gedejong/mtr-ng
 cd mtr-ng
 cargo build --release --locked
 sudo cp target/release/mtr-ng /usr/local/bin/

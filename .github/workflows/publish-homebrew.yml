@@ -1,7 +1,7 @@
-# Pushes the Homebrew formula that dist generates to edejong-dbc/homebrew-tap,
+# Pushes the Homebrew formula that dist generates to gedejong/homebrew-tap,
 # with one addition: the man page goes to man1 (dist's formula leaves it in
 # pkgshare, off the MANPATH). Replaces dist's built-in "homebrew" publish job
-# and uses the COMMITTER_TOKEN secret, a token with write access to the tap.
+# and uses the HOMEBREW_TAP_TOKEN_PAT secret, a token with write access to the tap.
 # release.yml calls this (publish-jobs in dist-workspace.toml).
 name: Publish to Homebrew
 
@@ -18,8 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          repository: edejong-dbc/homebrew-tap
-          token: ${{ secrets.COMMITTER_TOKEN }}
+          repository: gedejong/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN_PAT }}
           path: tap
       - name: Fetch the generated formula
         uses: actions/download-artifact@v8
@@ -29,6 +29,7 @@ jobs:
           merge-multiple: true
       - name: Add the man page
         run: |
+          mkdir -p tap/Formula
           awk '/^    install_binary_aliases!$/ { print "    man1.install \"mtr-ng.1\"" } { print }' \
             dist/mtr-ng.rb > tap/Formula/mtr-ng.rb
           if ! grep -q '^    man1.install "mtr-ng.1"$' tap/Formula/mtr-ng.rb; then
