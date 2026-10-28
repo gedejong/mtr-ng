@@ -1,27 +1,18 @@
 use crate::probe::{IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
-use crate::{tracer, utils, Args, HopStats, Result};
+use crate::simulate::{self, SimProber};
+use crate::{tracer, Args, HopStats, Result};
 use anyhow::{anyhow, bail};
 use hickory_resolver::{
     config::{LookupIpStrategy, ResolverConfig, CLOUDFLARE},
     net::runtime::TokioRuntimeProvider,
     TokioResolver,
 };
-use rand;
 
-use std::{
-    collections::HashMap,
-    net::{IpAddr, Ipv4Addr},
-    sync::{Arc, Mutex},
-    time::Duration,
-};
-use tokio::time;
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Rounds in report mode when `--count` is not given (same as mtr).
 pub const DEFAULT_REPORT_CYCLES: usize = 10;
-
-/// Length of the fake path produced by `--simulate`.
-const SIMULATED_PATH_LENGTH: usize = 8;
 
 // Add callback type for real-time updates
 pub type UpdateCallback = Arc<dyn Fn() + Send + Sync>;
@@ -104,9 +95,14 @@ impl MtrSession {
 
     /// Open the prober for a real trace, or return `None` in simulation mode.
     /// Fails instead of falling back to simulated data when real probing is impossible.
-    pub fn open_probe_engine(&self) -> Result<Option<Box<dyn Prober>>> {
+    pub fn open_probe_engine(&mut self) -> Result<Box<dyn Prober>> {
         if self.is_simulated() {
-            return Ok(None);
+            // Names come with the made-up path; a simulation sends no lookups.
+            let target = (self.target != self.target_addr.to_string()).then(|| self.target.clone());
+            self.dns_names.insert(self.target_addr, target);
+            self.dns_names
+                .extend(simulate::names().map(|(addr, name)| (addr, Some(name))));
+            return Ok(Box::new(SimProber::new()));
         }
         if self.target_addr.is_ipv6() {
             bail!(
@@ -116,7 +112,7 @@ impl MtrSession {
                 self.target_addr
             );
         }
-        Ok(Some(Box::new(ProbeEngine::new()?)))
+        Ok(Box::new(ProbeEngine::new()?))
     }
 
     /// Hops worth showing: up to the end of the path once it is known, otherwise
@@ -161,6 +157,7 @@ impl MtrSession {
                 return true;
             }
         }
+        self.hops[index].record_reply_details(addr, response.reply_ttl, &response.mpls);
         if let Some(Some(name)) = self.dns_names.get(&addr) {
             self.hops[index].set_hostname_for_addr(addr, name.clone());
         }
@@ -205,7 +202,11 @@ impl MtrSession {
     /// True the first time a public address is seen with `--aslookup`: the caller
     /// should look up its AS. Private and special addresses are never sent out.
     pub fn want_asn(&mut self, addr: IpAddr) -> bool {
-        if !self.args.wants_asn() || !crate::asn::is_public(addr) || self.asns.contains_key(&addr) {
+        if !self.args.wants_asn()
+            || self.is_simulated()
+            || !crate::asn::is_public(addr)
+            || self.asns.contains_key(&addr)
+        {
             return false;
         }
         self.asns.insert(addr, None);
@@ -231,215 +232,8 @@ impl MtrSession {
         }
     }
 
-    /// Simulated trace for report mode: lockstep rounds, no real sockets.
-    pub async fn run_simulated_trace(&mut self) -> Result<()> {
-        info!("Running simulated traceroute (use sudo for real network tracing)");
-
-        if let Some(end) = self.hops.get_mut(SIMULATED_PATH_LENGTH - 1) {
-            end.mark_as_target();
-        }
-        self.num_hosts = self.num_hosts.min(SIMULATED_PATH_LENGTH);
-
-        for round in 0..self.args.count.unwrap_or(DEFAULT_REPORT_CYCLES) {
-            debug!("Simulation Round {}", round + 1);
-
-            for hop in self.hops.iter_mut().take(SIMULATED_PATH_LENGTH) {
-                hop.increment_sent();
-
-                // Simulate realistic network behavior
-                let base_latency = hop.hop as u64 * 10 + 20; // Base latency increases with hops
-                let jitter = rand::random::<u64>() % 50; // Random jitter
-                let packet_loss_chance = utils::math::clamp_f64(hop.hop as f64 * 0.05, 0.0, 0.25); // Higher loss chance for testing
-
-                if rand::random::<f64>() > packet_loss_chance {
-                    let rtt = Duration::from_millis(base_latency + jitter);
-                    hop.add_rtt(rtt);
-
-                    // Simulate realistic IP addresses and hostnames
-                    if hop.addr.is_none() {
-                        // Generate realistic-looking IP addresses
-                        match hop.hop {
-                            1 => {
-                                hop.addr = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
-                                hop.hostname = if !self.args.numeric {
-                                    Some("gateway.local".to_string())
-                                } else {
-                                    None
-                                };
-                            }
-                            2..=3 => {
-                                hop.addr = Some(IpAddr::V4(Ipv4Addr::new(10, 0, hop.hop, 1)));
-                                hop.hostname = if !self.args.numeric {
-                                    Some(format!("core-{}.isp.net", hop.hop))
-                                } else {
-                                    None
-                                };
-                            }
-                            _ => {
-                                let final_octet = if hop.hop >= 8 { 8 } else { hop.hop };
-                                hop.addr = Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, final_octet)));
-                                hop.hostname = if !self.args.numeric {
-                                    Some("dns.google".to_string())
-                                } else {
-                                    None
-                                };
-                            }
-                        }
-                    }
-                } else {
-                    hop.add_timeout();
-                }
-            }
-
-            time::sleep(Duration::from_millis(self.args.interval)).await;
-        }
-
-        Ok(())
-    }
-
     pub fn set_update_callback(&mut self, callback: UpdateCallback) {
         self.update_callback = Some(callback);
-    }
-
-    /// Run the trace with live updates for the TUI. `prober` comes from
-    /// `open_probe_engine`; `None` means simulation.
-    pub async fn run_trace_with_realtime_updates(
-        session_arc: Arc<Mutex<Self>>,
-        prober: Option<Box<dyn Prober>>,
-    ) -> Result<()> {
-        let args = session_arc.lock().unwrap().args.clone();
-        match prober {
-            Some(prober) => tracer::run(session_arc, prober).await,
-            None => Self::run_simulated_trace_realtime(session_arc, args).await,
-        }
-    }
-
-    async fn run_simulated_trace_realtime(
-        session_arc: std::sync::Arc<std::sync::Mutex<Self>>,
-        args: Args,
-    ) -> Result<()> {
-        info!("Running simulated traceroute (real-time individual packet responses)");
-
-        // Extract the numeric flag once to avoid borrow conflicts
-        let numeric = args.numeric;
-        let max_hops = {
-            let mut session = session_arc.lock().unwrap();
-            if let Some(end) = session.hops.get_mut(SIMULATED_PATH_LENGTH - 1) {
-                end.mark_as_target();
-            }
-            session.num_hosts = session.num_hosts.min(SIMULATED_PATH_LENGTH);
-            session.num_hosts
-        };
-
-        for round in 0..args.count.unwrap_or(1000) {
-            debug!(
-                "Simulation Round {} (interval: {}ms)",
-                round + 1,
-                args.interval
-            );
-            let round_start = tokio::time::Instant::now();
-
-            // PHASE 1: Send all packets immediately (shows waiting state)
-            {
-                let mut session = session_arc.lock().unwrap();
-                for hop_index in 0..max_hops {
-                    session.hops[hop_index].increment_sent();
-                }
-
-                // Trigger UI update to show all hops in waiting state
-                if let Some(ref callback) = session.update_callback {
-                    callback();
-                }
-            }
-
-            // PHASE 2: Simulate responses arriving individually with realistic delays
-            for hop_index in 0..max_hops {
-                // Simulate network transit time for this hop
-                let base_transit_time = (hop_index + 1) as u64 * 15 + 10; // 25ms, 40ms, 55ms, etc.
-                let jitter = rand::random::<u64>() % 30; // 0-30ms jitter
-                let transit_time = Duration::from_millis(base_transit_time + jitter);
-
-                // Wait for the simulated transit time
-                tokio::time::sleep(transit_time).await;
-
-                let should_update_ui = {
-                    let mut session = session_arc.lock().unwrap();
-                    let hop = &mut session.hops[hop_index];
-
-                    // Don't increment sent again - already done in phase 1
-
-                    let base_latency = (hop_index + 1) as u64 * 15 + 20; // Realistic latency progression
-                    let rtt_jitter = rand::random::<u64>() % 20;
-                    let packet_loss_chance =
-                        utils::math::clamp_f64(hop_index as f64 * 0.03, 0.0, 0.20);
-
-                    if rand::random::<f64>() > packet_loss_chance {
-                        let rtt = Duration::from_millis(base_latency + rtt_jitter);
-                        hop.add_rtt(rtt);
-
-                        if hop.addr.is_none() {
-                            match hop.hop {
-                                1 => {
-                                    hop.addr = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
-                                    hop.hostname = if !numeric {
-                                        Some("gateway.local".to_string())
-                                    } else {
-                                        None
-                                    };
-                                }
-                                2..=3 => {
-                                    hop.addr = Some(IpAddr::V4(Ipv4Addr::new(10, 0, hop.hop, 1)));
-                                    hop.hostname = if !numeric {
-                                        Some(format!("core-{}.isp.net", hop.hop))
-                                    } else {
-                                        None
-                                    };
-                                }
-                                _ => {
-                                    let final_octet = if hop.hop >= 8 { 8 } else { hop.hop };
-                                    hop.addr =
-                                        Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, final_octet)));
-                                    hop.hostname = if !numeric {
-                                        Some("dns.google".to_string())
-                                    } else {
-                                        None
-                                    };
-                                }
-                            }
-                        }
-                    } else {
-                        hop.add_timeout();
-                    }
-
-                    session.update_callback.is_some()
-                };
-
-                // Trigger UI update immediately when this packet response "arrives"
-                if should_update_ui {
-                    let session = session_arc.lock().unwrap();
-                    if let Some(ref callback) = session.update_callback {
-                        callback();
-                    }
-                }
-            }
-
-            // Wait for the remainder of the interval before starting the next round
-            // This maintains the specified interval timing while showing individual responses
-            let elapsed = round_start.elapsed();
-            let interval_duration = Duration::from_millis(args.interval);
-            if elapsed < interval_duration {
-                let remaining = interval_duration - elapsed;
-                debug!(
-                    "Round {} completed in {:?}, waiting {:?} more",
-                    round + 1,
-                    elapsed,
-                    remaining
-                );
-                tokio::time::sleep(remaining).await;
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -465,8 +259,11 @@ mod tests {
             protocol: crate::args::ProbeProtocol::Icmp,
             quiet: false,
             aslookup: false,
+            mpls: false,
+            flows: 1,
             json: false,
             csv: false,
+            dot: false,
             log_file: None,
         };
 
@@ -498,8 +295,11 @@ mod tests {
             protocol: crate::args::ProbeProtocol::Icmp,
             quiet: false,
             aslookup: false,
+            mpls: false,
+            flows: 1,
             json: false,
             csv: false,
+            dot: false,
             log_file: None,
         };
 
@@ -519,12 +319,14 @@ mod tests {
             hop,
             ordinal: None,
             seq: 0,
-            source_addr: IpAddr::V4(Ipv4Addr::from(from)),
+            source_addr: IpAddr::V4(std::net::Ipv4Addr::from(from)),
             icmp_type: kind,
             rtt: Duration::from_millis(10),
             send_time: now,
             receive_time: now,
             precise_rtt_ns: 10_000_000,
+            reply_ttl: None,
+            mpls: Vec::new(),
         }
     }
 
@@ -582,7 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn ipv6_target_fails_instead_of_simulating() {
-        let session = session_for(&["-n", "::1"]).await;
+        let mut session = session_for(&["-n", "::1"]).await;
         let err = session
             .open_probe_engine()
             .err()
@@ -592,9 +394,12 @@ mod tests {
 
     #[tokio::test]
     async fn simulation_only_when_asked() {
-        let session = session_for(&["--simulate", "::1"]).await;
+        let mut session = session_for(&["--simulate", "::1"]).await;
         assert!(session.is_simulated());
-        assert!(session.open_probe_engine().unwrap().is_none());
+        assert!(
+            session.open_probe_engine().is_ok(),
+            "simulated, even for IPv6"
+        );
     }
 
     #[test]
@@ -614,8 +419,11 @@ mod tests {
             protocol: crate::args::ProbeProtocol::Icmp,
             quiet: false,
             aslookup: false,
+            mpls: false,
+            flows: 1,
             json: false,
             csv: false,
+            dot: false,
             log_file: None,
         };
 

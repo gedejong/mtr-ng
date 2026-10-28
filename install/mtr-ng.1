@@ -8,7 +8,7 @@ mtr\-ng \- A modern implementation of mtr (My Traceroute) with unicode and termi
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .SH SYNOPSIS
-\fBmtr\-ng\fR [\fB\-c\fR|\fB\-\-count\fR] [\fB\-i\fR|\fB\-\-interval\fR] [\fB\-M\fR|\fB\-\-max\-hops\fR] [\fB\-r\fR|\fB\-\-report\fR] [\fB\-j\fR|\fB\-\-json\fR] [\fB\-C\fR|\fB\-\-csv\fR] [\fB\-n\fR|\fB\-\-numeric\fR] [\fB\-z\fR|\fB\-\-aslookup\fR] [\fB\-\-sparkline\-scale\fR] [\fB\-\-ema\-alpha\fR] [\fB\-\-fields\fR] [\fB\-\-show\-all\fR] [\fB\-\-simulate\fR] [\fB\-P\fR|\fB\-\-protocol\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-log\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fITARGET\fR> 
+\fBmtr\-ng\fR [\fB\-c\fR|\fB\-\-count\fR] [\fB\-i\fR|\fB\-\-interval\fR] [\fB\-M\fR|\fB\-\-max\-hops\fR] [\fB\-r\fR|\fB\-\-report\fR] [\fB\-j\fR|\fB\-\-json\fR] [\fB\-C\fR|\fB\-\-csv\fR] [\fB\-\-dot\fR] [\fB\-n\fR|\fB\-\-numeric\fR] [\fB\-z\fR|\fB\-\-aslookup\fR] [\fB\-e\fR|\fB\-\-mpls\fR] [\fB\-\-flows\fR] [\fB\-\-sparkline\-scale\fR] [\fB\-\-ema\-alpha\fR] [\fB\-\-fields\fR] [\fB\-\-show\-all\fR] [\fB\-\-simulate\fR] [\fB\-P\fR|\fB\-\-protocol\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-log\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fITARGET\fR> 
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .SH DESCRIPTION
@@ -35,11 +35,20 @@ Report as JSON, with mtr\*(Aqs field names (implies \-\-report)
 \fB\-C\fR, \fB\-\-csv\fR
 Report as CSV, one row per hop (implies \-\-report)
 .TP
+\fB\-\-dot\fR
+Print the routes as a Graphviz graph instead of a table (implies \-\-report). Most useful with \-\-flows
+.TP
 \fB\-n\fR, \fB\-\-numeric\fR
 Show IP addresses instead of hostnames
 .TP
 \fB\-z\fR, \fB\-\-aslookup\fR
 Show the AS number of each hop. Asks Team Cymru\*(Aqs DNS about every public address
+.TP
+\fB\-e\fR, \fB\-\-mpls\fR
+Show the MPLS labels routers report (RFC 4950) under their hop
+.TP
+\fB\-\-flows\fR \fI<FLOWS>\fR [default: 1]
+Probe this many flows in turn, one per round. All probes of a flow look alike to load balancers (Paris traceroute), so a flow follows one path; several flows reveal the paths a load balancer spreads traffic over
 .TP
 \fB\-\-sparkline\-scale\fR \fI<SPARKLINE_SCALE>\fR [default: logarithmic]
 Sparkline scaling mode: linear or logarithmic (default: logarithmic)
@@ -155,6 +164,12 @@ Sparkline or heatmap
 .B c
 Cycle colour modes
 .TP
+.B f
+Hop table or flow matrix
+.TP
+.B e
+Show or hide MPLS labels
+.TP
 .B ↑ k
 Select previous hop
 .TP
@@ -173,8 +188,40 @@ First hop
 .B End
 Last hop
 .TP
+.B Enter
+Details of the selected hop
+.TP
 .B Esc
 Clear the selection
+.SS In the column chooser
+.TP
+.B ↑ k
+Move the cursor up
+.TP
+.B ↓ j
+Move the cursor down
+.TP
+.B Space
+Show or hide the column
+.TP
+.B ← Shift+↑
+Move the column earlier
+.TP
+.B → Shift+↓
+Move the column later
+.TP
+.B Esc
+Close
+.SS In the hop details
+.TP
+.B ↑ k
+Previous hop
+.TP
+.B ↓ j
+Next hop
+.TP
+.B Esc
+Close
 .SH COLUMNS
 Pick them with \fB\-\-fields\fR, or with \fBo\fR while running. Times are in milliseconds.
 .TP
@@ -235,6 +282,15 @@ Show fewer columns.
 .TP
 .B mtr\-ng \-i 500 example.com
 Probe every 500 ms.
+.TP
+.B mtr\-ng \-r \-c 40 \-\-flows 8 example.com
+Follow 8 flows and show which router each met: load balancers split them.
+.TP
+.B mtr\-ng \-c 40 \-\-flows 8 \-\-dot example.com | dot \-Tsvg > routes.svg
+Draw the routes with Graphviz.
+.TP
+.B mtr\-ng \-r \-e example.com
+Show MPLS labels under their hop.
 .TP
 .B mtr\-ng \-\-simulate example.com
 Fake data, marked SIMULATED.

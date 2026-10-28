@@ -121,6 +121,11 @@ pub struct Args {
     #[arg(short = 'C', long)]
     pub csv: bool,
 
+    /// Print the routes as a Graphviz graph instead of a table (implies --report).
+    /// Most useful with --flows
+    #[arg(long, conflicts_with_all = ["json", "csv"])]
+    pub dot: bool,
+
     /// Show IP addresses instead of hostnames
     #[arg(short, long)]
     pub numeric: bool,
@@ -128,6 +133,16 @@ pub struct Args {
     /// Show the AS number of each hop. Asks Team Cymru's DNS about every public address
     #[arg(short = 'z', long)]
     pub aslookup: bool,
+
+    /// Show the MPLS labels routers report (RFC 4950) under their hop
+    #[arg(short = 'e', long)]
+    pub mpls: bool,
+
+    /// Probe this many flows in turn, one per round. All probes of a flow look
+    /// alike to load balancers (Paris traceroute), so a flow follows one path;
+    /// several flows reveal the paths a load balancer spreads traffic over
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=crate::probe::MAX_FLOWS as i64))]
+    pub flows: u16,
 
     /// Sparkline scaling mode: linear or logarithmic (default: logarithmic)
     #[arg(long, value_enum, default_value = "logarithmic")]

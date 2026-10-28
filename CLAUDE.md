@@ -3,13 +3,15 @@
 Rust reimplementation of `mtr` (traceroute + ping) with a ratatui TUI and a `--report` mode. One crate: library in `src/lib.rs`, binary in `src/main.rs`.
 
 ## Layout
-- `src/tracer.rs`: the one probing loop (report and TUI). Sends a round per interval, matches replies by seq, expires probes after 2 s, runs reverse DNS off the probe path. Tested against a `FakeProber`.
-- `src/probe.rs`: `Prober` trait and `ProbeEngine`. ICMP sockets (unprivileged datagram on macOS, raw elsewhere), one receive thread per address family that timestamps replies on arrival, packet building and parsing.
-- `src/session.rs`: `MtrSession`. Target resolution, the hop table, applying replies and timeouts to hops, the reverse DNS cache, simulation mode.
-- `src/hop_stats.rs`: per-hop statistics (loss excluding probes in flight, RTT, Welford stddev, jitter, EMA) and per-address `ResponderStats` for multipath.
-- `src/report.rs`: `--report` text (golden-tested `format_table`), `--json` (mtr field names) and `--csv`.
+- `src/tracer.rs`: the one probing loop (report and TUI). Sends a round per interval, each round in one flow (round mod `--flows`), matches replies by seq, expires probes after 2 s, runs reverse DNS off the probe path. Tested against a `FakeProber`.
+- `src/probe.rs`: `Prober` trait and `ProbeEngine`. ICMP sockets (unprivileged datagram on macOS, raw elsewhere), one receive thread per address family that timestamps replies on arrival, packet building and parsing. Paris flows: per flow a fixed checksum and identifier, two payload bytes absorb the seq. `src/icmp_ext.rs`: RFC 4884 extensions, MPLS label stacks.
+- `src/simulate.rs`: `SimProber`, the `--simulate` path behind the `Prober` trait, so simulation runs through the real tracer.
+- `src/session.rs`: `MtrSession`. Target resolution, `open_probe_engine` (real or simulated), the hop table, applying replies and timeouts to hops, the reverse DNS cache.
+- `src/hop_stats.rs`: per-hop statistics (loss excluding probes in flight, RTT, Welford stddev, jitter, EMA), a ring of the last 600 `ProbeRecord`s, per-flow `FlowStats`, per-address `ResponderStats` (reply TTL, MPLS).
+- `src/topology.rs`: routes per flow: responder letters, the flow matrix, route-graph edges, DOT.
+- `src/report.rs`: `--report` text (golden-tested `format_table`, flow matrix when `--flows` > 1), `--json` (mtr field names), `--csv` and `--dot`.
 - `src/columns.rs`: header, chooser label and value of every `Column`, shared by TUI, report and man page. `src/asn.rs`: `-z` lookups via Team Cymru DNS, public addresses only.
-- `src/ui/`: TUI. `main.rs` event loop (input thread, coalesced redraws from a session snapshot), `render.rs` all drawing incl. column layout, `events.rs` keymap tables (also generate help and man page), `state.rs` modes and column chooser, `visualization.rs` RTT scale, sparkline cells, colours.
+- `src/ui/`: TUI. `main.rs` event loop (input thread, coalesced redraws from a session snapshot), `render.rs` all drawing (table, flow matrix, detail pane, overlays, column layout), `events.rs` keymap tables (also generate help and man page), `state.rs` modes, views, selection and column chooser, `visualization.rs` RTT scale, sparkline and histogram cells, colours.
 - `src/args.rs`: clap CLI plus `validate()` for cross-flag rules. `src/utils.rs`: small formatting helpers.
 - `examples/man.rs` generates `install/mtr-ng.1`; `tests/man_page.rs` fails when it is stale. After changing flags, keys or columns: `cargo run --example man > install/mtr-ng.1`.
 

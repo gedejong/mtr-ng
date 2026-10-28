@@ -3,7 +3,11 @@
 //! `tests/man_page.rs` fails when the checked-in page is stale.
 
 use clap::{CommandFactory, ValueEnum};
-use mtr_ng::{args::Column, ui::events::TABLE_KEYS, Args};
+use mtr_ng::{
+    args::Column,
+    ui::events::{COLUMN_KEYS, DETAIL_KEYS, TABLE_KEYS},
+    Args,
+};
 use std::io::{self, Write};
 
 const EXAMPLES: &[(&str, &str)] = &[
@@ -18,6 +22,18 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Show fewer columns.",
     ),
     ("mtr-ng -i 500 example.com", "Probe every 500 ms."),
+    (
+        "mtr-ng -r -c 40 --flows 8 example.com",
+        "Follow 8 flows and show which router each met: load balancers split them.",
+    ),
+    (
+        "mtr-ng -c 40 --flows 8 --dot example.com | dot -Tsvg > routes.svg",
+        "Draw the routes with Graphviz.",
+    ),
+    (
+        "mtr-ng -r -e example.com",
+        "Show MPLS labels under their hop.",
+    ),
     (
         "mtr-ng --simulate example.com",
         "Fake data, marked SIMULATED.",
@@ -48,8 +64,17 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
     man.render_options_section(out)?;
 
     writeln!(out, ".SH KEYS")?;
-    for binding in TABLE_KEYS {
-        tagged(out, binding.label, binding.help)?;
+    for (heading, keys) in [
+        (None, TABLE_KEYS),
+        (Some("In the column chooser"), COLUMN_KEYS),
+        (Some("In the hop details"), DETAIL_KEYS),
+    ] {
+        if let Some(heading) = heading {
+            writeln!(out, ".SS {heading}")?;
+        }
+        for binding in keys {
+            tagged(out, binding.label, binding.help)?;
+        }
     }
 
     writeln!(out, ".SH COLUMNS")?;

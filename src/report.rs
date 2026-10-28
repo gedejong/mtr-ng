@@ -1,6 +1,8 @@
 use crate::args::Column;
+use crate::hop_stats::FlowStats;
+use crate::icmp_ext::MplsLabel;
 use crate::utils::network;
-use crate::{tracer, HopStats, MtrSession, Result};
+use crate::{topology, tracer, HopStats, MtrSession, Result};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,11 +47,13 @@ fn report_columns(columns: &[Column]) -> Vec<Column> {
 }
 
 /// The header line and one line per probed hop, aligned however long the names are.
-fn format_table(hops: &[HopStats], columns: &[Column], numeric: bool) -> Vec<String> {
+/// The report table. With `mpls`, each hop is followed by the labels its router
+/// reported, as `mtr -e` prints them.
+fn format_table(hops: &[HopStats], columns: &[Column], numeric: bool, mpls: bool) -> Vec<String> {
     let columns = &report_columns(columns);
+    let hops: Vec<&HopStats> = hops.iter().filter(|hop| hop.sent > 0).collect();
     let rows: Vec<Vec<String>> = hops
         .iter()
-        .filter(|hop| hop.sent > 0)
         .map(|hop| {
             let host = host_label(hop, numeric);
             columns.iter().map(|&c| cell(hop, &host, c)).collect()
@@ -73,11 +77,15 @@ fn format_table(hops: &[HopStats], columns: &[Column], numeric: bool) -> Vec<Str
         })
         .collect();
 
-    let headers = columns.iter().map(|&c| header(c).to_string()).collect();
-    std::iter::once(headers)
-        .chain(rows)
-        .map(|cells| align(&cells, columns, &widths))
-        .collect()
+    let headers: Vec<String> = columns.iter().map(|&c| header(c).to_string()).collect();
+    let mut lines = vec![align(&headers, columns, &widths)];
+    for (hop, row) in hops.iter().zip(&rows) {
+        lines.push(align(row, columns, &widths));
+        if mpls {
+            lines.extend(hop.mpls().iter().map(|label| format!("       {label}")));
+        }
+    }
+    lines
 }
 
 /// Host and ASN left-aligned, numbers right-aligned, one space between columns.
@@ -117,7 +125,16 @@ fn json_ms(rtt: Option<Duration>) -> Value {
 /// One entry per probed hop, with mtr's field names (`count`, `Loss%`, `Snt`,
 /// `Wrst`, ...) so parsers written for `mtr --json` keep working. Extra addresses
 /// that answered for a hop are listed under `alternates`.
-fn json_hubs(hops: &[HopStats], numeric: bool, asn: bool) -> Vec<Value> {
+fn json_mpls(labels: &[MplsLabel]) -> Value {
+    labels
+        .iter()
+        .map(|l| json!({"label": l.label, "tc": l.tc, "s": l.bottom, "ttl": l.ttl}))
+        .collect()
+}
+
+/// mtr's hub fields, plus our own. With more than one flow, `flows[f]` is the
+/// address flow `f` met here most often.
+fn json_hubs(hops: &[HopStats], numeric: bool, asn: bool, flows: u16) -> Vec<Value> {
     let asn_of = |n: Option<u32>| n.map_or("AS???".to_string(), |n| format!("AS{n}"));
     hops.iter()
         .filter(|hop| hop.sent > 0)
@@ -140,18 +157,32 @@ fn json_hubs(hops: &[HopStats], numeric: bool, asn: bool) -> Vec<Value> {
             if asn && hop.addr.is_some() {
                 hub["ASN"] = json!(asn_of(hop.asn));
             }
+            if !hop.mpls().is_empty() {
+                hub["MPLS"] = json_mpls(hop.mpls());
+            }
+            if flows > 1 {
+                let per_flow: Vec<Option<String>> = (0..flows)
+                    .map(|f| hop.flows.get(&f).and_then(FlowStats::responder))
+                    .map(|addr| addr.map(|a| a.to_string()))
+                    .collect();
+                hub["flows"] = json!(per_flow);
+            }
             let alternates: Vec<Value> = hop
                 .get_alternate_paths()
                 .into_iter()
                 .map(|alt| {
-                    json!({
+                    let mut alternate = json!({
                         "ip": alt.addr.to_string(),
                         "host": alt.hostname.clone().filter(|_| !numeric).unwrap_or_else(|| alt.addr.to_string()),
                         "replies": alt.replies,
                         "Last": json_ms(alt.last_rtt),
                         "Avg": json_ms(alt.avg_rtt()),
                         "Best": json_ms(alt.best_rtt),
-                    })
+                    });
+                    if !alt.mpls.is_empty() {
+                        alternate["MPLS"] = json_mpls(&alt.mpls);
+                    }
+                    alternate
                 })
                 .collect();
             if !alternates.is_empty() {
@@ -207,14 +238,10 @@ fn csv_rows(hops: &[HopStats], numeric: bool) -> Vec<String> {
 
 pub async fn run_report(mut session: MtrSession) -> Result<()> {
     let start = chrono::Utc::now();
-    match session.open_probe_engine()? {
-        None => session.run_simulated_trace().await?,
-        Some(prober) => {
-            let shared = Arc::new(Mutex::new(session));
-            tracer::run(Arc::clone(&shared), prober).await?;
-            session = shared.lock().unwrap().clone();
-        }
-    }
+    let prober = session.open_probe_engine()?;
+    let shared = Arc::new(Mutex::new(session));
+    tracer::run(Arc::clone(&shared), prober).await?;
+    session = shared.lock().unwrap().clone();
 
     let args = &session.args;
     let hops = &session.hops[..session.display_hop_count()];
@@ -232,7 +259,7 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
                     "simulated": session.is_simulated(),
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "hubs": json_hubs(hops, args.numeric, args.wants_asn()),
+                "hubs": json_hubs(hops, args.numeric, args.wants_asn(), args.flows),
             }
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -242,6 +269,10 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         for line in csv_rows(hops, args.numeric) {
             println!("{line}");
         }
+        return Ok(());
+    }
+    if args.dot {
+        print!("{}", topology::to_dot(hops, &source, args.numeric));
         return Ok(());
     }
 
@@ -254,8 +285,14 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         println!("SIMULATED: fake data from --simulate, not a real trace");
     }
     println!();
-    for line in format_table(hops, &args.get_columns(), args.numeric) {
+    for line in format_table(hops, &args.get_columns(), args.numeric, args.mpls) {
         println!("{line}");
+    }
+    if args.flows > 1 {
+        println!();
+        for line in topology::matrix_lines(hops, args.flows, args.numeric) {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -274,7 +311,7 @@ mod tests {
         let addr = IpAddr::from(addr);
         let mut hop = HopStats::new(n);
         for rtt in rtts {
-            hop.increment_sent();
+            hop.increment_sent(0);
             match rtt {
                 Some(rtt) => hop.add_rtt_from_addr(addr, ms(*rtt)),
                 None => hop.add_timeout(),
@@ -289,7 +326,7 @@ mod tests {
     fn path() -> Vec<HopStats> {
         let mut silent = HopStats::new(2);
         for _ in 0..3 {
-            silent.increment_sent();
+            silent.increment_sent(0);
             silent.add_timeout();
         }
         vec![
@@ -318,7 +355,7 @@ mod tests {
 
     #[test]
     fn long_names_widen_the_host_column_and_keep_everything_aligned() {
-        let lines = format_table(&path(), &Column::default_columns(), false);
+        let lines = format_table(&path(), &Column::default_columns(), false, false);
         let expected = [
             "                                      Loss%   Snt   Last    Avg    EMA  Best   Wrst StDev",
             " 1.|-- gateway.lan                     0.0%     3    3.0    2.0    1.3   1.0    3.0   1.0",
@@ -332,7 +369,7 @@ mod tests {
     #[test]
     fn numeric_mode_and_custom_fields() {
         let columns = [Column::Hop, Column::Host, Column::Avg, Column::Loss];
-        let lines = format_table(&path(), &columns, true);
+        let lines = format_table(&path(), &columns, true, false);
         let expected = [
             "                               Avg  Loss%",
             " 1.|-- 192.168.1.1             2.0   0.0%",
@@ -345,7 +382,7 @@ mod tests {
 
     #[test]
     fn json_uses_mtr_field_names_and_null_for_no_reply() {
-        let hubs = json_hubs(&path(), false, false);
+        let hubs = json_hubs(&path(), false, false, 1);
         assert_eq!(hubs.len(), 4);
         assert_eq!(hubs[0]["count"], 1);
         assert_eq!(hubs[0]["host"], "gateway.lan");
@@ -357,8 +394,35 @@ mod tests {
         assert_eq!(hubs[2]["Loss%"], 33.3);
         assert_eq!(hubs[3]["Wrst"], 1005.2);
         assert!(hubs[0].get("ASN").is_none(), "ASN only with --aslookup");
-        let with_asn = json_hubs(&path(), false, true);
+        let with_asn = json_hubs(&path(), false, true, 1);
         assert_eq!(with_asn[0]["ASN"], "AS???");
+        assert!(hubs[0].get("flows").is_none(), "flows only with --flows");
+    }
+
+    #[test]
+    fn mpls_labels_follow_their_hop() {
+        let mut hops = path();
+        let label = MplsLabel {
+            label: 24005,
+            tc: 0,
+            bottom: true,
+            ttl: 1,
+        };
+        let addr = hops[2].addr.unwrap();
+        hops[2].record_reply_details(addr, Some(250), &[label]);
+
+        let plain = format_table(&hops, &Column::default_columns(), true, false);
+        let with_mpls = format_table(&hops, &Column::default_columns(), true, true);
+        assert_eq!(with_mpls.len(), plain.len() + 1);
+        assert_eq!(with_mpls[4], "       [MPLS: Lbl 24005 TC 0 S 1 TTL 1]");
+        assert!(
+            with_mpls[3].starts_with(" 3.|--"),
+            "under hop 3: {with_mpls:?}"
+        );
+
+        let hubs = json_hubs(&hops, true, false, 1);
+        assert_eq!(hubs[2]["MPLS"][0]["label"], 24005);
+        assert!(hubs[1].get("MPLS").is_none());
     }
 
     #[test]

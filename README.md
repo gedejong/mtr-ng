@@ -16,6 +16,13 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Customizable Columns**: Select exactly which metrics to display
 - **Scalable Display**: Auto-scaling sparklines with manual override options
 
+### Load Balancers and MPLS
+- **Stable flows**: `--flows N` probes N flows in turn. All probes of one flow carry the same ICMP checksum and identifier (Paris traceroute), so a per-flow load balancer keeps each on one path, and the flows together show the paths it spreads traffic over
+- **Flow matrix**: `f` shows, per hop, a letter for the address each flow met; `--report` prints the same matrix after the table
+- **Route graph**: `--dot` prints the routes as Graphviz, with silent hops as dashed edges
+- **MPLS labels**: `-e` (or `e` while running) shows the label stacks routers report in ICMP extensions (RFC 4950)
+- **Hop details**: `Enter` opens every responder of a hop with its share, RTTs, routers on the way back and flows, plus RTT percentiles and a histogram
+
 ### Column Selection System
 - **Flexible Fields**: Choose from 14 columns
   - `hop`, `host`, `asn`, `loss`, `sent`, `last`, `avg`, `ema`
@@ -109,7 +116,10 @@ mtr-ng google.com
 # r           Reset statistics
 # h           Host names or IP addresses
 # s, v, c     RTT scale, sparkline/heatmap, colour mode
+# f           Hop table or flow matrix
+# e           Show or hide MPLS labels
 # ↑ ↓ PgUp PgDn Home End  Select and scroll hops
+# Enter       Details of the selected hop (↑ ↓ for the others)
 ```
 
 Colours follow `NO_COLOR` and `TERM=dumb`.
@@ -128,26 +138,28 @@ mtr-ng google.com --csv > trace.csv
 
 # AS numbers via Team Cymru's DNS (public addresses only)
 mtr-ng -z google.com
+
+# Follow 8 flows: the report ends with which address each flow met
+mtr-ng -r -c 40 --flows 8 google.com
+
+# The routes as a picture
+mtr-ng -c 40 --flows 8 --dot google.com | dot -Tsvg > routes.svg
+
+# MPLS labels under their hop
+mtr-ng -r -e google.com
 ```
 
 ## Advanced Features
 
-### Simulation Mode (No Sudo Required!)
-For development, testing, and demo purposes, MTR-NG includes a comprehensive simulation mode:
+### Simulation Mode
+`--simulate` answers probes from a made-up path instead of the network, through the same probing loop as real probes, and marks the screen SIMULATED. The path has a load-balanced pair of routers inside an MPLS tunnel, a router that never answers, some loss and the odd latency spike. Its addresses come from the documentation ranges and its names end in `.example`.
 ```bash
-# Test without requiring administrator privileges
-mtr-ng google.com --simulate
+# No network, no privileges
+mtr-ng --simulate example.com
 
-# Quick test in report mode
-mtr-ng google.com --simulate --count 3 --report
+# The load balancer shows up with two flows or more
+mtr-ng --simulate -r -c 8 --flows 4 -e example.com
 ```
-
-**Perfect for:**
-- Development and debugging
-- CI/CD pipelines  
-- Testing on restricted systems
-- Educational demonstrations
-- Validating UI and statistics logic
 
 ### Sparkline Visualization
 MTR-NG provides beautiful Unicode sparklines showing RTT history:

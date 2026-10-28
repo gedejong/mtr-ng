@@ -2,7 +2,7 @@
 
 Compiled 2026-10-27 from a full review (networking core, statistics/reporting, TUI, portability/CI, feature research). Line numbers refer to commit `59605fa`.
 
-**Status:** milestones 1-3 are done, apart from the tail of C8. Ticked items are fixed; *italic notes* record partial progress.
+**Status:** milestones 1-4 are done, apart from the tail of C8. Ticked items are fixed; *italic notes* record partial progress.
 
 Priority: **P0** shows wrong data or doesn't work, **P1** measurement correctness, **P2** visible defects, **P3** cleanup. Effort: S (hours), M (days), L (a week or more).
 
@@ -59,7 +59,7 @@ Distribution is in worse shape than the code:
   - `add_rtt` marks the newest Pending slot regardless of seq (`hop_stats.rs:283-288`).
   - In-flight probes count as lost (`:337-343`), so loss% oscillates every round.
   - Fix: carry the seq into HopStats; compute loss as (xmit − transit) / xmit, as mtr does. *M*
-- [x] **B9 Multipath accounting is wrong.** *(m2: `ResponderStats` per address, primary = argmax. The split still measures random flows until F1.)*
+- [x] **B9 Multipath accounting is wrong.** *(m2: `ResponderStats` per address, primary = argmax. m4: with F1 the split now means something: per flow it shows a route change or per-packet balancing, across flows the load balancer's spread.)*
   - `AlternatePath` starts at frequency 1 and `update()` adds 1 (`hop_stats.rs:25-43`), so an even A/B split shows 43/57.
   - On a primary switch the new primary stays listed as an alternate and the old one vanishes (`:122-160`).
   - Alternate replies never update `packet_history` and are left out of the RTT stats.
@@ -163,8 +163,8 @@ These refactors unblock most fixes above and every feature below.
   - kernel receive timestamps (`SO_TIMESTAMP`);
   - a single timeout/loss policy.
   - Fixes B3, B8, B11, B28. *L*
-- [x] **R2 Testable seams.** *(m2: `Prober` trait, `FakeProber` in `tracer.rs` tests, pure `decode`/`parse_icmpv4`. Simulation is not yet a `Prober`: it still has its own loops in `session.rs`.)* A `Prober` trait (real, simulated, fake) and pure `parse(&[u8]) -> Option<Reply>` functions tested against captured packets. Session logic (hop trimming, loss, end of path) is then tested against the fake. *M*
-- [ ] **R3 Per-probe records as the source of truth.** *(m2: `ResponderStats` replaced `AlternatePath`. Per-probe records are open.)* `ProbeSpec { ttl, flow, proto, size, df }` and a ring of `ProbeRecord`s (responder, RTT, reply TTL, quoted header, ICMP extensions). `HopStats` and a new per-responder `PerAddrStats` derive from it, replacing `AlternatePath`. Fixes B9 and B12; needed for F1, F2 and F7. *M*
+- [x] **R2 Testable seams.** *(m2: `Prober` trait, `FakeProber` in `tracer.rs` tests, pure `decode`/`parse_icmpv4`. m4: simulation is `SimProber` in `simulate.rs`, run by the real tracer; its own loops in `session.rs` are gone.)* A `Prober` trait (real, simulated, fake) and pure `parse(&[u8]) -> Option<Reply>` functions tested against captured packets. Session logic (hop trimming, loss, end of path) is then tested against the fake. *M*
+- [x] **R3 Per-probe records as the source of truth.** *(m2: `ResponderStats` replaced `AlternatePath`. m4: a ring of the last 600 `ProbeRecord { flow, outcome, from }` per hop, per-flow `FlowStats`, reply TTL and MPLS labels per responder. The all-time statistics stay running accumulators (Welford) instead of being derived from the ring, which would forget everything past the window. `ProbeSpec` with protocol, size and DF waits for X3d and F10.)* `ProbeSpec { ttl, flow, proto, size, df }` and a ring of `ProbeRecord`s (responder, RTT, reply TTL, quoted header, ICMP extensions). `HopStats` and a new per-responder `PerAddrStats` derive from it, replacing `AlternatePath`. Fixes B9 and B12; needed for F1, F2 and F7. *M*
 - [x] **R4 Tests.** *(m2: golden report tests, multipath and stale-ordinal HopStats tests. m3: `TestBackend` render tests in `ui/render.rs`, every mode at sizes from 40x6 up.)*
   - Golden tests for report output.
   - Table-driven multipath and out-of-order tests for HopStats.
@@ -174,7 +174,7 @@ These refactors unblock most fixes above and every feature below.
   - Publish a `PathSnapshot` through `tokio::sync::watch` and render it without holding the session lock.
   - Drive redraws from input, a coalesced dirty flag, a tick and resize, using crossterm's `EventStream`.
   - Fixes B20 and B28 (UI half). *M*
-- [x] **U2 View components and modes.** *(m3: a `Mode` enum and keymap tables that generate both the help screen and the man page. No `View` trait yet: with one view it would be ceremony. Introduce it with the second view (F2, F8 or F14).)*
+- [x] **U2 View components and modes.** *(m3: a `Mode` enum and keymap tables that generate both the help screen and the man page. No `View` trait yet: with one view it would be ceremony. m4: a second view (flow matrix) as a `View` enum and a detail `Mode`; both views share the selection and keys, so a trait would still be ceremony. Revisit with F8.)*
   - A `View` trait (`render(area, &snapshot)`, `handle_key -> Action`).
   - A modal/focus stack in place of the boolean flags.
   - One keymap table that also generates the help text.
@@ -260,24 +260,24 @@ At the time of the review every install path was broken and CI was red.
 
 ## Features
 
-The current "multipath" view has a structural flaw. ICMP probes change their checksum with every sequence number (`construct_icmp_packet`), and ECMP load balancers hash on it. Every probe is therefore a new flow, and the alternate-path percentages measure how random flows spread, not distinct routes. Stable flow identifiers (F1) are the keystone for every multi-route feature.
+The "multipath" view had a structural flaw. ICMP probes changed their checksum with every sequence number (`construct_icmp_packet`), and ECMP load balancers hash on it. Every probe was therefore a new flow, and the alternate-path percentages measured how random flows spread, not distinct routes. Stable flow identifiers (F1) are the keystone for every multi-route feature. *(m4: fixed for ICMP. Live, no ICMP diamond showed up on paths to 1.1.1.1, 8.8.8.8, ftp.jaist.ac.jp or www.unimelb.edu.au, with stable or with varying checksums: the routers on these paths seem to balance ICMP on addresses alone. UDP flows (X3d) vary ports, which is what most ECMP hashes read, so they are the likelier way to see diamonds from here.)*
 
 | ID | Feature | Design notes | Needs | Effort |
 |---|---|---|---|---|
-| F1 | Paris-style stable flows | ICMP: adjust two payload bytes per seq so the checksum stays constant (scamper's ICMP-Paris; also works on unprivileged datagram sockets). UDP/TCP: fixed ports, probe id in the checksum or TCP seq. `--flows N`. | R1, R3 | M |
-| F2 | Multi-route model and views | `topology.rs` `PathGraph`: nodes (ttl, addr), edges from consecutive TTLs within one flow. Views: corrected per-hop alternates; a flow matrix (TTL × flow, one letter per responder, coloured by RTT/loss, so diamonds are visible at a glance); a layered DAG in box-drawing characters. DOT/Mermaid export. | F1, R3, U2 | M-L |
+| F1 | Paris-style stable flows | **ICMP done in m4:** per flow a fixed checksum and identifier, `--flows N` (1-64), round r in flow r mod N; unit-tested for every seq. UDP/TCP open (X3d). ICMP: adjust two payload bytes per seq so the checksum stays constant (scamper's ICMP-Paris; also works on unprivileged datagram sockets). UDP/TCP: fixed ports, probe id in the checksum or TCP seq. `--flows N`. | R1, R3 | M |
+| F2 | Multi-route model and views | **Done in m4:** flow matrix (`f` in the TUI, after the report table), route-graph edges per flow with silent TTLs bridged, `--dot`. Open: the box-drawing DAG and Mermaid. `topology.rs` `PathGraph`: nodes (ttl, addr), edges from consecutive TTLs within one flow. Views: corrected per-hop alternates; a flow matrix (TTL × flow, one letter per responder, coloured by RTT/loss, so diamonds are visible at a glance); a layered DAG in box-drawing characters. DOT/Mermaid export. | F1, R3, U2 | M-L |
 | F3 | MDA-Lite branch discovery | Enumerate ECMP branches with stated confidence, then probe one flow per branch continuously so each branch gets its own loss/RTT. Periodic rediscovery. | F1, F2 | L |
 | F4 | NAT detection (Dublin) | Probe id in the IP ID with DF set; compare the quoted UDP checksum/ports with what was sent; mark `[NAT]`. IPv4 only in practice. | raw UDP | M |
 | F5 | ASN and prefix | **Origin AS done in m3** (`-z`, per address, public addresses only); prefix and AS name open. Team Cymru TXT via hickory `txt_lookup` (`origin.asn.cymru.com`, `AS<n>.asn.cymru.com`), cached per prefix. Offline: iptoasn.com (PDDL). Quick win. | none | S |
 | F6 | Geolocation | `geo/` module; `GeoSource` trait → `GeoFix { lat, lon, accuracy_km, source }`; `maxminddb` crate (ISC). DB-IP City Lite (CC BY 4.0) downloaded on request; `--geoip-mmdb <path>` for GeoLite2 (never bundle it: EULA). RIPE IPmap opt-in (good on router IPs). Hostname hints (IATA/LOCODE/CLLI codes via OurAirports, public domain). | F12 | M |
 | F7 | Distance and plausibility | Origin from `--origin lat,lon` or the first public hop. A hop is at most minRTT × ~100 km away (light in fibre, round trip). Flag geolocations that violate the bound (catches anycast and registrant-address errors). Columns: Dist, Reach, Stretch; plus path inflation vs the great-circle distance to the target. | F6, R3 | S-M |
 | F8 | World map | `ui/map.rs`: `Canvas` + `Map { resolution: High }` + braille. Great-circle segments in ~2° steps, split at ±180°, **clipped manually** (ratatui 0.29 `canvas::Line` drops segments with an endpoint out of bounds). Auto-zoom with cos(lat) aspect. Unknown hops bridged as "+N hops"; impossible fixes drawn hollow red. Falls back to the table below ~60×20. | F6, U1, U2; better with F2, F7 | M |
-| F9 | ICMP extensions | Real quoted-header length and the RFC 4884 length field; decode MPLS label stacks (RFC 4950) and interface info (RFC 5837). Needs pcap fixtures. | R2 | M |
+| F9 | ICMP extensions | **MPLS done in m4:** label stacks with and without the RFC 4884 length (`-e`, `e`, JSON `MPLS`, detail pane). Open: interface info (RFC 5837), pcap fixtures. Real quoted-header length and the RFC 4884 length field; decode MPLS label stacks (RFC 4950) and interface info (RFC 5837). Needs pcap fixtures. | R2 | M |
 | F10 | Path MTU and black-hole detection | DF + per-hop size search; parse Frag Needed / Packet Too Big. Neither mtr nor trippy has it. | R1 | M |
 | F11 | Outputs | **JSON (mtr field names) and CSV done in m3.** JSON/CSV via a serde transfer type (`HopStats` holds `Instant`s); OpenMetrics exporter for long-running monitoring; NDJSON event log with replay in the TUI. | none (replay: R3) | S-M |
 | F12 | Privacy defaults | Offline lookups by default, online sources opt-in; never look up private/CGNAT/ULA/link-local addresses; `--privacy-hops N`; About pane with data licences. Ships with F5/F6. | none | S |
-| F13 | Return-path hint | Estimate the reverse hop count from the reply TTL to flag asymmetric routing. | R3 | S |
-| F14 | Per-hop detail pane | Selected row (`TableState`) opens per-responder stats, the RTT distribution, ASN/geo and MPLS labels. Needs a history longer than 100 samples. | U2, R3 | S-M |
+| F13 | Return-path hint | **Partly in m4:** the detail pane shows routers back per responder, from the reply TTL against the next common initial TTL. No asymmetry flag yet; IPv6 needs the hop limit from a control message. Estimate the reverse hop count from the reply TTL to flag asymmetric routing. | R3 | S |
+| F14 | Per-hop detail pane | **Done in m4** (`Enter`, `↑↓` for other hops): per responder share, RTTs, routers back, AS and flows; percentiles and a histogram over the 600-probe window; MPLS labels. Geo waits for F6. Selected row (`TableState`) opens per-responder stats, the RTT distribution, ASN/geo and MPLS labels. Needs a history longer than 100 samples. | U2, R3 | S-M |
 
 **Positioning versus trippy.** Trippy already has broad protocol coverage, ASN/GeoIP, a world map with pins, and many output formats, so matching its breadth is a losing race. mtr-ng's opening is the *truthfulness of the path*:
 - stable flows by default for ICMP and TCP too (trippy's Paris/Dublin are UDP-only);
@@ -293,6 +293,6 @@ PMTU/black-hole detection and an OpenMetrics exporter are further gaps in trippy
 1. **Tell the truth and unbreak.** *(Done on branch `m1-tell-the-truth`, plus B6 and X3b pulled forward.)* B1, B2, B4, B5/C1, B10, B13, B27, B31, C2, C5 (at least pull the 404 one-liner), X1. Refuse rather than fabricate; never break the user's terminal; make it installable.
 2. **Measure correctly.** *(Done: X2, R1, R2, B3, B7-B9, B11, B12, B29, X3b; R3/R4 partly.)* X2 spike first (it decides how much of R1 is written by hand), then R1, R2, R4, B3, B6-B9, B11, B12, X3b (macOS without sudo).
 3. **A UI that can grow.** *(Done, apart from the tail of C8.)* U1-U3, after which B14-B26 mostly fall out. Add F5 and F11 (JSON/CSV) as cheap wins. C3, C4 (cargo-dist), C6-C9.
-4. **Stable flows and multi-route.** R3, F1, F2, F9, F14.
+4. **Stable flows and multi-route.** *(Done: R3, F1 for ICMP, F2 apart from the DAG and Mermaid, F9 for MPLS, F14, F13 partly; simulation became a `Prober`.)* R3, F1, F2, F9, F14.
 5. **Where is it.** F12, F6, F7, F8.
 6. **Platforms and depth.** X3a/c/d/e, X4, IPv6, F4, F3, F10, F13.

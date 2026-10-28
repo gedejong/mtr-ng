@@ -1,18 +1,60 @@
+use crate::icmp_ext::MplsLabel;
 use crate::utils;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     net::IpAddr,
     time::{Duration, Instant},
 };
 
-/// Probes remembered per hop for the history graph and for matching late replies.
-const HISTORY_LEN: usize = 100;
+/// Probes remembered per hop: for the history graph, the RTT distribution and
+/// matching late replies. Ten minutes at the default interval.
+const HISTORY_LEN: usize = 600;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PacketOutcome {
     Received(Duration), // RTT
     Lost,               // Timeout/no response
     Pending,            // Sent but no response yet
+}
+
+/// One probe sent to this hop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProbeRecord {
+    pub flow: u16,
+    pub outcome: PacketOutcome,
+    /// Who answered it
+    pub from: Option<IpAddr>,
+}
+
+/// What the probes of one flow saw at this hop.
+#[derive(Debug, Clone, Default)]
+pub struct FlowStats {
+    pub sent: usize,
+    pub received: usize,
+    /// Replies per answering address. More than one means the route changed
+    /// during the trace, or a router balances per packet rather than per flow.
+    pub responders: HashMap<IpAddr, usize>,
+}
+
+impl FlowStats {
+    /// The address that answered this flow most often.
+    pub fn responder(&self) -> Option<IpAddr> {
+        self.responders
+            .iter()
+            .max_by_key(|&(addr, replies)| (replies, std::cmp::Reverse(addr)))
+            .map(|(&addr, _)| addr)
+    }
+}
+
+/// RTT percentiles over the probes still in the history window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RttSpread {
+    pub samples: usize,
+    pub min: Duration,
+    pub p50: Duration,
+    pub p90: Duration,
+    pub p99: Duration,
+    pub max: Duration,
 }
 
 /// Statistics for one address that answered at this hop. With load balancing a
@@ -27,6 +69,10 @@ pub struct ResponderStats {
     pub last_seen: Instant,
     pub last_rtt: Option<Duration>,
     pub best_rtt: Option<Duration>,
+    /// TTL of its latest reply on arrival, which hints at the return path's length
+    pub reply_ttl: Option<u8>,
+    /// MPLS labels in its latest reply
+    pub mpls: Vec<MplsLabel>,
     rtt_sum_ns: u128,
 }
 
@@ -40,6 +86,8 @@ impl ResponderStats {
             last_seen: Instant::now(),
             last_rtt: None,
             best_rtt: None,
+            reply_ttl: None,
+            mpls: Vec::new(),
             rtt_sum_ns: 0,
         }
     }
@@ -55,6 +103,24 @@ impl ResponderStats {
     pub fn avg_rtt(&self) -> Option<Duration> {
         mean_duration(self.rtt_sum_ns, self.replies)
     }
+
+    /// Routers its latest reply crossed on the way back, if its TTL is known.
+    pub fn routers_back(&self) -> Option<u8> {
+        self.reply_ttl.map(routers_back)
+    }
+}
+
+/// TTLs that systems commonly send packets with.
+const INITIAL_TTLS: [u8; 4] = [32, 64, 128, 255];
+
+/// Routers a packet crossed, judged by the TTL it arrived with: it most likely
+/// left with the next common initial TTL up.
+pub fn routers_back(arrival_ttl: u8) -> u8 {
+    let initial = INITIAL_TTLS
+        .into_iter()
+        .find(|&ttl| ttl >= arrival_ttl)
+        .unwrap_or(u8::MAX);
+    initial - arrival_ttl
 }
 
 fn mean_duration(sum_ns: u128, count: usize) -> Option<Duration> {
@@ -78,9 +144,8 @@ pub struct HopStats {
     pub ema_rtt: Option<Duration>, // Exponentially smoothed average RTT
     pub jitter_avg: Option<Duration>, // Mean of all jitter values
     pub last_jitter: Option<Duration>, // Last calculated jitter value
-    /// Most recent RTTs, for the graph and its scale
-    pub rtts: VecDeque<Duration>,
-    pub packet_history: VecDeque<PacketOutcome>, // Chronological packet outcomes
+    /// The most recent probes, oldest first
+    pub history: VecDeque<ProbeRecord>,
     /// Loss among probes that have been answered or timed out (in-flight excluded)
     pub loss_percent: f64,
     // Exponential smoothing factor (0.0 to 1.0)
@@ -91,6 +156,8 @@ pub struct HopStats {
 
     /// Every address that answered at this hop
     pub responders: HashMap<IpAddr, ResponderStats>,
+    /// Per flow (see `Prober::send`), which addresses answered it
+    pub flows: BTreeMap<u16, FlowStats>,
 
     // Target tracking
     pub is_target: bool,
@@ -122,11 +189,11 @@ impl HopStats {
             ema_rtt: None,
             jitter_avg: None,
             last_jitter: None,
-            rtts: VecDeque::with_capacity(HISTORY_LEN),
-            packet_history: VecDeque::with_capacity(HISTORY_LEN),
+            history: VecDeque::with_capacity(HISTORY_LEN),
             loss_percent: 0.0,
             ema_alpha: 0.1,
             responders: HashMap::new(),
+            flows: BTreeMap::new(),
             is_target: false,
             icmp_error: false,
             rtt_sum_ns: 0,
@@ -137,14 +204,19 @@ impl HopStats {
         }
     }
 
-    /// Count a probe sent to this hop. Returns its ordinal, which identifies the
-    /// probe when its reply or timeout is recorded.
-    pub fn increment_sent(&mut self) -> u64 {
+    /// Count a probe sent to this hop in `flow`. Returns its ordinal, which
+    /// identifies the probe when its reply or timeout is recorded.
+    pub fn increment_sent(&mut self, flow: u16) -> u64 {
         let ordinal = self.sent as u64;
         self.sent += 1;
-        self.packet_history.push_back(PacketOutcome::Pending);
-        if self.packet_history.len() > HISTORY_LEN {
-            self.packet_history.pop_front();
+        self.flows.entry(flow).or_default().sent += 1;
+        self.history.push_back(ProbeRecord {
+            flow,
+            outcome: PacketOutcome::Pending,
+            from: None,
+        });
+        if self.history.len() > HISTORY_LEN {
+            self.history.pop_front();
         }
         self.update_loss_percent();
         ordinal
@@ -160,15 +232,24 @@ impl HopStats {
                 None => return,
             },
             None => self
-                .packet_history
+                .history
                 .iter()
-                .rposition(|o| matches!(o, PacketOutcome::Pending)),
+                .rposition(|r| r.outcome == PacketOutcome::Pending),
         };
-        if let Some(slot) = slot {
-            self.packet_history[slot] = PacketOutcome::Received(rtt);
-        }
+        let flow = slot.map(|slot| {
+            let record = &mut self.history[slot];
+            record.outcome = PacketOutcome::Received(rtt);
+            record.from = addr;
+            record.flow
+        });
 
         self.received += 1;
+        if let Some(flow) = flow.and_then(|flow| self.flows.get_mut(&flow)) {
+            flow.received += 1;
+            if let Some(addr) = addr {
+                *flow.responders.entry(addr).or_default() += 1;
+            }
+        }
         if let Some(addr) = addr {
             self.responders
                 .entry(addr)
@@ -186,17 +267,25 @@ impl HopStats {
         let slot = match ordinal {
             Some(ordinal) => self.pending_slot(ordinal),
             None => self
-                .packet_history
+                .history
                 .iter()
-                .position(|o| matches!(o, PacketOutcome::Pending)),
+                .position(|r| r.outcome == PacketOutcome::Pending),
         };
         if let Some(slot) = slot {
-            self.packet_history[slot] = PacketOutcome::Lost;
+            self.history[slot].outcome = PacketOutcome::Lost;
         }
         self.update_loss_percent();
     }
 
-    /// Reply for the most recent probe, no address (simulation and tests).
+    /// Remember what `addr` put in its latest reply besides the timing.
+    pub fn record_reply_details(&mut self, addr: IpAddr, ttl: Option<u8>, mpls: &[MplsLabel]) {
+        if let Some(responder) = self.responders.get_mut(&addr) {
+            responder.reply_ttl = ttl;
+            responder.mpls = mpls.to_vec();
+        }
+    }
+
+    /// Reply for the most recent probe, no address (tests).
     pub fn add_rtt(&mut self, rtt: Duration) {
         self.record_reply(None, None, rtt);
     }
@@ -213,9 +302,9 @@ impl HopStats {
 
     /// History index of a still-pending probe, if it is within the window.
     fn pending_slot(&self, ordinal: u64) -> Option<usize> {
-        let first = (self.sent - self.packet_history.len()) as u64;
+        let first = (self.sent - self.history.len()) as u64;
         let slot = usize::try_from(ordinal.checked_sub(first)?).ok()?;
-        matches!(self.packet_history.get(slot)?, PacketOutcome::Pending).then_some(slot)
+        (self.history.get(slot)?.outcome == PacketOutcome::Pending).then_some(slot)
     }
 
     fn update_primary(&mut self, addr: IpAddr) {
@@ -257,11 +346,44 @@ impl HopStats {
             self.ema_rtt,
             self.ema_alpha,
         ));
+    }
 
-        self.rtts.push_back(rtt);
-        if self.rtts.len() > HISTORY_LEN {
-            self.rtts.pop_front();
+    /// RTTs of the answered probes in the history window, oldest first.
+    pub fn recent_rtts(&self) -> impl Iterator<Item = Duration> + '_ {
+        self.history.iter().filter_map(|r| match r.outcome {
+            PacketOutcome::Received(rtt) => Some(rtt),
+            _ => None,
+        })
+    }
+
+    /// Percentiles of the RTTs in the history window (nearest rank).
+    pub fn rtt_spread(&self) -> Option<RttSpread> {
+        let mut rtts: Vec<Duration> = self.recent_rtts().collect();
+        if rtts.is_empty() {
+            return None;
         }
+        rtts.sort_unstable();
+        let at = |p: f64| rtts[((p * rtts.len() as f64).ceil() as usize).clamp(1, rtts.len()) - 1];
+        Some(RttSpread {
+            samples: rtts.len(),
+            min: rtts[0],
+            p50: at(0.5),
+            p90: at(0.9),
+            p99: at(0.99),
+            max: rtts[rtts.len() - 1],
+        })
+    }
+
+    /// MPLS labels in the primary responder's latest reply.
+    pub fn mpls(&self) -> &[MplsLabel] {
+        self.addr
+            .and_then(|addr| self.responders.get(&addr))
+            .map_or(&[], |r| &r.mpls)
+    }
+
+    /// Flows probed at this hop.
+    pub fn flow_count(&self) -> usize {
+        self.flows.len()
     }
 
     /// Sample standard deviation of all RTTs in milliseconds (as mtr reports it).
@@ -274,9 +396,9 @@ impl HopStats {
 
     /// Probes sent but neither answered nor timed out yet.
     pub fn in_flight(&self) -> usize {
-        self.packet_history
+        self.history
             .iter()
-            .filter(|o| matches!(o, PacketOutcome::Pending))
+            .filter(|r| r.outcome == PacketOutcome::Pending)
             .count()
     }
 
@@ -391,7 +513,7 @@ mod tests {
         assert!(hop.ema_rtt.is_none());
         assert!(hop.jitter_avg.is_none());
         assert!(hop.last_jitter.is_none());
-        assert!(hop.rtts.is_empty());
+        assert!(hop.history.is_empty());
     }
 
     #[test]
@@ -400,6 +522,7 @@ mod tests {
 
         // Add first RTT
         let rtt1 = Duration::from_millis(100);
+        hop.increment_sent(0);
         hop.add_rtt(rtt1);
 
         assert_eq!(hop.received, 1);
@@ -410,10 +533,11 @@ mod tests {
         assert_eq!(hop.ema_rtt, Some(rtt1)); // First value initializes EMA
         assert!(hop.jitter_avg.is_none()); // No jitter yet (need 2+ samples)
         assert!(hop.last_jitter.is_none());
-        assert_eq!(hop.rtts.len(), 1);
+        assert_eq!(hop.recent_rtts().count(), 1);
 
         // Add second RTT (better)
         let rtt2 = Duration::from_millis(50);
+        hop.increment_sent(0);
         hop.add_rtt(rtt2);
 
         assert_eq!(hop.received, 2);
@@ -421,17 +545,18 @@ mod tests {
         assert_eq!(hop.best_rtt, Some(rtt2));
         assert_eq!(hop.worst_rtt, Some(rtt1));
         assert_eq!(hop.avg_rtt, Some(Duration::from_millis(75))); // Average of 100 and 50
-        assert_eq!(hop.rtts.len(), 2);
+        assert_eq!(hop.recent_rtts().count(), 2);
 
         // Add third RTT (worse)
         let rtt3 = Duration::from_millis(200);
+        hop.increment_sent(0);
         hop.add_rtt(rtt3);
 
         assert_eq!(hop.received, 3);
         assert_eq!(hop.last_rtt, Some(rtt3));
         assert_eq!(hop.best_rtt, Some(rtt2));
         assert_eq!(hop.worst_rtt, Some(rtt3));
-        assert_eq!(hop.rtts.len(), 3);
+        assert_eq!(hop.recent_rtts().count(), 3);
     }
 
     #[test]
@@ -443,11 +568,11 @@ mod tests {
 
         // Send 10 packets, receive 8
         for _ in 0..8 {
-            hop.increment_sent();
+            hop.increment_sent(0);
             hop.add_rtt(Duration::from_millis(100));
         }
         for _ in 0..2 {
-            hop.increment_sent();
+            hop.increment_sent(0);
             hop.add_timeout();
         }
 
@@ -457,27 +582,34 @@ mod tests {
     }
 
     #[test]
-    fn test_hop_stats_rtts_capacity_limit() {
+    fn routers_back_assumes_the_next_common_initial_ttl() {
+        assert_eq!(routers_back(252), 3, "a router starting at 255");
+        assert_eq!(routers_back(56), 8, "a host starting at 64");
+        assert_eq!(routers_back(64), 0);
+        assert_eq!(routers_back(120), 8, "Windows starts at 128");
+        assert_eq!(routers_back(30), 2);
+    }
+
+    #[test]
+    fn history_keeps_the_latest_probes() {
         let mut hop = HopStats::new(1);
-
-        // Add more than 100 RTTs to test capacity limit
-        for i in 0..150 {
-            hop.add_rtt(Duration::from_millis(i as u64));
+        let total = HISTORY_LEN as u64 + 50;
+        for i in 0..total {
+            hop.increment_sent(0);
+            hop.add_rtt(Duration::from_millis(i));
         }
-
-        assert_eq!(hop.rtts.len(), 100); // Should be capped at 100
-        assert_eq!(hop.received, 150); // But received count should be accurate
-
-        // The oldest RTTs should have been removed
-        assert_eq!(hop.rtts.front(), Some(&Duration::from_millis(50))); // Should start from 50
-        assert_eq!(hop.rtts.back(), Some(&Duration::from_millis(149))); // Should end at 149
+        assert_eq!(hop.history.len(), HISTORY_LEN);
+        assert_eq!(hop.received, total as usize);
+        let rtts: Vec<Duration> = hop.recent_rtts().collect();
+        assert_eq!(rtts.first(), Some(&Duration::from_millis(50)));
+        assert_eq!(rtts.last(), Some(&Duration::from_millis(total - 1)));
     }
 
     #[test]
     fn test_hop_stats_clone() {
         let mut original = HopStats::new(3);
         original.add_rtt(Duration::from_millis(150));
-        original.increment_sent();
+        original.increment_sent(0);
         original.addr = Some("192.168.1.3".parse().unwrap());
         original.hostname = Some("gateway.local".to_string());
 
@@ -489,7 +621,7 @@ mod tests {
         assert_eq!(original.addr, cloned.addr);
         assert_eq!(original.hostname, cloned.hostname);
         assert_eq!(original.last_rtt, cloned.last_rtt);
-        assert_eq!(original.rtts.len(), cloned.rtts.len());
+        assert_eq!(original.history, cloned.history);
     }
 
     #[test]
@@ -525,7 +657,7 @@ mod tests {
         assert_eq!(hop.sent, 0);
         assert_eq!(hop.loss_percent, 0.0);
 
-        hop.increment_sent();
+        hop.increment_sent(0);
         assert_eq!(hop.sent, 1);
         assert_eq!(hop.loss_percent, 0.0); // still in flight, so not lost (as in mtr)
         assert_eq!(hop.in_flight(), 1);
@@ -561,9 +693,9 @@ mod tests {
         let mut hop = HopStats::new(1);
 
         // Add some successful RTTs first
-        hop.increment_sent();
+        hop.increment_sent(0);
         hop.add_rtt(Duration::from_millis(100));
-        hop.increment_sent();
+        hop.increment_sent(0);
         hop.add_rtt(Duration::from_millis(150));
 
         assert_eq!(hop.sent, 2);
@@ -571,7 +703,7 @@ mod tests {
         assert_eq!(hop.loss_percent, 0.0);
 
         // Add timeout
-        hop.increment_sent();
+        hop.increment_sent(0);
         hop.add_timeout();
 
         assert_eq!(hop.sent, 3);
@@ -667,16 +799,17 @@ mod tests {
     #[test]
     fn replies_land_in_their_own_slot() {
         let mut hop = HopStats::new(1);
-        let first = hop.increment_sent();
-        let second = hop.increment_sent();
+        let first = hop.increment_sent(0);
+        let second = hop.increment_sent(0);
         // Reply to the older probe arrives while the newer one is in flight
         hop.record_reply(Some(first), Some(addr(1)), Duration::from_millis(10));
-        assert!(matches!(hop.packet_history[0], PacketOutcome::Received(_)));
-        assert!(matches!(hop.packet_history[1], PacketOutcome::Pending));
+        assert!(matches!(hop.history[0].outcome, PacketOutcome::Received(_)));
+        assert_eq!(hop.history[0].from, Some(addr(1)));
+        assert_eq!(hop.history[1].outcome, PacketOutcome::Pending);
         assert_eq!(hop.loss_percent, 0.0);
 
         hop.record_timeout(Some(second));
-        assert!(matches!(hop.packet_history[1], PacketOutcome::Lost));
+        assert_eq!(hop.history[1].outcome, PacketOutcome::Lost);
         assert_eq!(hop.loss_percent, 50.0);
 
         // A late reply after the timeout and a duplicate are both ignored
@@ -697,20 +830,28 @@ mod tests {
     #[test]
     fn averages_cover_all_replies_not_just_the_window() {
         let mut hop = HopStats::new(1);
-        for _ in 0..50 {
-            hop.increment_sent();
+        let (slow, fast) = (50, HISTORY_LEN);
+        for _ in 0..slow {
+            hop.increment_sent(0);
             hop.add_rtt(Duration::from_millis(1000));
         }
-        for _ in 0..100 {
-            hop.increment_sent();
+        for _ in 0..fast {
+            hop.increment_sent(0);
             hop.add_rtt(Duration::from_millis(10));
         }
-        assert_eq!(hop.rtts.len(), 100, "graph window stays bounded");
-        assert_eq!(hop.avg_rtt, Some(Duration::from_millis(340))); // (50*1000 + 100*10) / 150
+        assert!(
+            hop.recent_rtts()
+                .all(|rtt| rtt == Duration::from_millis(10)),
+            "the window only holds the latest probes"
+        );
+        let n = (slow + fast) as f64;
+        let mean = (slow as f64 * 1000.0 + fast as f64 * 10.0) / n;
+        let avg_ms = hop.avg_rtt.unwrap().as_secs_f64() * 1000.0;
+        assert!((avg_ms - mean).abs() < 1e-3, "{avg_ms} vs {mean}");
         let expected_sd = {
-            let mean = 340.0;
-            let ss = 50.0 * (1000.0f64 - mean).powi(2) + 100.0 * (10.0f64 - mean).powi(2);
-            (ss / 149.0).sqrt()
+            let ss =
+                slow as f64 * (1000.0f64 - mean).powi(2) + fast as f64 * (10.0f64 - mean).powi(2);
+            (ss / (n - 1.0)).sqrt()
         };
         assert!(
             (hop.stddev_ms() - expected_sd).abs() < 1e-6,
@@ -723,7 +864,7 @@ mod tests {
     fn even_split_between_two_responders_is_50_50() {
         let mut hop = HopStats::new(3);
         for i in 0..6 {
-            hop.increment_sent();
+            hop.increment_sent(0);
             hop.add_rtt_from_addr(
                 addr(if i % 2 == 0 { 1 } else { 2 }),
                 Duration::from_millis(10),
@@ -733,13 +874,7 @@ mod tests {
         assert_eq!(alternates.len(), 1);
         assert_eq!(hop.get_primary_path_percentage(), 50.0);
         assert_eq!(hop.get_path_percentage(alternates[0]), 50.0);
-        assert_eq!(
-            hop.packet_history
-                .iter()
-                .filter(|o| matches!(o, PacketOutcome::Received(_)))
-                .count(),
-            6
-        );
+        assert_eq!(hop.recent_rtts().count(), 6);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use super::events::{action_for, apply, Effect};
 use super::render::render;
 use super::state::UiState;
 use crate::probe::Prober;
-use crate::{MtrSession, Result};
+use crate::{tracer, MtrSession, Result};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use std::{
@@ -31,7 +31,7 @@ const FRAME: Duration = Duration::from_millis(50);
 /// How often the input thread checks whether it should stop.
 const INPUT_POLL: Duration = Duration::from_millis(100);
 
-pub async fn run_interactive(session: MtrSession) -> Result<()> {
+pub async fn run_interactive(mut session: MtrSession) -> Result<()> {
     // Open sockets before touching the terminal so failures print normally.
     let prober = session.open_probe_engine()?;
 
@@ -97,7 +97,7 @@ fn draw(
 async fn run_event_loop(
     terminal: &mut DefaultTerminal,
     mut session: MtrSession,
-    prober: Option<Box<dyn Prober>>,
+    prober: Box<dyn Prober>,
 ) -> Result<()> {
     let mut ui = UiState::new(&session.args);
     let updated = Arc::new(Notify::new());
@@ -105,10 +105,7 @@ async fn run_event_loop(
     session.set_update_callback(Arc::new(move || notify.notify_one()));
     let session = Arc::new(Mutex::new(session));
 
-    let mut trace = tokio::spawn(MtrSession::run_trace_with_realtime_updates(
-        Arc::clone(&session),
-        prober,
-    ));
+    let mut trace = tokio::spawn(tracer::run(Arc::clone(&session), prober));
     let mut tracing = true;
 
     let (tx, mut events) = mpsc::unbounded_channel();

@@ -119,12 +119,12 @@ mod tests {
     fn values_fit_their_minimum_width() {
         let mut hop = HopStats::new(1);
         for _ in 0..3 {
-            hop.increment_sent();
+            hop.increment_sent(0);
             hop.add_timeout();
         }
         assert_eq!(Column::Loss.value(&hop), "100.0%");
         assert_eq!(Column::Avg.value(&hop), "???");
-        hop.increment_sent();
+        hop.increment_sent(0);
         hop.add_rtt(Duration::from_micros(999_940));
         assert_eq!(Column::Last.value(&hop), "999.9");
         for column in Column::all().into_iter().filter(|c| c.is_numeric()) {

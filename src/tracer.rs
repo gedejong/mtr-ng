@@ -1,8 +1,9 @@
 //! The probing loop shared by report mode and the TUI.
 //!
-//! Every interval it sends one probe per TTL up to the end of the path, matches
-//! replies to probes by sequence number, expires probes that stay unanswered, and
-//! records everything in the shared session. Reverse DNS runs off this path.
+//! Every interval it sends one probe per TTL up to the end of the path, all in one
+//! flow (`--flows` rotates through several, one per round), matches replies to
+//! probes by sequence number, expires probes that stay unanswered, and records
+//! everything in the shared session. Reverse DNS runs off this path.
 
 use crate::probe::{IcmpResponseType, ProbeResponse, Prober};
 use crate::session::{MtrSession, DEFAULT_REPORT_CYCLES};
@@ -43,6 +44,7 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
         (s.target_addr, s.args.clone(), s.probe_timeout)
     };
     let rounds = args.count.or(args.report.then_some(DEFAULT_REPORT_CYCLES));
+    let flows = usize::from(args.flows.max(1));
     let mut replies = prober
         .take_replies()
         .ok_or_else(|| anyhow::anyhow!("prober has no reply stream"))?;
@@ -61,7 +63,8 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
         }
         tokio::select! {
             _ = ticker.tick(), if sending => {
-                send_round(&session, prober.as_mut(), target, &mut in_flight);
+                let flow = (round % flows) as u16;
+                send_round(&session, prober.as_mut(), target, flow, &mut in_flight);
                 round += 1;
                 debug!("Sent round {round}");
             }
@@ -70,7 +73,7 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                     continue; // late (already timed out) or not from this run
                 };
                 let rtt = reply.received_at.saturating_duration_since(probe.sent_at);
-                debug!("Reply seq={} ttl={} from {} rtt={rtt:?}", reply.seq, probe.hop + 1, reply.source);
+                debug!("Reply seq={} ttl={} from {} rtt={rtt:?} mpls={:?}", reply.seq, probe.hop + 1, reply.source, reply.mpls);
                 let response = ProbeResponse {
                     hop: probe.hop,
                     ordinal: Some(probe.ordinal),
@@ -81,6 +84,8 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                     send_time: probe.sent_at,
                     receive_time: reply.received_at,
                     precise_rtt_ns: rtt.as_nanos(),
+                    reply_ttl: reply.ttl,
+                    mpls: reply.mpls,
                 };
                 let (name, asn, resolver) = {
                     let mut s = session.lock().unwrap();
@@ -108,18 +113,19 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
     Ok(())
 }
 
-/// Send one probe to every TTL up to the end of the path. A probe that cannot be
-/// sent counts as lost; the trace goes on.
+/// Send one probe in `flow` to every TTL up to the end of the path. A probe that
+/// cannot be sent counts as lost; the trace goes on.
 fn send_round(
     session: &Shared,
     prober: &mut dyn Prober,
     target: IpAddr,
+    flow: u16,
     in_flight: &mut HashMap<u16, InFlight>,
 ) {
     let mut s = session.lock().unwrap();
     for hop in 0..s.num_hosts {
-        let ordinal = s.hops[hop].increment_sent();
-        match prober.send(target, (hop + 1) as u8) {
+        let ordinal = s.hops[hop].increment_sent(flow);
+        match prober.send(target, (hop + 1) as u8, flow) {
             Ok((seq, sent_at)) => {
                 let probe = InFlight {
                     hop,
@@ -164,6 +170,8 @@ fn expire(session: &Shared, in_flight: &mut HashMap<u16, InFlight>, timeout: Dur
                 send_time: probe.sent_at,
                 receive_time: now,
                 precise_rtt_ns: 0,
+                reply_ttl: None,
+                mpls: Vec::new(),
             });
         }
     }
@@ -201,17 +209,23 @@ async fn reverse_lookup(session: Shared, resolver: hickory_resolver::TokioResolv
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::icmp_ext::MplsLabel;
     use crate::probe::Reply;
     use crate::Args;
     use clap::Parser;
     use std::io;
     use tokio::sync::mpsc;
 
-    /// Answers instantly with exact RTTs: hop `n` replies after `n` ms.
+    /// Answers instantly with exact RTTs: hop `n` replies after `n` ms, with reply
+    /// TTL `64 - n`.
     struct FakeProber {
         /// Responder per TTL (index 0 = TTL 1); `None` is a silent hop.
         /// TTLs at or beyond `path.len()` reach the target.
         path: Vec<Option<IpAddr>>,
+        /// Load-balanced TTLs: flow `f` gets `routers[f % routers.len()]`.
+        branches: HashMap<u8, Vec<IpAddr>>,
+        /// TTL whose router reports this MPLS label
+        mpls: Option<(u8, MplsLabel)>,
         fail_ttl: Option<u8>,
         next_seq: u16,
         tx: mpsc::UnboundedSender<Reply>,
@@ -223,6 +237,8 @@ mod tests {
             let (tx, rx) = mpsc::unbounded_channel();
             Self {
                 path,
+                branches: HashMap::new(),
+                mpls: None,
                 fail_ttl: None,
                 next_seq: 1,
                 tx,
@@ -232,7 +248,7 @@ mod tests {
     }
 
     impl Prober for FakeProber {
-        fn send(&mut self, dst: IpAddr, ttl: u8) -> io::Result<(u16, Instant)> {
+        fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16) -> io::Result<(u16, Instant)> {
             if Some(ttl) == self.fail_ttl {
                 return Err(io::Error::other("network is unreachable"));
             }
@@ -240,17 +256,28 @@ mod tests {
             self.next_seq += 1;
             let sent_at = Instant::now();
             let index = usize::from(ttl) - 1;
-            let answer = match self.path.get(index) {
-                Some(router) => router.map(|r| (IcmpResponseType::TimeExceeded, r)),
-                None => Some((IcmpResponseType::EchoReply, dst)),
-            };
+            let answer = match (self.branches.get(&ttl), self.path.get(index)) {
+                (Some(routers), _) => Some(routers[usize::from(flow) % routers.len()]),
+                (None, Some(router)) => *router,
+                (None, None) => Some(dst),
+            }
+            .map(|source| match self.path.get(index) {
+                Some(_) => (IcmpResponseType::TimeExceeded, source),
+                None => (IcmpResponseType::EchoReply, source),
+            });
             if let Some((kind, source)) = answer {
-                let rtt = Duration::from_millis(u64::from(ttl.min(self.path.len() as u8 + 1)));
+                let hops = ttl.min(self.path.len() as u8 + 1);
+                let mpls = self
+                    .mpls
+                    .filter(|&(at, _)| at == ttl)
+                    .map(|(_, label)| label);
                 let _ = self.tx.send(Reply {
                     kind,
                     source,
                     seq,
-                    received_at: sent_at + rtt,
+                    received_at: sent_at + Duration::from_millis(u64::from(hops)),
+                    ttl: Some(64 - hops),
+                    mpls: mpls.into_iter().collect(),
                 });
             }
             Ok((seq, sent_at))
@@ -267,7 +294,12 @@ mod tests {
 
     /// Run 3 rounds against a 12-hop path (target at TTL 12, TTL 4 silent).
     async fn trace(prober: FakeProber) -> MtrSession {
-        let mut args = Args::parse_from(["mtr-ng", "-n", "-c", "3", "192.0.2.1"]);
+        trace_with(prober, &["-c", "3"]).await
+    }
+
+    async fn trace_with(prober: FakeProber, cli: &[&str]) -> MtrSession {
+        let cli = ["mtr-ng", "-n"].iter().chain(cli).chain(&["192.0.2.1"]);
+        let mut args = Args::parse_from(cli);
         args.interval = 5; // below the CLI minimum, to keep the test fast
         let mut session = MtrSession::new(args).await.unwrap();
         session.probe_timeout = Duration::from_millis(100);
@@ -318,5 +350,45 @@ mod tests {
         assert_eq!(s.hops[1].sent, 3);
         assert_eq!(s.hops[2].loss_percent, 0.0);
         assert_eq!(s.display_hop_count(), 12);
+    }
+
+    #[tokio::test]
+    async fn each_flow_keeps_to_its_own_branch() {
+        let mut prober = FakeProber::new(twelve_hop_path());
+        let pair = |ttl: u8| vec![IpAddr::from([10, 0, ttl, 1]), IpAddr::from([10, 0, ttl, 2])];
+        prober.branches = HashMap::from([(5, pair(5)), (6, pair(6))]);
+        let s = trace_with(prober, &["-c", "8", "--flows", "4"]).await;
+
+        let hop5 = &s.hops[4];
+        assert_eq!(hop5.flow_count(), 4);
+        for (&flow, stats) in &hop5.flows {
+            assert_eq!(stats.sent, 2, "flow {flow}");
+            assert_eq!(stats.responders.len(), 1, "flow {flow} stays on one path");
+            assert_eq!(stats.responder(), Some(pair(5)[usize::from(flow) % 2]));
+        }
+        assert_eq!(hop5.get_primary_path_percentage(), 50.0);
+        assert!(
+            s.hops[3].flows.values().all(|f| f.received == 0),
+            "silent hop"
+        );
+        assert!(s.hops[6].flows.values().all(|f| f.responders.len() == 1));
+    }
+
+    #[tokio::test]
+    async fn reply_ttl_and_mpls_labels_reach_the_responder() {
+        let label = MplsLabel {
+            label: 24005,
+            tc: 0,
+            bottom: true,
+            ttl: 1,
+        };
+        let mut prober = FakeProber::new(twelve_hop_path());
+        prober.mpls = Some((3, label));
+        let s = trace(prober).await;
+
+        let hop3 = &s.hops[2].responders[&router(3).unwrap()];
+        assert_eq!(hop3.mpls, [label]);
+        assert_eq!(hop3.reply_ttl, Some(61));
+        assert!(s.hops[1].responders[&router(2).unwrap()].mpls.is_empty());
     }
 }

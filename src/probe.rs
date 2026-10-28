@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::icmp_ext::{mpls_labels, MplsLabel};
 use anyhow::{anyhow, Result};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc;
@@ -31,6 +32,14 @@ const MAX_SEQUENCE: u16 = 60999;
 
 /// How often blocked receive threads check whether the engine was dropped
 const RECEIVE_POLL: Duration = Duration::from_millis(100);
+
+/// Flows a trace can use. Flow `f` probes carry identifier `base + f` and a
+/// checksum fixed per flow (see `echo_request`).
+pub const MAX_FLOWS: u16 = 64;
+
+/// Checksum of every probe in flow 0; flow `f` uses `FLOW_CHECKSUM + f`. Any
+/// value works if the range avoids 0x0000 and 0xffff, the two one's-complement zeros.
+const FLOW_CHECKSUM: u16 = 0x2c00;
 
 /// Types of ICMP responses we care about
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,35 +63,46 @@ pub struct ProbeResponse {
     pub send_time: Instant,
     pub receive_time: Instant, // High-precision receive timestamp
     pub precise_rtt_ns: u128,  // Nanosecond precision RTT
+    /// TTL of the reply as it arrived (IPv4 only)
+    pub reply_ttl: Option<u8>,
+    /// MPLS labels the router quoted (RFC 4950)
+    pub mpls: Vec<MplsLabel>,
 }
 
 /// A reply to one of our probes, timestamped when it was received.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
     pub kind: IcmpResponseType,
     pub source: IpAddr,
     pub seq: u16,
     pub received_at: Instant,
+    /// TTL of the reply as it arrived (IPv4 only)
+    pub ttl: Option<u8>,
+    /// MPLS labels quoted in a Time Exceeded or Destination Unreachable
+    pub mpls: Vec<MplsLabel>,
 }
 
 /// Sends probes and delivers replies. Implementations only move packets;
 /// matching replies to probes and timeouts are the tracer's job.
 pub trait Prober: Send {
-    /// Send one probe with the given TTL (IPv4) or hop limit (IPv6).
-    /// Returns its sequence number and the time it was sent.
-    fn send(&mut self, dst: IpAddr, ttl: u8) -> io::Result<(u16, Instant)>;
+    /// Send one probe with the given TTL (IPv4) or hop limit (IPv6) in `flow`
+    /// (below `MAX_FLOWS`). Probes in one flow look alike to load balancers, so
+    /// they follow one path. Returns its sequence number and the time it was sent.
+    fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16) -> io::Result<(u16, Instant)>;
 
     /// The stream of replies. Can be taken once.
     fn take_replies(&mut self) -> Option<mpsc::UnboundedReceiver<Reply>>;
 }
 
 /// Fields of an ICMP message that may answer one of our echo requests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct IcmpReply {
     kind: IcmpResponseType,
     source: IpAddr,
     id: u16,
     seq: u16,
+    ttl: Option<u8>,
+    mpls: Vec<MplsLabel>,
 }
 
 /// ICMP echo prober over raw or (on macOS) unprivileged datagram sockets
@@ -163,15 +183,15 @@ impl ProbeEngine {
 }
 
 impl Prober for ProbeEngine {
-    fn send(&mut self, dst: IpAddr, ttl: u8) -> io::Result<(u16, Instant)> {
+    fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16) -> io::Result<(u16, Instant)> {
+        debug_assert!(flow < MAX_FLOWS);
         let seq = self.alloc_seq();
+        let id = self.packet_id.wrapping_add(flow);
         let (socket, packet) = match dst {
             IpAddr::V4(_) => {
                 self.icmp_socket.set_ttl_v4(ttl.into())?;
-                (
-                    &self.icmp_socket,
-                    construct_icmp_packet(seq, self.packet_id),
-                )
+                let packet = echo_request(id, seq, FLOW_CHECKSUM + flow);
+                (&self.icmp_socket, packet.to_vec())
             }
             IpAddr::V6(_) => {
                 let Some(ref icmp6_sock) = self.icmp6_socket else {
@@ -181,13 +201,13 @@ impl Prober for ProbeEngine {
                     ));
                 };
                 icmp6_sock.set_unicast_hops_v6(ttl.into())?;
-                (icmp6_sock, construct_icmp6_packet(seq, self.packet_id))
+                (icmp6_sock, construct_icmp6_packet(seq, id))
             }
         };
 
         let sent_at = Instant::now();
         socket.send_to(&packet, &SocketAddr::new(dst, 0).into())?;
-        tracing::debug!("Sent ICMP probe to {dst}: ttl={ttl}, seq={seq}");
+        tracing::debug!("Sent ICMP probe to {dst}: ttl={ttl}, flow={flow}, seq={seq}");
         Ok((seq, sent_at))
     }
 
@@ -248,7 +268,8 @@ fn spawn_receiver(
     Ok(())
 }
 
-/// Parse a received packet and keep it only if it answers one of our probes.
+/// Parse a received packet and keep it only if it answers one of our probes, whose
+/// identifiers run from `packet_id` to `packet_id + MAX_FLOWS - 1`.
 fn decode(
     bytes: &[u8],
     from: Option<IpAddr>,
@@ -261,11 +282,13 @@ fn decode(
     } else {
         parse_icmpv4(bytes)?
     };
-    (reply.id == packet_id).then_some(Reply {
+    (reply.id.wrapping_sub(packet_id) < MAX_FLOWS).then_some(Reply {
         kind: reply.kind,
         source: reply.source,
         seq: reply.seq,
         received_at,
+        ttl: reply.ttl,
+        mpls: reply.mpls,
     })
 }
 
@@ -331,6 +354,11 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
         source: IpAddr::V4(source),
         id: u16::from_be_bytes([echo[4], echo[5]]),
         seq: u16::from_be_bytes([echo[6], echo[7]]),
+        ttl: Some(buf[8]),
+        mpls: match kind {
+            IcmpResponseType::EchoReply => Vec::new(),
+            _ => mpls_labels(icmp),
+        },
     })
 }
 
@@ -360,33 +388,35 @@ fn parse_icmpv6(buf: &[u8], source: IpAddr) -> Option<IcmpReply> {
         source,
         id: u16::from_be_bytes([echo[4], echo[5]]),
         seq: u16::from_be_bytes([echo[6], echo[7]]),
+        ttl: None,
+        mpls: Vec::new(),
     })
 }
 
-// Helper function to construct ICMP packet
-fn construct_icmp_packet(seq: u16, id: u16) -> Vec<u8> {
-    let mut packet = vec![0u8; 8];
-
-    // ICMP Type (8 = Echo Request)
-    packet[0] = 8;
-    // ICMP Code (0)
-    packet[1] = 0;
-    // Checksum (0 initially, calculated later)
-    packet[2] = 0;
-    packet[3] = 0;
-    // Identifier
+/// An ICMP echo request whose checksum is `checksum` whatever `seq` is: two
+/// payload bytes absorb the change (Paris traceroute, as scamper does it for
+/// ICMP). Load balancers that hash the ICMP header then see one flow per
+/// identifier and checksum, and route every probe of it the same way.
+fn echo_request(id: u16, seq: u16, checksum: u16) -> [u8; 10] {
+    let mut packet = [0u8; 10];
+    packet[0] = 8; // Echo Request, code 0
     packet[4..6].copy_from_slice(&id.to_be_bytes());
-    // Sequence Number
     packet[6..8].copy_from_slice(&seq.to_be_bytes());
-
-    // Calculate checksum
-    let checksum = calculate_icmp_checksum(&packet);
+    // With the checksum field zero the words must add up to !checksum, so the
+    // payload is that minus what the header adds up to so far.
+    let header_sum = !calculate_icmp_checksum(&packet);
+    let payload = ones_complement_add(!checksum, !header_sum);
+    packet[8..10].copy_from_slice(&payload.to_be_bytes());
     packet[2..4].copy_from_slice(&checksum.to_be_bytes());
-
     packet
 }
 
-fn calculate_icmp_checksum(packet: &[u8]) -> u16 {
+fn ones_complement_add(a: u16, b: u16) -> u16 {
+    let sum = u32::from(a) + u32::from(b);
+    ((sum & 0xffff) + (sum >> 16)) as u16
+}
+
+pub(crate) fn calculate_icmp_checksum(packet: &[u8]) -> u16 {
     let mut sum = 0u32;
 
     // Sum all 16-bit words
@@ -438,6 +468,7 @@ mod tests {
     fn ipv4_header(ihl: usize, proto: u8, src: [u8; 4]) -> Vec<u8> {
         let mut h = vec![0u8; ihl];
         h[0] = 0x40 | (ihl / 4) as u8;
+        h[8] = 57; // TTL
         h[9] = proto;
         h[12..16].copy_from_slice(&src);
         h
@@ -465,7 +496,8 @@ mod tests {
         let r = parse_icmpv4(&p).unwrap();
         assert_eq!(r.kind, IcmpResponseType::EchoReply);
         assert_eq!(r.source, IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
-        assert_eq!((r.id, r.seq), (0x1234, 40000));
+        assert_eq!((r.id, r.seq, r.ttl), (0x1234, 40000, Some(57)));
+        assert!(r.mpls.is_empty());
     }
 
     #[test]
@@ -505,18 +537,61 @@ mod tests {
     }
 
     #[test]
-    fn decode_keeps_only_our_identifier() {
-        let mut p = ipv4_header(20, 1, [1, 1, 1, 1]);
-        p.extend(echo(0, 0x1234, 40000));
+    fn time_exceeded_carries_mpls_labels() {
+        let mut inner = ipv4_header(20, 1, [192, 168, 1, 2]);
+        inner.extend(echo(8, 0x1234, 40005));
+        inner.resize(128, 0);
+        let mut p = time_exceeded(&inner);
+        p[20 + 5] = 32; // RFC 4884 length: 128 bytes quoted
+        let entry: u32 = 24005 << 12 | 1 << 8 | 1;
+        p.extend_from_slice(&[0x20, 0, 0, 0, 0, 8, 1, 1]);
+        p.extend_from_slice(&entry.to_be_bytes());
+        let r = parse_icmpv4(&p).unwrap();
+        assert_eq!(r.seq, 40005);
+        let labels: Vec<_> = r.mpls.iter().map(|l| (l.label, l.bottom, l.ttl)).collect();
+        assert_eq!(labels, [(24005, true, 1)]);
+    }
+
+    #[test]
+    fn decode_keeps_only_our_identifiers() {
         let now = Instant::now();
+        let reply_with_id = |id| {
+            let mut p = ipv4_header(20, 1, [1, 1, 1, 1]);
+            p.extend(echo(0, id, 40000));
+            decode(&p, None, false, 0x1234, now)
+        };
+        assert_eq!(reply_with_id(0x9999), None, "another process's ping");
         assert_eq!(
-            decode(&p, None, false, 0x9999, now),
+            reply_with_id(0x1234 + MAX_FLOWS),
             None,
-            "another process's ping"
+            "past our last flow"
         );
-        let reply = decode(&p, None, false, 0x1234, now).unwrap();
+        assert!(
+            reply_with_id(0x1234 + MAX_FLOWS - 1).is_some(),
+            "our last flow"
+        );
+        let reply = reply_with_id(0x1234).unwrap();
         assert_eq!(reply.kind, IcmpResponseType::EchoReply);
         assert_eq!((reply.seq, reply.received_at), (40000, now));
+    }
+
+    #[test]
+    fn a_flow_keeps_its_checksum_whatever_the_sequence_number() {
+        for id in [0, 0x1234, 0xffff] {
+            for flow in [0, 1, MAX_FLOWS - 1] {
+                let checksum = FLOW_CHECKSUM + flow;
+                for seq in 0..=u16::MAX {
+                    let packet = echo_request(id, seq, checksum);
+                    assert_eq!(packet[2..4], checksum.to_be_bytes());
+                    assert_eq!(packet[6..8], seq.to_be_bytes());
+                    assert_eq!(
+                        calculate_icmp_checksum(&packet),
+                        0,
+                        "id {id:#x} flow {flow} seq {seq}: invalid checksum"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
