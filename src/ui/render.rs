@@ -398,7 +398,7 @@ fn render_table(
                     )))
                 }
                 Column::Host => Cell::from(truncate_hostname(&text, usize::from(width))),
-                Column::Geo | Column::Dist if text.ends_with('!') => {
+                Column::Geo | Column::Dist | Column::Stretch if text.ends_with('!') => {
                     let line = Line::styled(text, Style::default().fg(loss_color(ui.colors)));
                     Cell::from(match c {
                         Column::Geo => line,
@@ -787,6 +787,9 @@ fn location_lines(
         let assessment = origin.and_then(|o| geo::assess(fix, responder.best_rtt, &o));
         if let Some(a) = assessment {
             facts.push(format!("{:.0} km from {from}", a.distance_km));
+        }
+        if let Some(stretch) = assessment.and_then(|a| a.stretch) {
+            facts.push(format!("stretch {stretch:.1}"));
         }
         if let Some(rtt) = responder.best_rtt {
             let reach = geo::reach_km(rtt);

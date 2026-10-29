@@ -35,8 +35,8 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Origin**: distances are measured from `--origin LAT,LON`, or else from the first hop placed in a city
 
 ### Column Selection System
-- **Flexible Fields**: Choose from 20 columns
-  - `hop`, `host`, `asn`, `as-name`, `prefix`, `geo`, `dist`, `reach`, `back`
+- **Flexible Fields**: Choose from 21 columns
+  - `hop`, `host`, `asn`, `as-name`, `prefix`, `geo`, `dist`, `stretch`, `reach`, `back`
   - `loss`, `sent`, `last`, `avg`, `ema`, `jitter`, `jitter-avg`, `best`, `worst`, `stdev`, `graph`
 - **Quick Presets**: `--show-all` for complete metrics, custom combinations via `--fields`
 - **Interactive Chooser**: `o` opens a column chooser to show, hide and reorder columns
@@ -195,6 +195,8 @@ Both licences ask for credit wherever the data is shown, so the report, the map 
 
 A database places a router where its owner registered it, often a head office a continent away, and anycast addresses wherever their registrant sits. mtr-ng therefore treats a location as a claim to test: a hop farther from the origin than its best RTT allows, granting both locations their accuracy, is marked `!`. Without `--origin` the origin is the first hop placed in a city, and the probing host is somewhere within that hop's reach, which widens the margin; with `--origin` the check is tighter. The check can only rule a location out: one without `!` is possible, not confirmed.
 
+The `stretch` column turns the same arithmetic around: a hop's best RTT, less the origin hop's (so the local network and the access line don't count), over the round trip light in fibre needs for the distance. 1.0 would be a straight fibre; most paths take 2 or 3, and a hop well above its neighbours sits behind a detour. Hops nearer than 100 km get none, since there the routers' own delay is most of the RTT. The report also says how long the path through the located hops is against the great circle to the last of them, as does the map's key.
+
 In `--json` each hub carries a `geo` object (city, country, lat, lon, accuracy_km, distance_km, impossible, from_name), and `mtr.geo` says whose locations they are and where distances are measured from. `--geojson` is RFC 7946: coordinates are [longitude, latitude], ruled-out hops are points with `"impossible": true` (red in viewers that read simplestyle-spec) and stay off the path, and a path across the date line is cut there.
 
 Router names are often better evidence. Large networks name their routers after the city they stand in, each in codes of its own: Arelion's `adm` is Amsterdam, `win` Vienna and `san` San Antonio, while to Cogent, which uses airport codes, `san` is San Diego. mtr-ng carries the codes of Arelion, Cogent, Hurricane Electric and Lumen, taken from the router lists in their looking glasses (and, for Cogent's other sites, OurAirports' list of large airports). When a hop's name has one, that city goes before the database, unless the RTT rules it out and not the database's location; the hop details say `adm in its name`. The names come from reverse DNS, so `-n` turns this off.
@@ -242,6 +244,7 @@ Monitor network stability with comprehensive jitter metrics:
 | `prefix`    | Announced prefix               | `1.1.1.0/24` |
 | `geo`       | Location (with `-g`)           | `Amsterdam, NL` |
 | `dist`      | Distance from the origin, km   | `357`    |
+| `stretch`   | RTT over light in fibre's for that distance | `2.8` |
 | `reach`     | Farthest the best RTT reaches, km | `1071` |
 | `back`      | Routers on the way back        | `6 +1`   |
 | `loss`      | Packet loss percentage         | `2.0%`   |

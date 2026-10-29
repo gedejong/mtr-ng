@@ -52,6 +52,7 @@ impl Column {
             Column::Prefix => "Prefix",
             Column::Geo => "Location",
             Column::Dist => "Dist",
+            Column::Stretch => "Stretch",
             Column::Reach => "Reach",
             Column::Back => "Back",
             Column::Loss => "Loss%",
@@ -78,6 +79,7 @@ impl Column {
             Column::Prefix => "Announced prefix",
             Column::Geo => "Location (city, country)",
             Column::Dist => "Distance from the origin, km",
+            Column::Stretch => "RTT over light in fibre's",
             Column::Reach => "Farthest the best RTT reaches, km",
             Column::Back => "Routers on the way back",
             Column::Loss => "Packet loss",
@@ -134,7 +136,12 @@ impl Column {
         };
         let hidden = hop.addr.is_some_and(privacy::is_stand_in);
         match self {
-            Column::Asn | Column::AsName | Column::Prefix | Column::Geo | Column::Dist
+            Column::Asn
+            | Column::AsName
+            | Column::Prefix
+            | Column::Geo
+            | Column::Dist
+            | Column::Stretch
                 if hidden =>
             {
                 String::new()
@@ -160,6 +167,15 @@ impl Column {
             Column::Dist => match assessment() {
                 Some(a) => format!("{:.0}{}", a.distance_km, mark(Some(a))),
                 None => "???".to_string(),
+            },
+            Column::Stretch => match assessment() {
+                Some(
+                    a @ Assessment {
+                        stretch: Some(stretch),
+                        ..
+                    },
+                ) => format!("{stretch:.1}{}", mark(Some(a))),
+                _ => "???".to_string(),
             },
             Column::Reach => hop.best_rtt.map_or("???".to_string(), |rtt| {
                 format!("{:.0}", geo::reach_km(rtt))
@@ -266,6 +282,7 @@ mod tests {
             lon: 4.89,
             slack_km: 0.0,
             hop: None,
+            rtt: Duration::ZERO,
         };
         let value = |c: Column, hop: &HopStats| c.value(hop, Some(&origin));
         assert_eq!(value(Column::Geo, &hop), "???", "no location yet");

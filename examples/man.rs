@@ -110,7 +110,7 @@ with what it found. Where branches cross between hops, one address leading to se
 another reached from several, a branch may have been missed: MDA-Lite assumes they don't cross.";
 
 const GEOLOCATION: [&str; 3] = [
-    "With -g, the geo or dist columns, or the map (m), mtr-ng places hops with a local \
+    "With -g, the geo, dist or stretch columns, or the map (m), mtr-ng places hops with a local \
      database in MaxMind's format: --geoip-mmdb, else the newest .mmdb in \
      ~/.local/share/mtr-ng, else dbip-city-lite.mmdb or GeoLite2-City.mmdb in \
      /usr/share/GeoIP, /var/lib/GeoIP or Homebrew's var/GeoIP. Lookups never leave the \
@@ -124,7 +124,10 @@ const GEOLOCATION: [&str; 3] = [
      100 km per ms, so a location farther from the origin than the hop's best RTT \
      allows, granting both locations their accuracy, is marked ! and left off the map.",
     "Distances are measured from --origin, or else from the first hop placed in a city. \
-     The probing host is then somewhere within that hop's reach, which widens the margin.",
+     The probing host is then somewhere within that hop's reach, which widens the margin. \
+     The stretch column is a hop's best RTT, less that hop's, over the round trip light in \
+     fibre needs for the distance: 1.0 is a straight fibre, most paths take 2 or 3. The \
+     report and the map also compare the path through the located hops with the great circle.",
 ];
 
 /// Escapes text for roff, where a backslash starts an escape and `-` is a hyphen.

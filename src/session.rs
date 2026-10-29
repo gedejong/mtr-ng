@@ -1,6 +1,6 @@
 use crate::args::{Flows, ProbeProtocol};
 use crate::asn::AsInfo;
-use crate::geo::{self, GeoFix, GeoSource, Origin};
+use crate::geo::{self, GeoFix, GeoSource, Inflation, Origin};
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::privacy::StandIns;
@@ -273,6 +273,7 @@ impl MtrSession {
                 lon,
                 slack_km: 0.0,
                 hop: None,
+                rtt: Duration::ZERO,
             });
         }
         self.hops[..self.display_hop_count()]
@@ -284,8 +285,25 @@ impl MtrSession {
                     lon: fix.lon,
                     slack_km: fix.accuracy() + hop.best_rtt.map_or(0.0, geo::reach_km),
                     hop: Some(hop.hop),
+                    rtt: hop.best_rtt.unwrap_or_default(),
                 })
             })
+    }
+
+    /// How far the path detours through the hops located past the origin, if
+    /// the RTT allows their locations.
+    pub fn inflation(&self) -> Option<Inflation> {
+        let origin = self.origin()?;
+        let stops: Vec<(u8, (f64, f64))> = self.hops[..self.display_hop_count()]
+            .iter()
+            .filter(|hop| origin.hop.is_none_or(|from| hop.hop > from))
+            .filter_map(|hop| {
+                let fix = hop.geo.as_ref()?;
+                let allowed = !hop.assess(Some(&origin))?.impossible;
+                allowed.then_some((hop.hop, (fix.lat, fix.lon)))
+            })
+            .collect();
+        geo::inflation(&origin, &stops)
     }
 
     /// Whether hop `ttl` is hidden by `--privacy-hops`: never looked up, and shown

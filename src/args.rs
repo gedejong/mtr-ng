@@ -33,6 +33,8 @@ pub enum Column {
     Geo,
     /// Distance from the origin in km (see --origin)
     Dist,
+    /// The best RTT past the origin's over light in fibre's for the distance: 1 is a straight fibre
+    Stretch,
     /// Farthest from here a reply can come in the best RTT, in km
     Reach,
     /// Routers the reply crossed, from its TTL; +N or -N when the way there was shorter or longer
@@ -72,6 +74,7 @@ impl Column {
             Column::Prefix,
             Column::Geo,
             Column::Dist,
+            Column::Stretch,
             Column::Reach,
             Column::Back,
             Column::Loss,
@@ -353,7 +356,7 @@ impl Args {
         let named = |fields: &Vec<Column>| {
             fields
                 .iter()
-                .any(|c| matches!(c, Column::Geo | Column::Dist))
+                .any(|c| matches!(c, Column::Geo | Column::Dist | Column::Stretch))
         };
         self.geo || self.geojson || self.fields.as_ref().is_some_and(named)
     }

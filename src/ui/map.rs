@@ -204,6 +204,13 @@ pub fn render_map(
     if !ruled_out.is_empty() {
         key.push(format!("ruled out by RTT: {}", ranges(&ruled_out)));
     }
+    if let Some(detour) = session.inflation() {
+        key.push(format!(
+            "path {:.0} km, {:.1}× the great circle",
+            detour.path_km,
+            detour.ratio()
+        ));
+    }
     let mut legend: Vec<Line> = pack(&key, " · ", usize::from(area.width))
         .into_iter()
         .map(Line::from)

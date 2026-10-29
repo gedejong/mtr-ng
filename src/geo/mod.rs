@@ -148,7 +148,15 @@ pub struct Origin {
     pub slack_km: f64,
     /// The hop it was taken from; `None` for `--origin`
     pub hop: Option<u8>,
+    /// That hop's best RTT, zero for `--origin`. Stretch counts from there, so
+    /// the delay of the local network and the access line isn't held against
+    /// the rest of the path.
+    pub rtt: Duration,
 }
+
+/// Nearer than this, an RTT is mostly the routers' own delay, and a hop's
+/// stretch or a path's detour says little.
+const STRETCH_MIN_KM: f64 = 100.0;
 
 /// A located hop seen from the origin.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -157,6 +165,10 @@ pub struct Assessment {
     /// Farther from the origin than light in fibre gets in the hop's best RTT,
     /// even granting both locations their accuracy: the location is wrong.
     pub impossible: bool,
+    /// The best RTT past the origin's, over the round trip light in fibre needs
+    /// for the distance: 1 is a straight fibre, and most paths take 2 or 3.
+    /// `None` without a reply, or when the hop is too near to tell.
+    pub stretch: Option<f64>,
 }
 
 /// How `fix` squares with `best_rtt`; `None` for a country-level fix.
@@ -166,9 +178,52 @@ pub fn assess(fix: &GeoFix, best_rtt: Option<Duration>, origin: &Origin) -> Opti
     }
     let distance_km = distance_km((origin.lat, origin.lon), (fix.lat, fix.lon));
     let bound = |rtt| reach_km(rtt) + fix.accuracy() + origin.slack_km;
+    let stretch = best_rtt
+        .and_then(|rtt| rtt.checked_sub(origin.rtt))
+        .filter(|rtt| !rtt.is_zero() && distance_km >= STRETCH_MIN_KM.max(fix.accuracy()))
+        .map(|rtt| reach_km(rtt) / distance_km);
     Some(Assessment {
         distance_km,
         impossible: best_rtt.is_some_and(|rtt| distance_km > bound(rtt)),
+        stretch,
+    })
+}
+
+/// How far the path goes through the located hops, against the great circle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Inflation {
+    /// From the origin through each located hop to the last
+    pub path_km: f64,
+    /// From the origin straight to the last located hop
+    pub direct_km: f64,
+    /// The last located hop
+    pub to_hop: u8,
+}
+
+impl Inflation {
+    pub fn ratio(&self) -> f64 {
+        self.path_km / self.direct_km
+    }
+}
+
+/// The detour of the path from `origin` through `stops`, (hop, (latitude,
+/// longitude)) in path order. `None` without a stop between the origin and the
+/// last, or when the last is too near the origin to tell.
+pub fn inflation(origin: &Origin, stops: &[(u8, (f64, f64))]) -> Option<Inflation> {
+    let (&(to_hop, last), between) = stops.split_last()?;
+    let from = (origin.lat, origin.lon);
+    let direct_km = distance_km(from, last);
+    if between.is_empty() || direct_km < STRETCH_MIN_KM {
+        return None;
+    }
+    let points: Vec<(f64, f64)> = std::iter::once(from)
+        .chain(stops.iter().map(|&(_, at)| at))
+        .collect();
+    let path_km = points.windows(2).map(|w| distance_km(w[0], w[1])).sum();
+    Some(Inflation {
+        path_km,
+        direct_km,
+        to_hop,
     })
 }
 
@@ -558,6 +613,7 @@ pub mod tests {
             lon: 4.89,
             slack_km: 0.0,
             hop: None,
+            rtt: Duration::ZERO,
         };
         let ashburn = city("Ashburn", "US", 39.04, -77.49);
         let ms = |n| Some(Duration::from_millis(n));
@@ -581,6 +637,58 @@ pub mod tests {
             ..ashburn
         };
         assert_eq!(assess(&us, ms(20), &origin), None, "country level");
+    }
+
+    #[test]
+    fn stretch_counts_from_the_origins_rtt_and_needs_some_distance() {
+        let ms = |n| Some(Duration::from_millis(n));
+        let origin = Origin {
+            lat: 52.37,
+            lon: 4.89,
+            slack_km: 0.0,
+            hop: Some(2),
+            rtt: Duration::from_millis(5),
+        };
+        let london = city("London", "GB", 51.51, -0.13);
+        let stretch = |rtt| assess(&london, rtt, &origin).unwrap().stretch;
+        // 357 km takes 3.57 ms of round trip in fibre; 15 - 5 ms is 2.8 times that
+        assert!(
+            (stretch(ms(15)).unwrap() - 2.8).abs() < 0.05,
+            "{:?}",
+            stretch(ms(15))
+        );
+        assert_eq!(stretch(ms(5)), None, "no faster than the origin");
+        assert_eq!(stretch(None), None);
+        let haarlem = city("Haarlem", "NL", 52.38, 4.64);
+        assert_eq!(
+            assess(&haarlem, ms(15), &origin).unwrap().stretch,
+            None,
+            "17 km"
+        );
+    }
+
+    #[test]
+    fn inflation_compares_the_path_with_the_great_circle() {
+        let origin = Origin {
+            lat: 52.37,
+            lon: 4.89,
+            slack_km: 0.0,
+            hop: None,
+            rtt: Duration::ZERO,
+        };
+        let (london, paris, frankfurt) = ((51.51, -0.13), (48.86, 2.35), (50.11, 8.68));
+        let detour = inflation(&origin, &[(4, london), (7, paris)]).unwrap();
+        assert_eq!(detour.to_hop, 7);
+        assert!((detour.direct_km - 430.0).abs() < 10.0, "{detour:?}");
+        assert!(
+            (detour.path_km - (357.0 + 344.0)).abs() < 10.0,
+            "{detour:?}"
+        );
+        assert!((detour.ratio() - 1.63).abs() < 0.05);
+        assert_eq!(inflation(&origin, &[(7, paris)]), None, "nothing between");
+        assert_eq!(inflation(&origin, &[]), None);
+        let back_home = inflation(&origin, &[(3, frankfurt), (5, (52.30, 4.95))]);
+        assert_eq!(back_home, None, "too near to tell");
     }
 
     #[test]

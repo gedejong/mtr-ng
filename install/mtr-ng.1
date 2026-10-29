@@ -112,6 +112,8 @@ geo: Where the hop is, from the geolocation database (see \-\-geo)
 .IP \(bu 2
 dist: Distance from the origin in km (see \-\-origin)
 .IP \(bu 2
+stretch: The best RTT past the origin\*(Aqs over light in fibre\*(Aqs for the distance: 1 is a straight fibre
+.IP \(bu 2
 reach: Farthest from here a reply can come in the best RTT, in km
 .IP \(bu 2
 back: Routers the reply crossed, from its TTL; +N or \-N when the way there was shorter or longer
@@ -288,6 +290,9 @@ Location (city, country)
 .B dist
 Distance from the origin, km
 .TP
+.B stretch
+RTT over light in fibre's
+.TP
 .B reach
 Farthest the best RTT reaches, km
 .TP
@@ -383,7 +388,7 @@ Fake data, marked SIMULATED.
 .SH LOAD BALANCING
 With \-\-flows auto, each round sends a new flow until every hop that answers has answered enough flows to rule out a branch no flow met: 6 flows where one address answered, 11 where two did, 16 where three did, and 63 for eleven, the most 64 flows can confirm. That leaves less than a 5% chance per hop of a missed branch, if load balancers spread flows evenly (MDA\-Lite). Then the fewest flows that together pass every address take turns, so each branch keeps its own statistics, and every ten minutes the search starts over. A note under each balanced hop gives its branches; a report without \-c runs until the search is done, and ends with what it found. Where branches cross between hops, one address leading to several and another reached from several, a branch may have been missed: MDA\-Lite assumes they don't cross.
 .SH GEOLOCATION
-With \-g, the geo or dist columns, or the map (m), mtr\-ng places hops with a local database in MaxMind's format: \-\-geoip\-mmdb, else the newest .mmdb in ~/.local/share/mtr\-ng, else dbip\-city\-lite.mmdb or GeoLite2\-City.mmdb in /usr/share/GeoIP, /var/lib/GeoIP or Homebrew's var/GeoIP. Lookups never leave the machine, and private addresses are never looked up. DB\-IP's free City Lite database (CC BY 4.0) can be fetched with:
+With \-g, the geo, dist or stretch columns, or the map (m), mtr\-ng places hops with a local database in MaxMind's format: \-\-geoip\-mmdb, else the newest .mmdb in ~/.local/share/mtr\-ng, else dbip\-city\-lite.mmdb or GeoLite2\-City.mmdb in /usr/share/GeoIP, /var/lib/GeoIP or Homebrew's var/GeoIP. Lookups never leave the machine, and private addresses are never looked up. DB\-IP's free City Lite database (CC BY 4.0) can be fetched with:
 .PP
 .nf
 mkdir \-p ~/.local/share/mtr\-ng && curl \-fL "https://download.db\-ip.com/free/dbip\-city\-lite\-$(date +%Y\-%m).mmdb.gz" | gunzip > ~/.local/share/mtr\-ng/dbip.part && mv ~/.local/share/mtr\-ng/dbip.part ~/.local/share/mtr\-ng/dbip\-city\-lite.mmdb
@@ -391,7 +396,7 @@ mkdir \-p ~/.local/share/mtr\-ng && curl \-fL "https://download.db\-ip.com/free/
 .PP
 A database places a router where its owner registered it, which can be a continent away. Where a router's name carries its network's city code, as Arelion's adm\-b3\-link.ip.twelve99.net does, that city goes before the database; mtr\-ng knows the codes of Arelion, Cogent, Hurricane Electric and Lumen. Either way, a reply cannot come from farther than light in fibre travels in its round trip, about 100 km per ms, so a location farther from the origin than the hop's best RTT allows, granting both locations their accuracy, is marked ! and left off the map.
 .PP
-Distances are measured from \-\-origin, or else from the first hop placed in a city. The probing host is then somewhere within that hop's reach, which widens the margin.
+Distances are measured from \-\-origin, or else from the first hop placed in a city. The probing host is then somewhere within that hop's reach, which widens the margin. The stretch column is a hop's best RTT, less that hop's, over the round trip light in fibre needs for the distance: 1.0 is a straight fibre, most paths take 2 or 3. The report and the map also compare the path through the located hops with the great circle.
 .SH PRIVACY
 Apart from the probes, mtr\-ng sends the target's name and, unless \-n, the name of every address that answers to this machine's resolver, and with \-z every public address that answers to Team Cymru's DNS service. Locations come from a local database. Private addresses are never looked up anywhere. \-\-privacy\-hops N hides the first N hops in the TUI and every report format, with the local host name, and never looks them up; branches among them stay apart. The a key lists what the running trace sends, and the data sources with their licences.
 .SH PRIVILEGES

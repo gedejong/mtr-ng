@@ -1,6 +1,6 @@
 use crate::args::Column;
 use crate::columns;
-use crate::geo::{self, Origin};
+use crate::geo::{self, Assessment, Inflation, Origin};
 use crate::hop_stats::FlowStats;
 use crate::icmp_ext::MplsLabel;
 use crate::mda::Mda;
@@ -129,16 +129,18 @@ fn align(cells: &[String], columns: &[Column], widths: &[usize]) -> String {
 }
 
 /// What the location columns rest on: where distances are measured from, what
-/// `!` means when it appears, and the database's credit.
+/// `!` and stretch mean when they appear, the path's detour, and the database's
+/// credit.
 fn geo_notes(
     hops: &[HopStats],
     columns: &[Column],
     origin: Option<&Origin>,
+    inflation: Option<Inflation>,
     attribution: Option<&str>,
 ) -> Vec<String> {
     if !columns
         .iter()
-        .any(|c| matches!(c, Column::Geo | Column::Dist))
+        .any(|c| matches!(c, Column::Geo | Column::Dist | Column::Stretch))
     {
         return Vec::new();
     }
@@ -159,6 +161,29 @@ fn geo_notes(
              about 100 km per ms of round trip"
                 .to_string(),
         );
+    }
+    let stretched = hops
+        .iter()
+        .any(|hop| hop.assess(origin).is_some_and(|a| a.stretch.is_some()));
+    if columns.contains(&Column::Stretch) && stretched {
+        let past = match origin.and_then(|o| o.hop) {
+            Some(n) => format!(" past hop {n}'s"),
+            None => String::new(),
+        };
+        notes.push(format!(
+            "Stretch: the best RTT{past} over light in fibre's round trip for the distance; \
+             1.0 is a straight fibre"
+        ));
+    }
+    if let Some(detour) = inflation {
+        notes.push(format!(
+            "The located hops make a path of {:.0} km to hop {}, {:.1} times the {:.0} km \
+             great circle",
+            detour.path_km,
+            detour.to_hop,
+            detour.ratio(),
+            detour.direct_km
+        ));
     }
     let named: std::collections::BTreeSet<u16> = hops
         .iter()
@@ -183,6 +208,13 @@ fn host_label(hop: &HopStats, numeric: bool) -> String {
     } else {
         network::format_hostname_with_fallback(hop.hostname.clone(), hop.addr)
     }
+}
+
+/// A hop's stretch to two decimals, or null.
+fn json_stretch(assessment: Option<Assessment>) -> Value {
+    json!(assessment
+        .and_then(|a| a.stretch)
+        .map(|s| (s * 100.0).round() / 100.0))
 }
 
 /// Milliseconds rounded to the microsecond, or null without a reply.
@@ -249,6 +281,7 @@ fn json_hubs(
                     "lon": fix.lon,
                     "accuracy_km": fix.accuracy_km,
                     "distance_km": assessment.map(|a| a.distance_km.round()),
+                    "stretch": json_stretch(assessment),
                     "impossible": assessment.is_some_and(|a| a.impossible),
                     "from_name": fix.from_name,
                 });
@@ -295,7 +328,7 @@ fn csv_field(text: &str) -> String {
     }
 }
 
-const CSV_HEADER: &str = "hop,host,ip,asn,prefix,as_name,loss_pct,sent,last_ms,avg_ms,ema_ms,best_ms,worst_ms,stdev_ms,jitter_ms,jitter_avg_ms,location,lat,lon,dist_km,impossible";
+const CSV_HEADER: &str = "hop,host,ip,asn,prefix,as_name,loss_pct,sent,last_ms,avg_ms,ema_ms,best_ms,worst_ms,stdev_ms,jitter_ms,jitter_avg_ms,location,lat,lon,dist_km,stretch,impossible";
 
 /// A header row, then one row per probed hop. Empty fields mean no reply, or no
 /// ASN or location.
@@ -336,6 +369,10 @@ fn csv_rows(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Vec<St
                 .map(|a| format!("{:.0}", a.distance_km))
                 .unwrap_or_default(),
             assessment
+                .and_then(|a| a.stretch)
+                .map(|s| format!("{s:.2}"))
+                .unwrap_or_default(),
+            assessment
                 .map(|a| a.impossible.to_string())
                 .unwrap_or_default(),
         ]
@@ -349,10 +386,19 @@ fn csv_rows(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Vec<St
 /// What the hubs' `geo` objects rest on: whose locations they are and where
 /// distances are measured from (`hop` is null for `--origin`). None without
 /// a location source.
-fn json_geo(attribution: Option<&str>, origin: Option<&Origin>) -> Option<Value> {
+fn json_geo(
+    attribution: Option<&str>,
+    origin: Option<&Origin>,
+    inflation: Option<Inflation>,
+) -> Option<Value> {
     Some(json!({
         "attribution": attribution?,
         "origin": origin.map(|o| json!({"lat": o.lat, "lon": o.lon, "hop": o.hop})),
+        "inflation": inflation.map(|i| json!({
+            "path_km": i.path_km.round(),
+            "direct_km": i.direct_km.round(),
+            "to_hop": i.to_hop,
+        })),
     }))
 }
 
@@ -388,6 +434,7 @@ fn geojson(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Value {
             "country": fix.country,
             "accuracy_km": fix.accuracy_km,
             "distance_km": assessment.map(|a| a.distance_km.round()),
+            "stretch": json_stretch(assessment),
             "impossible": impossible,
             "from_name": fix.from_name,
             "loss_pct": (hop.loss_percent * 10.0).round() / 10.0,
@@ -462,7 +509,7 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
                 "hubs": json_hubs(hops, args.numeric, args.wants_asn(), session.flows(), origin),
             }
         });
-        if let Some(geo) = json_geo(session.geo_attribution(), origin) {
+        if let Some(geo) = json_geo(session.geo_attribution(), origin, session.inflation()) {
             report["report"]["mtr"]["geo"] = geo;
         }
         if let Some(pmtu) = &session.pmtu {
@@ -479,7 +526,7 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         collection["target"] = json!(session.target);
         collection["start"] = json!(start.to_rfc3339());
         collection["simulated"] = json!(session.is_simulated());
-        if let Some(geo) = json_geo(session.geo_attribution(), origin) {
+        if let Some(geo) = json_geo(session.geo_attribution(), origin, session.inflation()) {
             collection["geo"] = geo;
         }
         println!("{}", serde_json::to_string_pretty(&collection)?);
@@ -510,7 +557,13 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
     for line in format_table(hops, &columns, args.numeric, args.mpls, &notes, origin) {
         println!("{line}");
     }
-    let notes = geo_notes(hops, &columns, origin, session.geo_attribution());
+    let notes = geo_notes(
+        hops,
+        &columns,
+        origin,
+        session.inflation(),
+        session.geo_attribution(),
+    );
     if !notes.is_empty() {
         println!();
         notes.iter().for_each(|note| println!("{note}"));
@@ -749,6 +802,7 @@ mod tests {
             lon: 4.31,
             slack_km: 1020.0,
             hop: Some(3),
+            rtt: Duration::ZERO,
         };
         (hops, origin)
     }
@@ -838,7 +892,7 @@ mod tests {
             " 4.|-- 150.65.7.130         Nomi, JP       9139 998.0",
         ];
         assert_eq!(lines, expected);
-        let notes = geo_notes(&hops, &columns, Some(&origin), Some("Test credit"));
+        let notes = geo_notes(&hops, &columns, Some(&origin), None, Some("Test credit"));
         assert_eq!(
             notes,
             [
@@ -846,7 +900,7 @@ mod tests {
                 "Locations: Test credit"
             ]
         );
-        assert!(geo_notes(&hops, &[Column::Hop], Some(&origin), Some("x")).is_empty());
+        assert!(geo_notes(&hops, &[Column::Hop], Some(&origin), None, Some("x")).is_empty());
 
         // A 9139 km hop answering in 10 ms is somewhere else
         hops[3].best_rtt = Some(ms(10.0));
@@ -856,7 +910,7 @@ mod tests {
             "{}",
             lines[4]
         );
-        let notes = geo_notes(&hops, &columns, Some(&origin), None);
+        let notes = geo_notes(&hops, &columns, Some(&origin), None, None);
         assert!(
             notes[1].starts_with("! The hop's best RTT rules"),
             "{notes:?}"
@@ -866,10 +920,14 @@ mod tests {
         assert_eq!(hubs[2]["geo"]["city"], "The Hague");
         assert_eq!(hubs[3]["geo"]["distance_km"], 9139.0);
         assert_eq!(hubs[3]["geo"]["impossible"], true);
+        assert_eq!(
+            hubs[3]["geo"]["stretch"], 0.11,
+            "light would need 9 times longer"
+        );
         assert!(hubs[0].get("geo").is_none());
         let rows = csv_rows(&hops, true, Some(&origin));
         assert!(
-            rows[4].ends_with(",\"Nomi, JP\",36.44,136.59,9139,true"),
+            rows[4].ends_with(",\"Nomi, JP\",36.44,136.59,9139,0.11,true"),
             "{}",
             rows[4]
         );
@@ -877,7 +935,7 @@ mod tests {
         // Its name places it in Tokyo, which 10 ms rules out too
         let tokyo = crate::geo::names::locate("core1.tyo1.he.net").unwrap();
         hops[3].set_geo_for_addr(IpAddr::from([150, 65, 7, 130]), tokyo);
-        let notes = geo_notes(&hops, &columns, Some(&origin), Some("Test credit"));
+        let notes = geo_notes(&hops, &columns, Some(&origin), None, Some("Test credit"));
         assert_eq!(
             notes[2..],
             [
@@ -889,13 +947,18 @@ mod tests {
         assert_eq!(hubs[3]["geo"]["from_name"], "tyo");
         assert_eq!(hubs[2]["geo"]["from_name"], Value::Null);
         assert_eq!(
-            json_geo(Some("Test credit"), Some(&origin)),
+            json_geo(Some("Test credit"), Some(&origin), None),
             Some(json!({
                 "attribution": "Test credit",
                 "origin": {"lat": 52.08, "lon": 4.31, "hop": 3},
+                "inflation": null,
             }))
         );
-        assert_eq!(json_geo(None, Some(&origin)), None, "no locations at all");
+        assert_eq!(
+            json_geo(None, Some(&origin), None),
+            None,
+            "no locations at all"
+        );
     }
 
     #[test]
@@ -928,9 +991,9 @@ mod tests {
         assert_eq!(rows[0], CSV_HEADER);
         assert_eq!(
             rows[1],
-            r#"1,"a,""b""",192.168.1.1,,,,0.0,3,3.000,2.000,1.290,1.000,3.000,1.000,1.000,1.000,,,,,"#
+            r#"1,"a,""b""",192.168.1.1,,,,0.0,3,3.000,2.000,1.290,1.000,3.000,1.000,1.000,1.000,,,,,,"#
         );
-        assert_eq!(rows[2], "2,???,,,,,100.0,3,,,,,,,,,,,,,");
+        assert_eq!(rows[2], "2,???,,,,,100.0,3,,,,,,,,,,,,,,");
         hops[0].set_asn_for_addr(
             gateway,
             crate::asn::AsInfo {
