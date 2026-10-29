@@ -133,8 +133,10 @@ fn status_line(session: &MtrSession, hops: &[HopStats], ui: &UiState) -> Line<'s
 
     let rounds = session.hops.first().map_or(0, |hop| hop.sent);
     let mut facts = vec![format!("{} hops", hops.len()), format!("round {rounds}")];
-    if session.args.flows > 1 {
-        facts.push(format!("{} flows", session.args.flows));
+    match &session.mda {
+        Some(mda) => facts.push(mda.status(session.last_ttl())),
+        None if session.flows() > 1 => facts.push(format!("{} flows", session.flows())),
+        None => {}
     }
     if let Some(end) = hops.last().filter(|hop| hop.is_target) {
         facts.push(format!("{:.1}% loss at target", end.loss_percent));
@@ -220,13 +222,16 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
                 rows.extend(mpls_rows(hop, &alt.mpls));
             }
         }
-        if let Some(pmtu) = &session.pmtu {
-            rows.extend(pmtu.notes_after(hop.hop).into_iter().map(|note| HostRow {
-                hop,
-                host: format!("  {note}"),
-                kind: RowKind::Note,
-            }));
-        }
+        rows.extend(
+            session
+                .notes_after(hop.hop)
+                .into_iter()
+                .map(|note| HostRow {
+                    hop,
+                    host: format!("  {note}"),
+                    kind: RowKind::Note,
+                }),
+        );
     }
     rows
 }
@@ -467,7 +472,7 @@ fn render_flows(
     hops: &[HopStats],
     ui: &mut UiState,
 ) {
-    let flows = session.args.flows.max(1);
+    let flows = session.flows().max(1);
     let shown: Vec<&HopStats> = hops.iter().filter(|hop| hop.sent > 0).collect();
     track_rows(ui, shown.iter().map(|hop| hop.hop).collect());
     let names = shows_names(session, ui);
@@ -566,9 +571,9 @@ fn render_flow_legend(f: &mut Frame, area: Rect, session: &MtrSession) {
         "A, B, …: who answered, most replies first · * several in one flow · · no reply",
         dim,
     )];
-    if session.args.flows <= 1 {
+    if session.flows() <= 1 {
         lines.push(Line::from(
-            "One flow follows one path: start with --flows 8 to find load-balanced ones.",
+            "One flow follows one path: start with --flows auto to find load-balanced ones.",
         ));
     }
     f.render_widget(Paragraph::new(lines), area);
@@ -606,7 +611,7 @@ fn detail_lines(
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let dim = Style::default().add_modifier(Modifier::DIM);
     let names = shows_names(session, ui);
-    let flows = session.args.flows > 1;
+    let flows = session.flows() > 1;
 
     let mut facts = vec![
         format!("{} sent", hop.sent),

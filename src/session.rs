@@ -1,5 +1,6 @@
-use crate::args::ProbeProtocol;
+use crate::args::{Flows, ProbeProtocol};
 use crate::geo::{self, GeoFix, GeoSource, Origin};
+use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::probe::{self, IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
 use crate::simulate::{self, SimProber};
@@ -41,6 +42,8 @@ pub struct MtrSession {
     locations: HashMap<IpAddr, Option<GeoFix>>,
     /// The path MTU search, with `--pmtu`
     pub pmtu: Option<PathMtu>,
+    /// The search for load-balanced branches, with `--flows auto`
+    pub mda: Option<Mda>,
 }
 
 impl MtrSession {
@@ -90,6 +93,7 @@ impl MtrSession {
             hop.set_ema_alpha(args.ema_alpha);
         }
         let num_hosts = hops.len();
+        let mda = (args.flows == Flows::Auto).then(Mda::new);
 
         Ok(Self {
             target: args.target.clone(),
@@ -105,7 +109,36 @@ impl MtrSession {
             geo_source: None,
             locations: HashMap::new(),
             pmtu: None,
+            mda,
         })
+    }
+
+    /// The flows probed so far, for the flow matrix: 0 up to this
+    pub fn flows(&self) -> u16 {
+        match (self.args.flows, &self.mda) {
+            (Flows::Fixed(n), _) => n,
+            (Flows::Auto, Some(mda)) => mda.width(),
+            (Flows::Auto, None) => 1,
+        }
+    }
+
+    /// The last TTL each round probes: the end of the path, once it is known
+    pub fn last_ttl(&self) -> u8 {
+        u8::try_from(self.num_hosts).unwrap_or(u8::MAX)
+    }
+
+    /// Lines for under `hop`: where the path MTU drops, how many branches it has.
+    pub fn notes_after(&self, hop: u8) -> Vec<String> {
+        let mut notes = match &self.pmtu {
+            Some(pmtu) => pmtu.notes_after(hop),
+            None => Vec::new(),
+        };
+        notes.extend(
+            self.mda
+                .as_ref()
+                .and_then(|mda| mda.note(hop, self.last_ttl())),
+        );
+        notes
     }
 
     pub fn is_simulated(&self) -> bool {
@@ -441,7 +474,7 @@ mod tests {
             quiet: false,
             aslookup: false,
             mpls: false,
-            flows: 1,
+            flows: Flows::Fixed(1),
             json: false,
             csv: false,
             dot: false,
@@ -484,7 +517,7 @@ mod tests {
             quiet: false,
             aslookup: false,
             mpls: false,
-            flows: 1,
+            flows: Flows::Fixed(1),
             json: false,
             csv: false,
             dot: false,
@@ -747,7 +780,7 @@ mod tests {
             quiet: false,
             aslookup: false,
             mpls: false,
-            flows: 1,
+            flows: Flows::Fixed(1),
             json: false,
             csv: false,
             dot: false,

@@ -26,7 +26,7 @@ Options:
   --user probe       Run CMD as the unprivileged user probe (default: root)
   --no-ping-group    Set net.ipv4.ping_group_range to "1 0", so nobody may open
                      ping sockets (default: "0 2147483647", as systemd does)
-  --silent ROUTER    ROUTER (gw, r1, r2a, r2b, r3) sends no Time Exceeded;
+  --silent ROUTER    ROUTER (gw, r1, r2a, r2b, r3, r2c) sends no Time Exceeded;
                      repeat it or give a comma-separated list
   --black-hole       r3 sends no Fragmentation Needed or Packet Too Big, so
                      packets over 1400 bytes vanish there (a PMTU black hole)
@@ -35,6 +35,8 @@ Options:
                      every outer field, IPv6 flow label included)
   --icmp-ecmp        r1 sends echo requests with an even ICMP checksum to r2a,
                      odd ones to r2b (Linux itself never splits ICMP)
+  --wide             A third branch, r2c, makes the diamond three ways wide
+                     (--icmp-ecmp still splits echo requests two ways)
   --spin             Keep the VM's CPUs busy while CMD runs, so netem delays are
                      accurate; idle, colima's timers make RTTs read 10-20% high
   --shell            Open a shell in the client namespace instead of CMD

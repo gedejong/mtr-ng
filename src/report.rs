@@ -2,10 +2,12 @@ use crate::args::Column;
 use crate::geo::{self, Origin};
 use crate::hop_stats::FlowStats;
 use crate::icmp_ext::MplsLabel;
+use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::utils::network;
 use crate::{topology, tracer, HopStats, MtrSession, Result};
 use serde_json::{json, Value};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
@@ -50,14 +52,14 @@ fn report_columns(columns: &[Column]) -> Vec<Column> {
 
 /// The header line and one line per probed hop, aligned however long the names
 /// are. With `mpls`, each hop is followed by the labels its router reported, as
-/// `mtr -e` prints them, and with `pmtu` by where the path MTU drops. Distances
-/// are from `origin`.
+/// `mtr -e` prints them, and by its `notes` (where the path MTU drops, how many
+/// branches it has). Distances are from `origin`.
 fn format_table(
     hops: &[HopStats],
     columns: &[Column],
     numeric: bool,
     mpls: bool,
-    pmtu: Option<&PathMtu>,
+    notes: &dyn Fn(u8) -> Vec<String>,
     origin: Option<&Origin>,
 ) -> Vec<String> {
     let columns = &report_columns(columns);
@@ -97,13 +99,7 @@ fn format_table(
         if mpls {
             lines.extend(hop.mpls().iter().map(|label| format!("       {label}")));
         }
-        if let Some(pmtu) = pmtu {
-            lines.extend(
-                pmtu.notes_after(hop.hop)
-                    .iter()
-                    .map(|note| format!("       {note}")),
-            );
-        }
+        lines.extend(notes(hop.hop).iter().map(|note| format!("       {note}")));
     }
     lines
 }
@@ -447,7 +443,7 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
                     "simulated": session.is_simulated(),
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "hubs": json_hubs(hops, args.numeric, args.wants_asn(), args.flows, origin),
+                "hubs": json_hubs(hops, args.numeric, args.wants_asn(), session.flows(), origin),
             }
         });
         if let Some(geo) = json_geo(session.geo_attribution(), origin) {
@@ -455,6 +451,9 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         }
         if let Some(pmtu) = &session.pmtu {
             report["report"]["pmtu"] = json_pmtu(pmtu);
+        }
+        if let Some(mda) = &session.mda {
+            report["report"]["mda"] = json_mda(mda, session.last_ttl());
         }
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -491,8 +490,8 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
     }
     println!();
     let columns = args.get_columns();
-    let pmtu = session.pmtu.as_ref();
-    for line in format_table(hops, &columns, args.numeric, args.mpls, pmtu, origin) {
+    let notes = |hop| session.notes_after(hop);
+    for line in format_table(hops, &columns, args.numeric, args.mpls, &notes, origin) {
         println!("{line}");
     }
     let notes = geo_notes(hops, &columns, origin, session.geo_attribution());
@@ -500,13 +499,19 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         println!();
         notes.iter().for_each(|note| println!("{note}"));
     }
-    if args.flows > 1 {
+    if session.flows() > 1 {
         println!();
-        for line in topology::matrix_lines(hops, args.flows, args.numeric) {
+        for line in topology::matrix_lines(hops, session.flows(), args.numeric) {
             println!("{line}");
         }
     }
-    if let Some(pmtu) = pmtu {
+    if let Some(mda) = &session.mda {
+        println!();
+        for line in mda.summary(session.last_ttl()) {
+            println!("{line}");
+        }
+    }
+    if let Some(pmtu) = &session.pmtu {
         println!();
         let target_hop = hops.iter().find(|hop| hop.is_target).map(|hop| hop.hop);
         pmtu.summary(target_hop)
@@ -514,6 +519,22 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
             .for_each(|line| println!("{line}"));
     }
     Ok(())
+}
+
+/// What `--flows auto` found, for `--json`
+fn json_mda(mda: &Mda, last_ttl: u8) -> Value {
+    json!({
+        "discovering": mda.discovering(),
+        "monitored": mda.cover(last_ttl),
+        "hops": mda.hops(last_ttl).iter().map(|hop| json!({
+            "hop": hop.ttl,
+            "addresses": hop.addrs.iter().map(IpAddr::to_string).collect::<Vec<_>>(),
+            "flows": hop.flows,
+            "needed": hop.needed(),
+            "sure": hop.sure(),
+        })).collect::<Vec<_>>(),
+        "crossings": mda.crossings(last_ttl),
+    })
 }
 
 /// The path MTU search's result, for `--json`
@@ -534,7 +555,10 @@ fn json_pmtu(pmtu: &PathMtu) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
+
+    fn no_notes(_: u8) -> Vec<String> {
+        Vec::new()
+    }
 
     fn ms(n: f64) -> Duration {
         Duration::from_secs_f64(n / 1000.0)
@@ -594,7 +618,7 @@ mod tests {
             &Column::default_columns(),
             false,
             false,
-            None,
+            &no_notes,
             None,
         );
         let expected = [
@@ -610,7 +634,7 @@ mod tests {
     #[test]
     fn numeric_mode_and_custom_fields() {
         let columns = [Column::Hop, Column::Host, Column::Avg, Column::Loss];
-        let lines = format_table(&path(), &columns, true, false, None, None);
+        let lines = format_table(&path(), &columns, true, false, &no_notes, None);
         let expected = [
             "                               Avg  Loss%",
             " 1.|-- 192.168.1.1             2.0   0.0%",
@@ -652,8 +676,22 @@ mod tests {
         let addr = hops[2].addr.unwrap();
         hops[2].record_reply_details(addr, Some(250), &[label]);
 
-        let plain = format_table(&hops, &Column::default_columns(), true, false, None, None);
-        let with_mpls = format_table(&hops, &Column::default_columns(), true, true, None, None);
+        let plain = format_table(
+            &hops,
+            &Column::default_columns(),
+            true,
+            false,
+            &no_notes,
+            None,
+        );
+        let with_mpls = format_table(
+            &hops,
+            &Column::default_columns(),
+            true,
+            true,
+            &no_notes,
+            None,
+        );
         assert_eq!(with_mpls.len(), plain.len() + 1);
         assert_eq!(with_mpls[4], "       [MPLS: Lbl 24005 TC 0 S 1 TTL 1]");
         assert!(
@@ -759,7 +797,7 @@ mod tests {
             Column::Dist,
             Column::Best,
         ];
-        let lines = format_table(&hops, &columns, true, false, None, Some(&origin));
+        let lines = format_table(&hops, &columns, true, false, &no_notes, Some(&origin));
         let expected = [
             "                            Location       Dist  Best",
             " 1.|-- 192.168.1.1          ???             ???   1.0",
@@ -780,7 +818,7 @@ mod tests {
 
         // A 9139 km hop answering in 10 ms is somewhere else
         hops[3].best_rtt = Some(ms(10.0));
-        let lines = format_table(&hops, &columns, true, false, None, Some(&origin));
+        let lines = format_table(&hops, &columns, true, false, &no_notes, Some(&origin));
         assert!(
             lines[4].contains("Nomi, JP!") && lines[4].contains("9139!"),
             "{}",

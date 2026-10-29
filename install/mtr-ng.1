@@ -65,8 +65,8 @@ Where you are, in degrees, for distances and the plausibility check. Default: th
 \fB\-e\fR, \fB\-\-mpls\fR
 Show the MPLS labels routers report (RFC 4950) under their hop
 .TP
-\fB\-\-flows\fR \fI<FLOWS>\fR [default: 1]
-Probe this many flows in turn, one per round. All probes of a flow look alike to load balancers (Paris traceroute), so a flow follows one path; several flows reveal the paths a load balancer spreads traffic over
+\fB\-\-flows\fR \fI<N|auto>\fR [default: 1]
+Probe this many flows in turn, one per round. All probes of a flow look alike to load balancers (Paris traceroute), so a flow follows one path; several flows reveal the paths a load balancer spreads traffic over. With auto, new flows until every branch is found with 95% confidence (MDA\-Lite), then the fewest flows that pass every branch
 .TP
 \fB\-\-pmtu\fR
 Find the path MTU and where it narrows: each round one more probe, as large as the path seems to allow, with Don\*(Aqt Fragment set
@@ -335,6 +335,9 @@ Follow 8 flows and show which router each met: load balancers split them.
 .B mtr\-ng \-r \-c 40 \-P udp \-\-flows 8 example.com
 The same with UDP probes, whose ports load balancers hash more often than ICMP fields.
 .TP
+.B mtr\-ng \-r \-P udp \-\-flows auto example.com
+Find every load\-balanced branch, 95% sure, then follow one flow per branch. See LOAD BALANCING.
+.TP
 .B mtr\-ng \-r \-\-fields hop,host,back,loss,avg example.com
 Compare each reply's way back with the probe's way there.
 .TP
@@ -358,6 +361,8 @@ Save the located hops and the path for a map viewer such as geojson.io.
 .TP
 .B mtr\-ng \-\-simulate example.com
 Fake data, marked SIMULATED.
+.SH LOAD BALANCING
+With \-\-flows auto, each round sends a new flow until every hop that answers has answered enough flows to rule out a branch no flow met: 6 flows where one address answered, 11 where two did, 16 where three did, and 63 for eleven, the most 64 flows can confirm. That leaves less than a 5% chance per hop of a missed branch, if load balancers spread flows evenly (MDA\-Lite). Then the fewest flows that together pass every address take turns, so each branch keeps its own statistics, and every ten minutes the search starts over. A note under each balanced hop gives its branches; a report without \-c runs until the search is done, and ends with what it found. Where branches cross between hops, one address leading to several and another reached from several, a branch may have been missed: MDA\-Lite assumes they don't cross.
 .SH GEOLOCATION
 With \-g, the geo or dist columns, or the map (m), mtr\-ng places hops with a local database in MaxMind's format: \-\-geoip\-mmdb, else the newest .mmdb in ~/.local/share/mtr\-ng, else dbip\-city\-lite.mmdb or GeoLite2\-City.mmdb in /usr/share/GeoIP, /var/lib/GeoIP or Homebrew's var/GeoIP. Lookups never leave the machine, and private addresses are never looked up. DB\-IP's free City Lite database (CC BY 4.0) can be fetched with:
 .PP

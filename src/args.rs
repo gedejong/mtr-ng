@@ -181,9 +181,11 @@ pub struct Args {
 
     /// Probe this many flows in turn, one per round. All probes of a flow look
     /// alike to load balancers (Paris traceroute), so a flow follows one path;
-    /// several flows reveal the paths a load balancer spreads traffic over
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=crate::probe::MAX_FLOWS as i64))]
-    pub flows: u16,
+    /// several flows reveal the paths a load balancer spreads traffic over. With
+    /// auto, new flows until every branch is found with 95% confidence
+    /// (MDA-Lite), then the fewest flows that pass every branch
+    #[arg(long, default_value = "1", value_name = "N|auto", value_parser = flows)]
+    pub flows: Flows,
 
     /// Find the path MTU and where it narrows: each round one more probe, as large
     /// as the path seems to allow, with Don't Fragment set
@@ -228,6 +230,27 @@ fn at_least_one(s: &str) -> Result<usize, String> {
         Ok(0) => Err("must be at least 1".to_string()),
         Ok(n) => Ok(n),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// How many flows to probe (`--flows`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flows {
+    /// This many, one per round in turn
+    Fixed(u16),
+    /// As many as the load balancers on the path need (see `mda`)
+    Auto,
+}
+
+/// `8` or `auto`
+fn flows(s: &str) -> Result<Flows, String> {
+    let max = crate::probe::MAX_FLOWS;
+    match s {
+        "auto" => Ok(Flows::Auto),
+        _ => match s.parse::<u16>() {
+            Ok(n) if (1..=max).contains(&n) => Ok(Flows::Fixed(n)),
+            _ => Err(format!("expected a number from 1 to {max}, or auto")),
+        },
     }
 }
 

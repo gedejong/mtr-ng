@@ -18,6 +18,7 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 
 ### Load Balancers and MPLS
 - **Stable flows**: `--flows N` probes N flows in turn. All probes of one flow carry the same ICMP checksum and identifier (Paris traceroute), so a per-flow load balancer keeps each on one path, and the flows together show the paths it spreads traffic over. `-P udp` keeps the ports fixed per flow instead, and IPv6 probes carry a flow label per flow. Load balancers hash on ports far more often than on ICMP fields, so UDP flows show more diamonds
+- **Every branch** (`--flows auto`): new flows, one per round, until each hop has answered enough of them to be 95% sure no load-balanced branch was missed (MDA-Lite: 6 flows rule out a second branch, 11 a third, 16 a fourth). After that only the fewest flows that together pass every address take turns, so each branch keeps its own loss and RTT, and every ten minutes the search starts over. A note under each balanced hop says how many branches it has, and the report ends with what was found and where branches cross, which can hide one
 - **Flow matrix**: `f` shows, per hop, a letter for the address each flow met; `--report` prints the same matrix after the table
 - **Route graph**: `--dot` prints the routes as Graphviz, with silent hops as dashed edges
 - **MPLS labels**: `-e` (or `e` while running) shows the label stacks routers report in ICMP extensions (RFC 4950)
@@ -160,6 +161,9 @@ mtr-ng -z google.com
 # Follow 8 flows: the report ends with which address each flow met
 mtr-ng -r -c 40 --flows 8 google.com
 
+# Find every load-balanced branch, then follow one flow per branch
+mtr-ng -r -P udp --flows auto google.com
+
 # The routes as a picture
 mtr-ng -c 40 --flows 8 --dot google.com | dot -Tsvg > routes.svg
 
@@ -197,6 +201,9 @@ mtr-ng --simulate example.com
 
 # The load balancer shows up with two flows or more
 mtr-ng --simulate -r -c 8 --flows 4 -e example.com
+
+# Two balanced hops, found with 16 flows, followed with 3
+mtr-ng --simulate -r --flows auto example.com
 ```
 
 ### Sparkline Visualization

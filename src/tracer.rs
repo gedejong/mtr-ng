@@ -1,12 +1,15 @@
 //! The probing loop shared by report mode and the TUI.
 //!
 //! Every interval it sends one probe per TTL up to the end of the path, all in one
-//! flow (`--flows` rotates through several, one per round), matches replies to
+//! flow (`--flows` rotates through several, one per round; with `--flows auto`
+//! the branch search in `mda` picks it), matches replies to
 //! probes by sequence number, expires probes that stay unanswered, and records
 //! everything in the shared session. With `--pmtu` a round also sends one large
 //! probe for the path MTU search, whose answers go to that search instead of the
 //! hop statistics. Reverse DNS runs off this path.
 
+use crate::args::Flows;
+use crate::mda::Mda;
 use crate::probe::{self, IcmpResponseType, ProbeResponse, Prober, Reply};
 use crate::session::{MtrSession, DEFAULT_REPORT_CYCLES};
 use crate::Result;
@@ -34,6 +37,7 @@ type Shared = Arc<Mutex<MtrSession>>;
 /// A probe on the wire, waiting for its reply.
 struct InFlight {
     hop: usize,
+    flow: u16,
     ordinal: u64,
     sent_at: Instant,
 }
@@ -53,7 +57,12 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
         (s.target_addr, s.args.clone(), s.probe_timeout)
     };
     let rounds = args.count.or(args.report.then_some(DEFAULT_REPORT_CYCLES));
-    let flows = usize::from(args.flows.max(1));
+    // A report without -c waits for --flows auto to find every branch
+    let finish_discovery = args.report && args.count.is_none();
+    let discovering = || {
+        let s = session.lock().unwrap();
+        s.mda.as_ref().is_some_and(Mda::discovering)
+    };
     let mut replies = prober
         .take_replies()
         .ok_or_else(|| anyhow::anyhow!("prober has no reply stream"))?;
@@ -67,18 +76,14 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
     let mut round = 0;
 
     loop {
-        let sending = rounds.is_none_or(|n| round < n);
+        let sending = rounds.is_none_or(|n| round < n) || finish_discovery && discovering();
         if !sending && in_flight.is_empty() && mtu_in_flight.is_empty() {
             break;
         }
         tokio::select! {
-            _ = ticker.tick(), if sending => {
-                let flow = (round % flows) as u16;
-                send_round(&session, prober.as_mut(), target, flow, &mut in_flight);
-                send_mtu_probe(&session, prober.as_mut(), target, flow, round, &mut mtu_in_flight);
-                round += 1;
-                debug!("Sent round {round}");
-            }
+            // Replies first, so that the next round's choices (the flow, the path
+            // MTU probe's size) see every answer that has arrived.
+            biased;
             Some(reply) = replies.recv() => {
                 if let Some(probe) = mtu_in_flight.remove(&reply.seq) {
                     mtu_answered(&session, &probe, &reply);
@@ -108,6 +113,9 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                 let (name, asn, resolver) = {
                     let mut s = session.lock().unwrap();
                     s.apply_response(&response);
+                    if let Some(mda) = s.mda.as_mut() {
+                        mda.answered(probe.flow, (probe.hop + 1) as u8, reply.source);
+                    }
                     s.notify();
                     let name = !s.args.numeric && s.want_lookup(reply.source);
                     (name, s.want_asn(reply.source), s.resolver.clone())
@@ -118,6 +126,21 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                 if asn {
                     dns.spawn(asn_lookup(Arc::clone(&session), resolver, reply.source));
                 }
+            }
+            _ = ticker.tick(), if sending => {
+                let flow = {
+                    let mut s = session.lock().unwrap();
+                    let last_ttl = s.last_ttl();
+                    match (s.args.flows, s.mda.as_mut()) {
+                        (_, Some(mda)) => mda.next_flow(Instant::now(), last_ttl),
+                        (Flows::Fixed(n), None) => (round % usize::from(n)) as u16,
+                        (Flows::Auto, None) => 0,
+                    }
+                };
+                send_round(&session, prober.as_mut(), target, flow, &mut in_flight);
+                send_mtu_probe(&session, prober.as_mut(), target, flow, round, &mut mtu_in_flight);
+                round += 1;
+                debug!("Sent round {round}");
             }
             _ = sweep.tick() => {
                 expire(&session, &mut in_flight, timeout);
@@ -150,6 +173,7 @@ fn send_round(
             Ok((seq, sent_at)) => {
                 let probe = InFlight {
                     hop,
+                    flow,
                     ordinal,
                     sent_at,
                 };
@@ -495,6 +519,45 @@ mod tests {
             "silent hop"
         );
         assert!(s.hops[6].flows.values().all(|f| f.responders.len() == 1));
+    }
+
+    /// A path with four branches at TTL 5 and two at TTL 6
+    fn balanced() -> FakeProber {
+        let mut prober = FakeProber::new(twelve_hop_path());
+        let ways = |ttl: u8, n: u8| (1..=n).map(|i| IpAddr::from([10, 0, ttl, i])).collect();
+        prober.branches = HashMap::from([(5, ways(5, 4)), (6, ways(6, 2))]);
+        prober
+    }
+
+    #[tokio::test]
+    async fn flows_auto_finds_every_branch_then_probes_one_flow_per_branch() {
+        let s = trace_with(balanced(), &["-c", "41", "--flows", "auto"]).await;
+
+        let mda = s.mda.as_ref().unwrap();
+        assert!(!mda.discovering());
+        assert_eq!(s.flows(), 21, "four branches take 21 flows to be sure of");
+        let hop5 = &s.hops[4];
+        assert_eq!(hop5.responders.len(), 4);
+        assert_eq!(mda.cover(s.last_ttl()), [0, 1, 2, 3]);
+        // The other 20 rounds went to the four flows that pass every branch
+        for flow in 0..21 {
+            let expected = if flow < 4 { 6 } else { 1 };
+            assert_eq!(hop5.flows[&flow].sent, expected, "flow {flow}");
+        }
+        assert_eq!(
+            s.notes_after(5),
+            ["4 branches, all found (95%)"],
+            "and none for hops with one address"
+        );
+        assert!(s.notes_after(7).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_report_without_a_count_lets_discovery_finish() {
+        let s = trace_with(balanced(), &["-r", "--flows", "auto"]).await;
+
+        assert!(!s.mda.as_ref().unwrap().discovering());
+        assert_eq!(s.hops[0].sent, 22, "21 flows, then one round of the cover");
     }
 
     #[tokio::test]

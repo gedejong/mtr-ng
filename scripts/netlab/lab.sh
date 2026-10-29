@@ -5,7 +5,8 @@
 # command in the client namespace.
 #
 #   client ── gw ── r1 ──┬── r2a ──┬── r3 ══ target
-#             NAT        └── r2b ──┘   MTU 1400
+#             NAT        ├── r2b ──┤   MTU 1400
+#                        └── r2c ──┘   (only with --wide)
 #
 # Link N joins two namespaces on 10.0.N.0/24 and fd00:N::/64. The node nearer
 # the target is .1 (::1) and the other .2 (::2), so the hop a probe reaches over
@@ -45,6 +46,7 @@ BLACK_HOLE=0
 LOSS=""
 HASH_POLICY=1
 ICMP_ECMP=0
+WIDE=0
 SPIN=0
 SHELL_MODE=0
 
@@ -64,12 +66,7 @@ while [ $# -gt 0 ]; do
             ;;
         --silent)
             [ $# -ge 2 ] || die "--silent needs a router name"
-            for router in ${2//,/ }; do
-                case " $ROUTERS " in
-                    *" $router "*) SILENT="$SILENT $router" ;;
-                    *) die "--silent $router: not a router (one of: $ROUTERS)" ;;
-                esac
-            done
+            SILENT="$SILENT ${2//,/ }" # checked below, once --wide is known
             shift
             ;;
         --black-hole)
@@ -92,6 +89,9 @@ while [ $# -gt 0 ]; do
         --icmp-ecmp)
             ICMP_ECMP=1
             ;;
+        --wide)
+            WIDE=1
+            ;;
         --spin)
             SPIN=1
             ;;
@@ -110,6 +110,22 @@ while [ $# -gt 0 ]; do
             ;;
     esac
     shift
+done
+
+# --wide: a third branch, r2c, makes the diamond three ways wide.
+if [ "$WIDE" -eq 1 ]; then
+    NAMESPACES="$NAMESPACES r2c"
+    ROUTERS="$ROUTERS r2c"
+    LINKS="$LINKS
+8 r1     r2c    6  1500
+9 r2c    r3     4  1500
+"
+fi
+for router in $SILENT; do
+    case " $ROUTERS " in
+        *" $router "*) ;;
+        *) die "--silent $router: not a router (one of: $ROUTERS)" ;;
+    esac
 done
 
 if [ "$SHELL_MODE" -eq 1 ]; then
@@ -243,11 +259,16 @@ add_routes() {
     # So upstream routers know fd00:1::/64 but not 10.0.1.0/24.
     ip netns exec gw iptables -t nat -A POSTROUTING -s 10.0.1.0/24 -o r1 -j MASQUERADE
 
-    # r1: the diamond. Two next hops for everything behind it.
-    local p
+    # r1: the diamond. Two next hops for everything behind it, three with --wide.
+    local p via4=(nexthop via 10.0.3.1 nexthop via 10.0.4.1)
+    local via6=(nexthop via fd00:3::1 nexthop via fd00:4::1)
+    if [ "$WIDE" -eq 1 ]; then
+        via4+=(nexthop via 10.0.8.1)
+        via6+=(nexthop via fd00:8::1)
+    fi
     for p in 5 6 7; do
-        ip -n r1 route add "10.0.$p.0/24" nexthop via 10.0.3.1 nexthop via 10.0.4.1
-        ip -n r1 -6 route add "fd00:$p::/64" nexthop via fd00:3::1 nexthop via fd00:4::1
+        ip -n r1 route add "10.0.$p.0/24" "${via4[@]}"
+        ip -n r1 -6 route add "fd00:$p::/64" "${via6[@]}"
     done
     ip -n r1 -6 route add fd00:1::/64 via fd00:2::2
 
@@ -264,6 +285,14 @@ add_routes() {
         ip -n r2a -6 route add "fd00:$p::/64" via fd00:3::2
         ip -n r2b -6 route add "fd00:$p::/64" via fd00:4::2
     done
+    if [ "$WIDE" -eq 1 ]; then
+        for p in 5 6 7; do
+            ip -n r2c route add "10.0.$p.0/24" via 10.0.9.1
+            ip -n r2c -6 route add "fd00:$p::/64" via fd00:9::1
+        done
+        ip -n r2c route add 10.0.2.0/24 via 10.0.8.2
+        for p in 1 2; do ip -n r2c -6 route add "fd00:$p::/64" via fd00:8::2; done
+    fi
 
     # r3 sends everything back through r2a, whichever branch a probe came in
     # by, and answers from one address so the diamond visibly closes at hop 4.
@@ -375,6 +404,9 @@ print_map() {
     [ -n "$SILENT" ] && silent_note="; silent (no Time Exceeded):$SILENT"
     [ "$BLACK_HOLE" -eq 1 ] && silent_note="$silent_note; r3 sends no Fragmentation Needed or Packet Too Big"
     [ "$ICMP_ECMP" -eq 1 ] && ecmp_note="; echo requests by checksum bit: even r2a, odd r2b"
+    local wide_note=""
+    [ "$WIDE" -eq 1 ] && wide_note="
+  --wide: a third branch, link 8 r1 .2 -> r2c .1 (10.0.8.1, 6 ms), link 9 r2c .2 -> r3 .1 (4 ms)"
     [ "$SPIN" -eq 1 ] && silent_note="$silent_note; CPUs kept busy (--spin)"
     cat >&2 <<EOF
 
@@ -392,7 +424,7 @@ print_map() {
 
   hops: 1 gw 10.0.1.1 2 ms | 2 r1 10.0.2.1 12 ms | 3 r2a 10.0.3.1 16 ms or r2b 10.0.4.1 20 ms
         4 r3 10.0.5.1 20/24 ms | 5 target 10.0.7.1 40/44 ms (target6 fd00:7::1; IPv6 fd00:N::1)
-  r1 multipath hash policy $HASH_POLICY${ecmp_note}
+  r1 multipath hash policy $HASH_POLICY${ecmp_note}${wide_note}
   user $RUN_AS, ping_group_range "$PING_GROUP"${silent_note}
 
 EOF

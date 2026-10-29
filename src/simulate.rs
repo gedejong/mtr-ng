@@ -14,8 +14,10 @@ use tokio::sync::mpsc;
 
 /// One TTL of the made-up path.
 struct SimHop {
-    /// Routers answering here. With two, flow `f` reaches `routers[f % 2]`: a
-    /// load-balanced diamond, visible with `--flows 2` or more.
+    /// Routers answering here. With several, flow `f` reaches `routers[f % n]`: a
+    /// load-balanced diamond, visible with `--flows 2` or more. Hops 4 and 5
+    /// choose independently, so their branches cross, as consecutive balancers'
+    /// often do.
     routers: &'static [([u8; 4], &'static str)],
     /// Typical RTT in milliseconds
     rtt_ms: f64,
@@ -65,6 +67,7 @@ const PATH: [SimHop; 8] = [
         routers: &[
             ([198, 51, 100, 51], "core-3a.isp.example"),
             ([198, 51, 100, 52], "core-3b.isp.example"),
+            ([198, 51, 100, 53], "core-3c.isp.example"),
         ],
         rtt_ms: 13.5,
         loss: 0.0,
@@ -106,13 +109,14 @@ const UPLINK_MTU: u16 = 1492;
 /// Where the made-up routers are: (address, city, country, latitude, longitude).
 /// edge-4 claims Ashburn although it answers within 25 ms of Amsterdam, the kind
 /// of registrant-address mistake the plausibility check exists for.
-const PLACES: [([u8; 4], &str, &str, f64, f64); 8] = [
+const PLACES: [([u8; 4], &str, &str, f64, f64); 9] = [
     ([198, 51, 100, 1], "Amsterdam", "NL", 52.37, 4.89),
     ([198, 51, 100, 9], "Amsterdam", "NL", 52.35, 4.92),
     ([198, 51, 100, 41], "Amsterdam", "NL", 52.30, 4.94),
     ([198, 51, 100, 42], "Amsterdam", "NL", 52.30, 4.94),
     ([198, 51, 100, 51], "Frankfurt am Main", "DE", 50.11, 8.68),
     ([198, 51, 100, 52], "Frankfurt am Main", "DE", 50.11, 8.68),
+    ([198, 51, 100, 53], "Frankfurt am Main", "DE", 50.11, 8.68),
     ([203, 0, 113, 7], "London", "GB", 51.51, -0.13),
     ([203, 0, 113, 30], "Ashburn", "US", 39.04, -77.49),
 ];

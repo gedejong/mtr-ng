@@ -32,6 +32,10 @@ const EXAMPLES: &[(&str, &str)] = &[
         "The same with UDP probes, whose ports load balancers hash more often than ICMP fields.",
     ),
     (
+        "mtr-ng -r -P udp --flows auto example.com",
+        "Find every load-balanced branch, 95% sure, then follow one flow per branch. See LOAD BALANCING.",
+    ),
+    (
         "mtr-ng -r --fields hop,host,back,loss,avg example.com",
         "Compare each reply's way back with the probe's way there.",
     ),
@@ -80,6 +84,16 @@ with, assuming it left with the next common initial TTL up (32, 64, 128 or 255).
 from the routers the probe crossed on the way there, the difference follows: 9 +2 is nine \
 routers back, two more than there, so the reply came back another way. Routers that send \
 replies with an unusual TTL, and MPLS tunnels that hide their routers, skew the count.";
+
+const LOAD_BALANCING: &str = "With --flows auto, each round sends a new flow until every hop \
+that answers has answered enough flows to rule out a branch no flow met: 6 flows where one address \
+answered, 11 where two did, 16 where three did, and 63 for eleven, the most 64 flows can confirm. \
+That leaves less than a 5% chance per hop of a missed branch, if load balancers spread flows \
+evenly (MDA-Lite). Then the fewest flows that together pass every address take turns, so each \
+branch keeps its own statistics, and every ten minutes the search starts over. A note under each \
+balanced hop gives its branches; a report without -c runs until the search is done, and ends \
+with what it found. Where branches cross between hops, one address leading to several and \
+another reached from several, a branch may have been missed: MDA-Lite assumes they don't cross.";
 
 const GEOLOCATION: [&str; 3] = [
     "With -g, the geo or dist columns, or the map (m), mtr-ng places hops with a local \
@@ -147,6 +161,7 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
         tagged(out, command, what)?;
     }
 
+    writeln!(out, ".SH LOAD BALANCING\n{}", roff(LOAD_BALANCING))?;
     writeln!(out, ".SH GEOLOCATION\n{}", roff(GEOLOCATION[0]))?;
     writeln!(out, ".PP\n.nf\n{}\n.fi", roff(geo::DOWNLOAD))?;
     for paragraph in &GEOLOCATION[1..] {
