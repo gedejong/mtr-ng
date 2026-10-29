@@ -195,6 +195,10 @@ pub fn render_map(
         .map(|hop| u16::from(hop.hop))
         .collect();
     let mut key = vec!["●n hop n".to_string()];
+    let bridged = located.windows(2).any(|w| w[1].0.hop > w[0].0.hop + 1);
+    if bridged {
+        key.push("+n hops between".to_string());
+    }
     if given_origin.is_some() {
         key.push("◆ --origin".to_string());
     }
@@ -236,6 +240,8 @@ pub fn render_map(
     };
     let spots = spots(&located, ui.selected_hop(), &grid);
     let labels = place_labels(&spots, &grid);
+    let hops: Vec<u8> = located.iter().map(|(hop, _)| hop.hop).collect();
+    let gaps = gap_labels(&hops, &arcs, &spots, &labels, &grid);
     let tint = |color| match ui.colors {
         ColorSupport::None => Color::Reset,
         _ => color,
@@ -273,6 +279,11 @@ pub fn render_map(
                     o.lat,
                     Line::styled("◆", Style::default().fg(tint(Color::Cyan))),
                 );
+            }
+            for (cell, text) in &gaps {
+                let (x, y) = grid.point(*cell);
+                let style = Style::default().fg(tint(Color::Yellow));
+                ctx.print(x, y, Line::styled(text.clone(), style));
             }
             for (spot, label) in spots.iter().zip(&labels) {
                 let mut style = Style::default().add_modifier(Modifier::BOLD);
@@ -337,7 +348,51 @@ fn place_labels(spots: &[Spot], grid: &Grid) -> Vec<(u16, u16)> {
     placed
 }
 
-/// A step between two points that jumps across the date line.
+/// "+n" halfway along each arc that passes over n hops not on the map, where it
+/// covers no dot or label. `hops` are the located hops, in the order the arcs
+/// join them. Arcs that start and end in one cell get none.
+fn gap_labels(
+    hops: &[u8],
+    arcs: &[Vec<(f64, f64)>],
+    spots: &[Spot],
+    labels: &[(u16, u16)],
+    grid: &Grid,
+) -> Vec<((u16, u16), String)> {
+    let mut taken: BTreeSet<(u16, u16)> = spots.iter().map(|spot| spot.cell).collect();
+    for (spot, &(col, row)) in spots.iter().zip(labels) {
+        let width = spot.label().chars().count() as u16;
+        taken.extend((col..col + width).map(|c| (c, row)));
+    }
+    let mut placed = Vec::new();
+    for (pair, arc) in hops.windows(2).zip(arcs) {
+        let between = pair[1].saturating_sub(pair[0]).saturating_sub(1);
+        let (Some(&first), Some(&last)) = (arc.first(), arc.last()) else {
+            continue;
+        };
+        if between == 0 || grid.cell(first) == grid.cell(last) {
+            continue;
+        }
+        let text = format!("+{between}");
+        let width = text.len() as u16;
+        let (col, row) = grid.cell(arc[arc.len() / 2]);
+        let free = |taken: &BTreeSet<(u16, u16)>, (c, r): (u16, u16)| {
+            c + width <= grid.cols && (c..c + width).all(|c| !taken.contains(&(c, r)))
+        };
+        let candidates = [(0, 0), (1, 0), (-1, 0), (0, -1), (0, 1)]
+            .into_iter()
+            .filter_map(|(dc, dr): (i32, i32)| {
+                let c = u16::try_from(i32::from(col) + dc).ok()?;
+                let r = u16::try_from(i32::from(row) + dr).ok()?;
+                (r < grid.rows).then_some((c, r))
+            });
+        if let Some((c, r)) = candidates.into_iter().find(|&cell| free(&taken, cell)) {
+            taken.extend((c..c + width).map(|c| (c, r)));
+            placed.push(((c, r), text));
+        }
+    }
+    placed
+}
+
 /// Longitude and latitude ranges that show `points` (latitude, longitude) with a
 /// margin on a canvas `cols` × `rows` cells, stretched so a kilometre looks as
 /// long across as up. A cell is about twice as tall as it is wide.
@@ -466,6 +521,29 @@ mod tests {
             [(6, 4), (7, 5), (3, 5)],
             "both sides taken: a row up"
         );
+    }
+
+    #[test]
+    fn arcs_over_unplaced_hops_say_how_many() {
+        let grid = Grid {
+            x: [0.0, 20.0],
+            y: [40.0, 60.0],
+            cols: 21,
+            rows: 21,
+        };
+        // Hops 2, 3 and 7 at (50, 2), (50, 2) and (50, 18), latitude first
+        let arcs = vec![
+            vec![(50.0, 2.0), (50.0, 2.0)],
+            vec![(50.0, 2.0), (50.0, 10.0), (50.0, 18.0)],
+        ];
+        let spots = [spot((2, 10), &[2, 3]), spot((18, 10), &[7])];
+        let labels = [(3, 10), (19, 10)];
+        let gaps = gap_labels(&[2, 3, 7], &arcs, &spots, &labels, &grid);
+        assert_eq!(gaps, [((10, 10), "+3".to_string())]);
+
+        let crowded = [spot((2, 10), &[2, 3]), spot((10, 10), &[5])];
+        let gaps = gap_labels(&[2, 3, 7], &arcs, &crowded, &[(3, 10), (11, 10)], &grid);
+        assert_eq!(gaps, [((10, 9), "+3".to_string())], "a row up");
     }
 
     #[test]

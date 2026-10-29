@@ -30,7 +30,7 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Locations**: `-g` adds a Location and a Dist column, from a local geolocation database (DB-IP City Lite or MaxMind GeoLite2 City). Lookups never leave the machine; private addresses are never looked up
 - **Light-speed check**: a reply can't come from farther than light in fibre travels in its round trip, about 100 km per ms. A location the hop's best RTT rules out is marked `!`, which catches routers placed at their owner's head office and anycast addresses placed at their registrant's
 - **Router names**: backbones name routers after their city, in codes of their own (`adm-b3-link.ip.twelve99.net` is Arelion in Amsterdam). For Arelion, Cogent, Hurricane Electric and Lumen that city goes before the database, which often places routers at a head office
-- **Map**: `m` draws the located hops on a world map, joined along great circles. Locations the RTT rules out stay off it
+- **Map**: `m` draws the located hops on a world map, joined along great circles; `+2` on an arc means it passes over two hops that aren't on the map. Locations the RTT rules out stay off it
 - **GeoJSON**: `--geojson` writes the same as a file for map tools: a point per located hop with its statistics, and the path along great circles
 - **Origin**: distances are measured from `--origin LAT,LON`, or else from the first hop placed in a city
 
