@@ -176,6 +176,12 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub geoip_mmdb: Option<PathBuf>,
 
+    /// Hide the first N hops: their addresses, names, ASes and locations are
+    /// neither shown, in the TUI or any report, nor looked up. For screenshots
+    /// and reports that shouldn't give away the network they were taken from
+    #[arg(long, value_name = "N", default_value = "0")]
+    pub privacy_hops: u8,
+
     /// Where you are, in degrees, for distances and the plausibility check.
     /// Default: the first hop the database places in a city, with its uncertainty
     #[arg(long, value_name = "LAT,LON", value_parser = coordinates, allow_hyphen_values = true)]

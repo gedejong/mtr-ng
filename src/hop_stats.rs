@@ -1,6 +1,7 @@
 use crate::asn::AsInfo;
 use crate::geo::{self, Assessment, GeoFix, Origin};
 use crate::icmp_ext::MplsLabel;
+use crate::privacy::StandIns;
 use crate::utils;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -490,6 +491,35 @@ impl HopStats {
         }
         if let Some(responder) = self.responders.get_mut(&addr) {
             responder.asn = Some(asn);
+        }
+    }
+
+    /// Replace every address by its stand-in and forget names, ASes and
+    /// locations, for `--privacy-hops`. Stand-ins are handed out most replies
+    /// first, so the letters stay as they were.
+    pub fn redact(&mut self, stand_ins: &mut StandIns) {
+        for (_, addr) in crate::topology::letters(self) {
+            stand_ins.get(addr);
+        }
+        let mut stand_in = |addr| stand_ins.get(addr);
+        self.addr = self.addr.map(&mut stand_in);
+        (self.hostname, self.asn, self.geo) = (None, None, None);
+        self.responders = std::mem::take(&mut self.responders)
+            .into_values()
+            .map(|mut responder| {
+                responder.addr = stand_in(responder.addr);
+                (responder.hostname, responder.asn, responder.geo) = (None, None, None);
+                (responder.addr, responder)
+            })
+            .collect();
+        for flow in self.flows.values_mut() {
+            flow.responders = std::mem::take(&mut flow.responders)
+                .into_iter()
+                .map(|(addr, replies)| (stand_in(addr), replies))
+                .collect();
+        }
+        for record in &mut self.history {
+            record.from = record.from.map(&mut stand_in);
         }
     }
 

@@ -136,6 +136,7 @@ mtr-ng google.com
 # e           Show or hide MPLS labels
 # ↑ ↓ PgUp PgDn Home End  Select and scroll hops
 # Enter       Details of the selected hop (↑ ↓ for the others)
+# a           About: what leaves this machine, and the data credits
 ```
 
 Colours follow `NO_COLOR` and `TERM=dumb`.
@@ -175,6 +176,9 @@ mtr-ng -r -e google.com
 # Where each hop is, and whether its RTT allows it
 mtr-ng -r -g google.com
 mtr-ng -r -g --origin 52.37,4.89 google.com
+
+# A report to share: hops 1 and 2 are hidden and never looked up
+mtr-ng -r --privacy-hops 2 google.com
 ```
 
 ## Advanced Features
@@ -194,6 +198,11 @@ A database places a router where its owner registered it, often a head office a 
 In `--json` each hub carries a `geo` object (city, country, lat, lon, accuracy_km, distance_km, impossible, from_name), and `mtr.geo` says whose locations they are and where distances are measured from. `--geojson` is RFC 7946: coordinates are [longitude, latitude], ruled-out hops are points with `"impossible": true` (red in viewers that read simplestyle-spec) and stay off the path, and a path across the date line is cut there.
 
 Router names are often better evidence. Large networks name their routers after the city they stand in, each in codes of its own: Arelion's `adm` is Amsterdam, `win` Vienna and `san` San Antonio, while to Cogent, which uses airport codes, `san` is San Diego. mtr-ng carries the codes of Arelion, Cogent, Hurricane Electric and Lumen, taken from the router lists in their looking glasses (and, for Cogent's other sites, OurAirports' list of large airports). When a hop's name has one, that city goes before the database, unless the RTT rules it out and not the database's location; the hop details say `adm in its name`. The names come from reverse DNS, so `-n` turns this off.
+
+### Privacy
+What mtr-ng sends, apart from the probes themselves: the target's name and, unless `-n`, the name of every address that answers go to this machine's resolver; with `-z`, every public address that answers goes to Team Cymru's DNS service. Locations are looked up in a local database, and private addresses are never looked up anywhere. `a` in the TUI lists this for the running trace, with the data sources and their licences.
+
+`--privacy-hops N` hides the first N hops, usually your own network and your provider's first routers, in the TUI and in every report format: their addresses, names, ASes and locations show as `(hidden)` or not at all, the local host name in the report header too, and they are never looked up. Load-balanced branches among them stay apart, as `A (hidden)` and `B (hidden)` in the flow matrix.
 
 ### Simulation Mode
 `--simulate` answers probes from a made-up path instead of the network, through the same probing loop as real probes, and marks the screen SIMULATED. The path has a load-balanced pair of routers inside an MPLS tunnel, a router that never answers, some loss and the odd latency spike. Its addresses come from the documentation ranges and its names end in `.example`. It comes with made-up locations, including one the light-speed check rules out, so `-g` and the map work without a database.

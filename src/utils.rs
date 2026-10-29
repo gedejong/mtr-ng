@@ -46,7 +46,7 @@ pub mod network {
 
     /// Format IP address as string, or "???" if None
     pub fn format_optional_ip(addr: Option<IpAddr>) -> String {
-        addr.map(|a| a.to_string())
+        addr.map(crate::privacy::show)
             .unwrap_or_else(|| "???".to_string())
     }
 

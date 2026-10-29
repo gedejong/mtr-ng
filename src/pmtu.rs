@@ -11,6 +11,7 @@
 //! hops between the farthest one they reach and the nearest one they don't, to
 //! find where they vanish.
 
+use crate::privacy::show;
 use std::net::IpAddr;
 
 /// Common MTUs, largest first: the next step down when a router reports no MTU
@@ -330,8 +331,8 @@ impl PathMtu {
         for (drop, before) in self.steps() {
             let place = match (drop.hop, drop.router) {
                 (_, None) => "on this machine's route".to_string(),
-                (Some(hop), Some(router)) => format!("after hop {hop} ({router})"),
-                (None, Some(router)) => format!("after {router}"),
+                (Some(hop), Some(router)) => format!("after hop {hop} ({})", show(router)),
+                (None, Some(router)) => format!("after {}", show(router)),
             };
             lines.push(format!("  {before} to {} {place}", drop.mtu));
         }

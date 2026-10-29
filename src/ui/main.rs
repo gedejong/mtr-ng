@@ -89,7 +89,8 @@ fn draw(
     session: &Mutex<MtrSession>,
     ui: &mut UiState,
 ) -> Result<()> {
-    let snapshot = session.lock().unwrap().clone();
+    let mut snapshot = session.lock().unwrap().clone();
+    snapshot.redact();
     terminal.draw(|f| render(f, &snapshot, ui))?;
     Ok(())
 }

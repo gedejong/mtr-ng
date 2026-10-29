@@ -14,6 +14,8 @@ pub enum Mode {
     Columns,
     /// Everything known about one hop
     Detail,
+    /// Version, licence, what leaves this machine, and whose data is shown
+    About,
 }
 
 /// What the main area shows.

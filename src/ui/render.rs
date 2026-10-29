@@ -8,11 +8,12 @@ use super::visualization::{
     gradient, histogram, histogram_spans, history_spans, letter_color, loss_color, symbol,
     ColorSupport, RttScale,
 };
-use crate::args::Column;
+use crate::args::{Column, ProbeProtocol};
 use crate::columns::{self, format_ms};
 use crate::geo::{self, Origin};
 use crate::hop_stats::ResponderStats;
 use crate::icmp_ext::MplsLabel;
+use crate::privacy;
 use crate::topology;
 use crate::utils::network::truncate_hostname;
 use crate::utils::text::pack;
@@ -97,6 +98,7 @@ pub fn render(f: &mut Frame, session: &MtrSession, ui: &mut UiState) {
         Mode::Help => render_help(f, area),
         Mode::Columns => render_chooser(f, area, ui),
         Mode::Detail => render_detail(f, area, session, hops, ui),
+        Mode::About => render_about(f, area, session),
     }
 }
 
@@ -170,7 +172,7 @@ fn shows_names(session: &MtrSession, ui: &UiState) -> bool {
 fn host_label(name: Option<&String>, addr: Option<IpAddr>, names: bool) -> String {
     match (name, addr) {
         (Some(name), _) if names => name.clone(),
-        (_, Some(addr)) => addr.to_string(),
+        (_, Some(addr)) => privacy::show(addr),
         _ => "???".to_string(),
     }
 }
@@ -269,7 +271,9 @@ fn cell_text(column: Column, row: &HostRow, origin: Option<&Origin>) -> String {
         (Column::Back, RowKind::Alternate(alt)) => {
             columns::routers_back(alt.routers_back(), row.hop.hop)
         }
-        (Column::Asn | Column::AsName | Column::Prefix, RowKind::Alternate(alt)) => {
+        (Column::Asn | Column::AsName | Column::Prefix, RowKind::Alternate(alt))
+            if !privacy::is_stand_in(alt.addr) =>
+        {
             columns::as_value(column, alt.asn.as_ref())
         }
         _ => String::new(),
@@ -839,7 +843,7 @@ fn responder_lines(
         .collect();
     let host = |r: &ResponderStats| match &r.hostname {
         Some(name) if names => format!("{name} ({})", r.addr),
-        _ => r.addr.to_string(),
+        _ => privacy::show(r.addr),
     };
     let asn = |r: &ResponderStats| r.asn.as_ref().map(|a| format!("AS{}", a.number));
     let flows_of = |r: &ResponderStats| {
@@ -1007,6 +1011,97 @@ fn render_help(f: &mut Frame, area: Rect) {
         .title_bottom(Line::from(" Esc closes ").alignment(Alignment::Right));
     f.render_widget(Clear, popup);
     f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// Widest the About pane gets.
+const ABOUT_WIDTH: u16 = 78;
+
+fn render_about(f: &mut Frame, area: Rect, session: &MtrSession) {
+    let width = area.width.min(ABOUT_WIDTH);
+    let lines = about_lines(session, usize::from(width).saturating_sub(4));
+    let popup = centered(area, usize::from(width), lines.len() + 2);
+    let block = Block::bordered()
+        .title(" About ")
+        .title_bottom(Line::from(" Esc closes ").alignment(Alignment::Right))
+        .padding(Padding::horizontal(1));
+    f.render_widget(Clear, popup);
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// The About pane's text, `width` cells wide: version and licence, what this
+/// trace sends where, and whose data it shows, with the credit each asks for.
+fn about_lines(session: &MtrSession, width: usize) -> Vec<Line<'static>> {
+    let args = &session.args;
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    // A sentence per item, wrapped under its first word
+    let item = |text: String| -> Vec<Line<'static>> {
+        let words: Vec<String> = text.split(' ').map(str::to_string).collect();
+        pack(&words, " ", width.saturating_sub(2))
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| Line::from(format!("{}{line}", if i == 0 { "• " } else { "  " })))
+            .collect()
+    };
+
+    let mut sent = vec![match (session.is_simulated(), args.protocol) {
+        (true, _) => "Probes: none, --simulate makes the trace up.".to_string(),
+        (false, ProbeProtocol::Udp) => format!(
+            "Probes: UDP datagrams to {}, answered by the routers on the way.",
+            session.target_addr
+        ),
+        (false, _) => format!(
+            "Probes: ICMP echo requests to {}, answered by the routers on the way.",
+            session.target_addr
+        ),
+    }];
+    sent.push(match args.numeric || session.is_simulated() {
+        true => "DNS: the target's name, to this machine's resolver.".to_string(),
+        false => "DNS: the target's name and the name of each address that answers, \
+                  to this machine's resolver (-n: the target's only)."
+            .to_string(),
+    });
+    sent.push(match args.wants_asn() && !session.is_simulated() {
+        true => "AS lookups: each public address that answers, to Team Cymru's DNS service. \
+                 Private addresses never leave."
+            .to_string(),
+        false => "AS lookups: none (-z sends public addresses to Team Cymru).".to_string(),
+    });
+    sent.push("Locations: nothing, the database is on this machine.".to_string());
+    if args.privacy_hops > 0 {
+        let hops = match args.privacy_hops {
+            1 => "Hop 1 is".to_string(),
+            n => format!("Hops 1-{n} are"),
+        };
+        sent.push(format!(
+            "{hops} never looked up, and hidden here and in reports (--privacy-hops)."
+        ));
+    }
+
+    let data = [
+        session.geo_attribution().map_or_else(
+            || "Locations: no database (see -g).".to_string(),
+            |credit| format!("Locations: {credit}."),
+        ),
+        "Router names: city codes from the looking glasses of Arelion, Cogent, Hurricane \
+         Electric and Lumen; airports from OurAirports, public domain."
+            .to_string(),
+        "Coastlines and city coordinates: Natural Earth, public domain.".to_string(),
+        "AS numbers, prefixes and names: Team Cymru's IP to ASN mapping.".to_string(),
+    ];
+
+    let mut lines = vec![Line::styled(
+        format!("mtr-ng {}", env!("CARGO_PKG_VERSION")),
+        bold,
+    )];
+    let home = ["MIT OR Apache-2.0", "github.com/gedejong/mtr-ng"].map(String::from);
+    lines.extend(pack(&home, " · ", width).into_iter().map(Line::from));
+    lines.push(Line::from(""));
+    lines.push(Line::styled("What leaves this machine", bold));
+    lines.extend(sent.into_iter().flat_map(item));
+    lines.push(Line::from(""));
+    lines.push(Line::styled("Data", bold));
+    lines.extend(data.into_iter().flat_map(item));
+    lines
 }
 
 fn render_chooser(f: &mut Frame, area: Rect, ui: &UiState) {
@@ -1210,7 +1305,13 @@ mod tests {
         s.args.simulate = true;
         s.set_geo_source(Arc::new(FakeGeo(HashMap::new())));
         s.hops[1].set_geo_for_addr(PATH[1].parse().unwrap(), city("London", "GB", 51.5, -0.1));
-        let modes = [Mode::Table, Mode::Help, Mode::Columns, Mode::Detail];
+        let modes = [
+            Mode::Table,
+            Mode::Help,
+            Mode::Columns,
+            Mode::Detail,
+            Mode::About,
+        ];
         let views = [View::Hops, View::Flows, View::Map];
         for (mode, view) in modes.into_iter().flat_map(|m| views.map(|v| (m, v))) {
             for (w, h) in [(1, 1), (39, 5), (40, 6), (50, 10), (80, 24), (200, 60)] {
@@ -1280,6 +1381,37 @@ mod tests {
         );
         assert!(text.contains("test locations"), "the credit: {text}");
         assert_eq!(ui.row_hops, [1, 2, 3], "Enter and the arrows work here too");
+    }
+
+    #[tokio::test]
+    async fn privacy_hops_hide_addresses_names_and_branches() {
+        let mut s = diamond().await;
+        s.args.privacy_hops = 2;
+        s.hops[0].set_hostname_for_addr(PATH[0].parse().unwrap(), "gw.home.example".into());
+        s.redact();
+        assert_eq!(s.hops[0].hostname, None);
+        let mut ui = UiState::new(&s.args);
+        let text = screen(&s, &mut ui, 80, 12).join("\n");
+        for hidden in ["192.168.1.1", "203.0.113.25", "0.0.0."] {
+            assert!(!text.contains(hidden), "{hidden}: {text}");
+        }
+        assert!(text.contains("1. (hidden)"), "{text}");
+        assert!(text.contains("198.51.100.7"), "hop 3 is shown: {text}");
+
+        ui.view = View::Flows;
+        let lines = screen(&s, &mut ui, 80, 12);
+        let hop2 = lines
+            .iter()
+            .find(|l| l.trim_start().starts_with("2."))
+            .unwrap();
+        assert!(
+            hop2.contains("2. A B A (hidden) (60%)  B (hidden) (40%)"),
+            "branches stay apart: {hop2}"
+        );
+
+        ui.mode = Mode::About;
+        let text = screen(&s, &mut ui, 80, 30).join("\n");
+        assert!(text.contains("Hops 1-2 are never looked up"), "{text}");
     }
 
     #[tokio::test]

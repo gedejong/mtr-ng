@@ -117,8 +117,11 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                         mda.answered(probe.flow, (probe.hop + 1) as u8, reply.source);
                     }
                     s.notify();
-                    let name = !s.args.numeric && s.want_lookup(reply.source);
-                    (name, s.want_asn(reply.source), s.resolver.clone())
+                    // Hidden hops (--privacy-hops) are never looked up
+                    let shown = !s.is_hidden(probe.hop + 1);
+                    let name = shown && !s.args.numeric && s.want_lookup(reply.source);
+                    let asn = shown && s.want_asn(reply.source);
+                    (name, asn, s.resolver.clone())
                 };
                 if name {
                     dns.spawn(reverse_lookup(Arc::clone(&session), resolver.clone(), reply.source));

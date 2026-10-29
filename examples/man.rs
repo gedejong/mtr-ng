@@ -64,10 +64,22 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Save the located hops and the path for a map viewer such as geojson.io.",
     ),
     (
+        "mtr-ng -r --privacy-hops 2 example.com",
+        "A report to share: hops 1 and 2 are hidden and never looked up. See PRIVACY.",
+    ),
+    (
         "mtr-ng --simulate example.com",
         "Fake data, marked SIMULATED.",
     ),
 ];
+
+const PRIVACY: &str = "Apart from the probes, mtr-ng sends the target's name and, unless -n, \
+the name of every address that answers to this machine's resolver, and with -z every public \
+address that answers to Team Cymru's DNS service. Locations come from a local database. \
+Private addresses are never looked up anywhere. --privacy-hops N hides the first N hops in \
+the TUI and every report format, with the local host name, and never looks them up; branches \
+among them stay apart. The a key lists what the running trace sends, and the data sources \
+with their licences.";
 
 const PRIVILEGES: &str = "On macOS mtr-ng needs no privileges: it reads the routers' answers \
 with an unprivileged ICMP socket, for ICMP and UDP probes alike. On Linux, ICMP works without \
@@ -170,6 +182,7 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
         writeln!(out, ".PP\n{}", roff(paragraph))?;
     }
 
+    writeln!(out, ".SH PRIVACY\n{}", roff(PRIVACY))?;
     writeln!(out, ".SH PRIVILEGES\n{}", roff(PRIVILEGES))?;
     writeln!(
         out,

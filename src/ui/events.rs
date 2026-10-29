@@ -8,6 +8,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum Action {
     Quit,
     ToggleHelp,
+    OpenAbout,
     OpenColumns,
     Reset,
     ToggleHostnames,
@@ -128,6 +129,12 @@ pub const TABLE_KEYS: &[Binding] = &[
         Action::OpenDetail,
     ),
     bind(&[Esc], "Esc", "Clear the selection", Action::ClearSelection),
+    bind(
+        &[Char('a')],
+        "a",
+        "About: privacy and credits",
+        Action::OpenAbout,
+    ),
 ];
 
 pub const COLUMN_KEYS: &[Binding] = &[
@@ -177,10 +184,18 @@ const HELP_KEYS: &[Binding] = &[bind(
     Action::Close,
 )];
 
+const ABOUT_KEYS: &[Binding] = &[bind(
+    &[Esc, Char('a'), Char('q')],
+    "Esc",
+    "Close",
+    Action::Close,
+)];
+
 fn bindings(mode: Mode) -> &'static [Binding] {
     match mode {
         Mode::Table => TABLE_KEYS,
         Mode::Help => HELP_KEYS,
+        Mode::About => ABOUT_KEYS,
         Mode::Columns => COLUMN_KEYS,
         Mode::Detail => DETAIL_KEYS,
     }
@@ -217,6 +232,7 @@ pub fn apply(action: Action, ui: &mut UiState) -> Effect {
         Action::Quit => return Effect::Quit,
         Action::Reset => return Effect::Reset,
         Action::ToggleHelp => ui.mode = Mode::Help,
+        Action::OpenAbout => ui.mode = Mode::About,
         Action::OpenColumns => ui.open_chooser(),
         Action::Close => ui.mode = Mode::Table,
         Action::ToggleHostnames => ui.show_hostnames = !ui.show_hostnames,
@@ -266,7 +282,13 @@ mod tests {
 
     #[test]
     fn no_key_is_bound_twice_in_a_mode() {
-        for mode in [Mode::Table, Mode::Help, Mode::Columns, Mode::Detail] {
+        for mode in [
+            Mode::Table,
+            Mode::Help,
+            Mode::Columns,
+            Mode::Detail,
+            Mode::About,
+        ] {
             let keys: Vec<_> = bindings(mode).iter().flat_map(|b| b.keys).collect();
             for (i, k) in keys.iter().enumerate() {
                 assert!(!keys[i + 1..].contains(k), "{mode:?}: {k:?} bound twice");
@@ -282,6 +304,7 @@ mod tests {
             (Action::ToggleHelp, Mode::Help),
             (Action::OpenColumns, Mode::Columns),
             (Action::OpenDetail, Mode::Detail),
+            (Action::OpenAbout, Mode::About),
         ] {
             apply(open, &mut ui);
             assert_eq!(ui.mode, mode);

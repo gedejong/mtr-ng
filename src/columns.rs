@@ -4,6 +4,7 @@
 use crate::args::Column;
 use crate::asn::AsInfo;
 use crate::geo::{self, Assessment, Origin};
+use crate::privacy;
 use crate::HopStats;
 use std::time::Duration;
 
@@ -120,7 +121,7 @@ impl Column {
     /// The value of a numeric column, in milliseconds, percent or km (`???` when
     /// there is nothing to measure), the AS, its name or prefix, or the location.
     /// Distances are from `origin`; `!` marks a location the hop's RTT rules out.
-    /// Empty for hop, host and graph.
+    /// Empty for hop, host and graph, and for what `--privacy-hops` hides.
     pub fn value(self, hop: &HopStats, origin: Option<&Origin>) -> String {
         let ms = format_ms;
         let assessment = || hop.assess(origin);
@@ -131,7 +132,13 @@ impl Column {
                 ""
             }
         };
+        let hidden = hop.addr.is_some_and(privacy::is_stand_in);
         match self {
+            Column::Asn | Column::AsName | Column::Prefix | Column::Geo | Column::Dist
+                if hidden =>
+            {
+                String::new()
+            }
             Column::Loss => format!("{:.1}%", hop.loss_percent),
             Column::Sent => hop.sent.to_string(),
             Column::Last => ms(hop.last_rtt),

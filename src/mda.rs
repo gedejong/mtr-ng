@@ -16,6 +16,7 @@
 //! branches don't cross. Full MDA steers flows to each router where that fails;
 //! this only says where crossing branches were seen, since one may be missing.
 
+use crate::privacy::StandIns;
 use crate::probe::MAX_FLOWS;
 use crate::topology;
 use std::{
@@ -170,6 +171,16 @@ impl Mda {
     /// Record that the probe of `flow` to `ttl` was answered by `from`.
     pub fn answered(&mut self, flow: u16, ttl: u8, from: IpAddr) {
         self.paths.entry(flow).or_default().insert(ttl, from);
+    }
+
+    /// Replace the addresses at hops up to `hidden` by their stand-ins, in a copy
+    /// about to be shown (`--privacy-hops`).
+    pub fn redact(&mut self, hidden: u8, stand_ins: &mut StandIns) {
+        for path in self.paths.values_mut() {
+            for (_, addr) in path.range_mut(..=hidden) {
+                *addr = stand_ins.get(*addr);
+            }
+        }
     }
 
     pub fn discovering(&self) -> bool {

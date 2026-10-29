@@ -3,6 +3,7 @@
 //! flows part and meet again sits a load balancer.
 
 use crate::hop_stats::{FlowStats, HopStats};
+use crate::privacy::show;
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
@@ -96,7 +97,7 @@ fn name(hop: &HopStats, addr: IpAddr, numeric: bool) -> String {
         .get(&addr)
         .and_then(|r| r.hostname.clone())
         .filter(|_| !numeric)
-        .unwrap_or_else(|| addr.to_string())
+        .unwrap_or_else(|| show(addr))
 }
 
 /// An address seen at a TTL.
@@ -183,13 +184,11 @@ pub fn to_dot(hops: &[HopStats], source: &str, numeric: bool) -> String {
     let nodes: BTreeSet<Node> = edges.iter().map(|e| e.to).collect();
     for node in nodes {
         let hop = hops.iter().find(|hop| hop.hop == node.ttl);
-        let name = hop.map_or_else(
-            || node.addr.to_string(),
-            |hop| name(hop, node.addr, numeric),
-        );
-        let label = match name == node.addr.to_string() {
-            true => format!("{}. {}", node.ttl, node.addr),
-            false => format!("{}. {name}\n{}", node.ttl, node.addr),
+        let addr = show(node.addr);
+        let name = hop.map_or_else(|| addr.clone(), |hop| name(hop, node.addr, numeric));
+        let label = match name == addr {
+            true => format!("{}. {addr}", node.ttl),
+            false => format!("{}. {name}\n{addr}", node.ttl),
         };
         let _ = writeln!(dot, "  {} [label={}];", id(Some(node)), quote(&label));
     }

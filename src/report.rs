@@ -5,10 +5,10 @@ use crate::hop_stats::FlowStats;
 use crate::icmp_ext::MplsLabel;
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
+use crate::privacy::{self, show};
 use crate::utils::network;
 use crate::{topology, tracer, HopStats, MtrSession, Result};
 use serde_json::{json, Value};
-use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
@@ -218,7 +218,7 @@ fn json_hubs(
             let mut hub = json!({
                 "count": hop.hop,
                 "host": host_label(hop, numeric),
-                "ip": hop.addr.map(|a| a.to_string()),
+                "ip": hop.addr.map(show),
                 "Loss%": (hop.loss_percent * 10.0).round() / 10.0,
                 "Snt": hop.sent,
                 "Last": json_ms(hop.last_rtt),
@@ -230,7 +230,7 @@ fn json_hubs(
                 "Jttr": json_ms(hop.last_jitter),
                 "JAvg": json_ms(hop.jitter_avg),
             });
-            if asn && hop.addr.is_some() {
+            if asn && hop.addr.is_some_and(|addr| !privacy::is_stand_in(addr)) {
                 hub["ASN"] = json!(columns::as_value(Column::Asn, hop.asn.as_ref()));
                 if let Some(info) = &hop.asn {
                     hub["prefix"] = json!(info.prefix);
@@ -256,7 +256,7 @@ fn json_hubs(
             if flows > 1 {
                 let per_flow: Vec<Option<String>> = (0..flows)
                     .map(|f| hop.flows.get(&f).and_then(FlowStats::responder))
-                    .map(|addr| addr.map(|a| a.to_string()))
+                    .map(|addr| addr.map(show))
                     .collect();
                 hub["flows"] = json!(per_flow);
             }
@@ -265,8 +265,8 @@ fn json_hubs(
                 .into_iter()
                 .map(|alt| {
                     let mut alternate = json!({
-                        "ip": alt.addr.to_string(),
-                        "host": alt.hostname.clone().filter(|_| !numeric).unwrap_or_else(|| alt.addr.to_string()),
+                        "ip": show(alt.addr),
+                        "host": alt.hostname.clone().filter(|_| !numeric).unwrap_or_else(|| show(alt.addr)),
                         "replies": alt.replies,
                         "Last": json_ms(alt.last_rtt),
                         "Avg": json_ms(alt.avg_rtt()),
@@ -313,7 +313,7 @@ fn csv_rows(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Vec<St
         [
             hop.hop.to_string(),
             csv_field(&host_label(hop, numeric)),
-            hop.addr.map(|a| a.to_string()).unwrap_or_default(),
+            hop.addr.map(show).unwrap_or_default(),
             asn.map(|a| format!("AS{}", a.number)).unwrap_or_default(),
             asn.and_then(|a| a.prefix.clone()).unwrap_or_default(),
             asn.and_then(|a| a.name.as_deref())
@@ -433,6 +433,7 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
     let shared = Arc::new(Mutex::new(session));
     tracer::run(Arc::clone(&shared), prober).await?;
     session = shared.lock().unwrap().clone();
+    session.redact();
     if let Some(why) = session.silence() {
         tracing::warn!("{why}");
     }
@@ -441,7 +442,10 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
     let hops = &session.hops[..session.display_hop_count()];
     let origin = session.origin();
     let origin = origin.as_ref();
-    let source = gethostname::gethostname().to_string_lossy().into_owned();
+    let source = match args.privacy_hops {
+        0 => gethostname::gethostname().to_string_lossy().into_owned(),
+        _ => privacy::HIDDEN.to_string(),
+    };
 
     if args.json {
         let mut report = json!({
@@ -540,7 +544,7 @@ fn json_mda(mda: &Mda, last_ttl: u8) -> Value {
         "monitored": mda.cover(last_ttl),
         "hops": mda.hops(last_ttl).iter().map(|hop| json!({
             "hop": hop.ttl,
-            "addresses": hop.addrs.iter().map(IpAddr::to_string).collect::<Vec<_>>(),
+            "addresses": hop.addrs.iter().copied().map(show).collect::<Vec<_>>(),
             "flows": hop.flows,
             "needed": hop.needed(),
             "sure": hop.sure(),
@@ -559,7 +563,7 @@ fn json_pmtu(pmtu: &PathMtu) -> Value {
         "trying": pmtu.probe_size(),
         "drops": pmtu.drops.iter().map(|drop| json!({
             "hop": drop.hop,
-            "router": drop.router.map(|router| router.to_string()),
+            "router": drop.router.map(show),
             "mtu": drop.mtu,
         })).collect::<Vec<_>>(),
     })
@@ -568,6 +572,7 @@ fn json_pmtu(pmtu: &PathMtu) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     fn no_notes(_: u8) -> Vec<String> {
         Vec::new()
@@ -891,6 +896,27 @@ mod tests {
             }))
         );
         assert_eq!(json_geo(None, Some(&origin)), None, "no locations at all");
+    }
+
+    #[test]
+    fn hidden_hops_leave_no_address_in_json_or_csv() {
+        let mut hops = path();
+        let mut stand_ins = privacy::StandIns::default();
+        hops[0].redact(&mut stand_ins);
+        let hubs = json_hubs(&hops, false, true, 1, None);
+        assert_eq!(hubs[0]["host"], "(hidden)");
+        assert_eq!(hubs[0]["ip"], "(hidden)");
+        assert!(hubs[0].get("ASN").is_none(), "nothing to look up");
+        assert!(csv_rows(&hops, true, None)[1].starts_with("1,(hidden),(hidden),,"));
+        let table = format_table(
+            &hops,
+            &Column::default_columns(),
+            true,
+            false,
+            &no_notes,
+            None,
+        );
+        assert!(!table.join("\n").contains("192.168.1.1"));
     }
 
     #[test]

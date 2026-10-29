@@ -3,6 +3,7 @@ use crate::asn::AsInfo;
 use crate::geo::{self, GeoFix, GeoSource, Origin};
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
+use crate::privacy::StandIns;
 use crate::probe::{self, IcmpResponseType, ProbeResponse, Prober};
 use crate::simulate::{self, SimProber};
 use crate::{tracer, Args, HopStats, Result};
@@ -287,6 +288,38 @@ impl MtrSession {
             })
     }
 
+    /// Whether hop `ttl` is hidden by `--privacy-hops`: never looked up, and shown
+    /// only in a redacted copy.
+    pub fn is_hidden(&self, ttl: usize) -> bool {
+        ttl <= usize::from(self.args.privacy_hops)
+    }
+
+    /// Replace everything that identifies the hidden hops, in a copy about to be
+    /// shown: addresses by stand-ins (see `privacy`), and no names, ASes or
+    /// locations. Load-balanced branches keep a stand-in each.
+    pub fn redact(&mut self) {
+        let hidden = self.args.privacy_hops;
+        if hidden == 0 {
+            return;
+        }
+        let mut stand_ins = StandIns::default();
+        for hop in self.hops.iter_mut().filter(|hop| hop.hop <= hidden) {
+            hop.redact(&mut stand_ins);
+        }
+        if let Some(mda) = self.mda.as_mut() {
+            mda.redact(hidden, &mut stand_ins);
+        }
+        if let Some(pmtu) = self.pmtu.as_mut() {
+            for drop in &mut pmtu.drops {
+                let at_hidden = drop.hop.is_some_and(|hop| hop <= hidden);
+                drop.router = drop.router.map(|router| match at_hidden {
+                    true => stand_ins.get(router),
+                    false => stand_ins.replace(router),
+                });
+            }
+        }
+    }
+
     /// Hops worth showing: up to the end of the path once it is known, otherwise
     /// up to the furthest hop that has answered.
     pub fn display_hop_count(&self) -> usize {
@@ -352,6 +385,9 @@ impl MtrSession {
             IcmpResponseType::TooBig { .. } => return true,
         }
         self.hops[index].record_reply_details(addr, response.reply_ttl, &response.mpls);
+        if self.is_hidden(index + 1) {
+            return true;
+        }
         if let Some(Some(name)) = self.dns_names.get(&addr) {
             self.hops[index].set_hostname_for_addr(addr, name.clone());
         }
@@ -533,6 +569,7 @@ mod tests {
             geo: false,
             geoip_mmdb: None,
             origin: None,
+            privacy_hops: 0,
             log_file: None,
         };
 
@@ -576,6 +613,7 @@ mod tests {
             geo: false,
             geoip_mmdb: None,
             origin: None,
+            privacy_hops: 0,
             log_file: None,
         };
 
@@ -839,6 +877,7 @@ mod tests {
             geo: false,
             geoip_mmdb: None,
             origin: None,
+            privacy_hops: 0,
             log_file: None,
         };
 
