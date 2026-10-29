@@ -1,6 +1,6 @@
 use crate::asn::AsInfo;
 use crate::geo::{self, Assessment, GeoFix, Origin};
-use crate::icmp_ext::MplsLabel;
+use crate::icmp_ext::{Extensions, Interface, MplsLabel};
 use crate::privacy::StandIns;
 use crate::utils;
 use std::{
@@ -76,6 +76,8 @@ pub struct ResponderStats {
     pub reply_ttl: Option<u8>,
     /// MPLS labels in its latest reply
     pub mpls: Vec<MplsLabel>,
+    /// Interfaces its latest reply named (RFC 5837)
+    pub interfaces: Vec<Interface>,
     /// Where the geolocation database puts it
     pub geo: Option<GeoFix>,
     rtt_sum_ns: u128,
@@ -93,6 +95,7 @@ impl ResponderStats {
             best_rtt: None,
             reply_ttl: None,
             mpls: Vec::new(),
+            interfaces: Vec::new(),
             geo: None,
             rtt_sum_ns: 0,
         }
@@ -287,10 +290,10 @@ impl HopStats {
     }
 
     /// Remember what `addr` put in its latest reply besides the timing.
-    pub fn record_reply_details(&mut self, addr: IpAddr, ttl: Option<u8>, mpls: &[MplsLabel]) {
+    pub fn record_reply_details(&mut self, addr: IpAddr, ttl: Option<u8>, ext: Extensions) {
         if let Some(responder) = self.responders.get_mut(&addr) {
             responder.reply_ttl = ttl;
-            responder.mpls = mpls.to_vec();
+            (responder.mpls, responder.interfaces) = (ext.mpls, ext.interfaces);
         }
     }
 
@@ -382,6 +385,13 @@ impl HopStats {
             p99: at(0.99),
             max: rtts[rtts.len() - 1],
         })
+    }
+
+    /// Interfaces the primary responder's latest reply named.
+    pub fn interfaces(&self) -> &[Interface] {
+        self.addr
+            .and_then(|addr| self.responders.get(&addr))
+            .map_or(&[], |r| &r.interfaces)
     }
 
     /// MPLS labels in the primary responder's latest reply.
@@ -514,6 +524,7 @@ impl HopStats {
             .map(|mut responder| {
                 responder.addr = stand_in(responder.addr);
                 (responder.hostname, responder.asn, responder.geo) = (None, None, None);
+                responder.interfaces.clear();
                 (responder.addr, responder)
             })
             .collect();

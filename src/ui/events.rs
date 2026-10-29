@@ -110,7 +110,7 @@ pub const TABLE_KEYS: &[Binding] = &[
     bind(
         &[Char('e')],
         "e",
-        "Show or hide MPLS labels",
+        "MPLS labels and interfaces",
         Action::ToggleMpls,
     ),
     bind(

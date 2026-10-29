@@ -17,7 +17,7 @@ use std::{
 };
 
 use crate::args::ProbeProtocol;
-use crate::icmp_ext::{mpls_labels, mpls_labels_v6, MplsLabel};
+use crate::icmp_ext::{extensions, extensions_v6, Extensions, Interface, MplsLabel};
 
 #[cfg(windows)]
 mod icmp_api;
@@ -94,6 +94,8 @@ pub struct ProbeResponse {
     pub reply_ttl: Option<u8>,
     /// MPLS labels the router quoted (RFC 4950)
     pub mpls: Vec<MplsLabel>,
+    /// Interfaces the router named (RFC 5837)
+    pub interfaces: Vec<Interface>,
 }
 
 /// A reply to one of our probes, timestamped when it was received.
@@ -107,6 +109,8 @@ pub struct Reply {
     pub ttl: Option<u8>,
     /// MPLS labels quoted in a Time Exceeded or Destination Unreachable
     pub mpls: Vec<MplsLabel>,
+    /// Interfaces named in one (RFC 5837)
+    pub interfaces: Vec<Interface>,
 }
 
 /// Sends probes and delivers replies. Implementations only move packets;
@@ -136,6 +140,7 @@ struct IcmpReply {
     probe: Quoted,
     ttl: Option<u8>,
     mpls: Vec<MplsLabel>,
+    interfaces: Vec<Interface>,
 }
 
 /// The probe an ICMP message answers, as far as it shows it
@@ -490,6 +495,7 @@ impl Ours {
             received_at,
             ttl: reply.ttl,
             mpls: reply.mpls,
+            interfaces: reply.interfaces,
         })
     }
 }
@@ -751,15 +757,17 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
         }
         quoted_probe(inner[9], &inner[inner_ihl..], ECHO_REQUEST)?
     };
+    let ext = match kind {
+        IcmpResponseType::EchoReply => Extensions::default(),
+        _ => extensions(icmp),
+    };
     Some(IcmpReply {
         kind,
         source: IpAddr::V4(source),
         probe,
         ttl: Some(buf[8]),
-        mpls: match kind {
-            IcmpResponseType::EchoReply => Vec::new(),
-            _ => mpls_labels(icmp),
-        },
+        mpls: ext.mpls,
+        interfaces: ext.interfaces,
     })
 }
 
@@ -789,15 +797,17 @@ fn parse_icmpv6(buf: &[u8], source: IpAddr, hop_limit: Option<u8>) -> Option<Icm
         let inner = buf.get(8..8 + 40 + 8)?;
         quoted_probe(inner[6], &inner[40..], ECHO_REQUEST_V6)?
     };
+    let ext = match kind {
+        IcmpResponseType::EchoReply => Extensions::default(),
+        _ => extensions_v6(buf),
+    };
     Some(IcmpReply {
         kind,
         source,
         probe,
         ttl: hop_limit,
-        mpls: match kind {
-            IcmpResponseType::EchoReply => Vec::new(),
-            _ => mpls_labels_v6(buf),
-        },
+        mpls: ext.mpls,
+        interfaces: ext.interfaces,
     })
 }
 

@@ -55,7 +55,7 @@ fn report_columns(columns: &[Column]) -> Vec<Column> {
 
 /// The header line and one line per probed hop, aligned however long the names
 /// are. With `mpls`, each hop is followed by the labels its router reported, as
-/// `mtr -e` prints them, and by its `notes` (where the path MTU drops, how many
+/// `mtr -e` prints them, and the interfaces it named, and by its `notes` (where the path MTU drops, how many
 /// branches it has). Distances are from `origin`.
 fn format_table(
     hops: &[HopStats],
@@ -101,6 +101,7 @@ fn format_table(
         lines.push(align(row, columns, &widths));
         if mpls {
             lines.extend(hop.mpls().iter().map(|label| format!("       {label}")));
+            lines.extend(hop.interfaces().iter().map(|i| format!("       {i}")));
         }
         lines.extend(notes(hop.hop).iter().map(|note| format!("       {note}")));
     }
@@ -277,6 +278,9 @@ fn json_hubs(
             if !hop.mpls().is_empty() {
                 hub["MPLS"] = json_mpls(hop.mpls());
             }
+            if !hop.interfaces().is_empty() {
+                hub["interfaces"] = json!(hop.interfaces());
+            }
             if let Some(fix) = &hop.geo {
                 let assessment = hop.assess(origin);
                 hub["geo"] = json!({
@@ -312,6 +316,9 @@ fn json_hubs(
                     });
                     if !alt.mpls.is_empty() {
                         alternate["MPLS"] = json_mpls(&alt.mpls);
+                    }
+                    if !alt.interfaces.is_empty() {
+                        alternate["interfaces"] = json!(alt.interfaces);
                     }
                     alternate
                 })
@@ -824,7 +831,11 @@ mod tests {
             ttl: 1,
         };
         let addr = hops[2].addr.unwrap();
-        hops[2].record_reply_details(addr, Some(250), &[label]);
+        hops[2].record_reply_details(
+            addr,
+            Some(250),
+            crate::icmp_ext::Extensions::mpls_only(label),
+        );
 
         let plain = format_table(
             &hops,
@@ -1029,6 +1040,20 @@ mod tests {
     #[test]
     fn hidden_hops_leave_no_address_in_json_or_csv() {
         let mut hops = path();
+        let gateway = IpAddr::from([192, 168, 1, 1]);
+        let interface = crate::icmp_ext::Interface {
+            role: crate::icmp_ext::Role::Incoming,
+            index: Some(3),
+            addr: Some(IpAddr::from([192, 168, 1, 254])),
+            name: Some("lan0".to_string()),
+            mtu: None,
+        };
+        let ext = crate::icmp_ext::Extensions {
+            mpls: Vec::new(),
+            interfaces: vec![interface],
+        };
+        hops[0].record_reply_details(gateway, Some(64), ext);
+        assert!(json_hubs(&hops, false, true, 1, None)[0]["interfaces"].is_array());
         let mut stand_ins = privacy::StandIns::default();
         hops[0].redact(&mut stand_ins);
         let hubs = json_hubs(&hops, false, true, 1, None);
@@ -1040,11 +1065,13 @@ mod tests {
             &hops,
             &Column::default_columns(),
             true,
-            false,
+            true,
             &no_notes,
             None,
         );
         assert!(!table.join("\n").contains("192.168.1.1"));
+        assert!(!table.join("\n").contains("lan0"), "nor its interfaces");
+        assert!(hubs[0].get("interfaces").is_none());
     }
 
     #[test]

@@ -21,7 +21,7 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Every branch** (`--flows auto`): new flows, one per round, until each hop has answered enough of them to be 95% sure no load-balanced branch was missed (MDA-Lite: 6 flows rule out a second branch, 11 a third, 16 a fourth). After that only the fewest flows that together pass every address take turns, so each branch keeps its own loss and RTT, and every ten minutes the search starts over. A note under each balanced hop says how many branches it has, and the report ends with what was found and where branches cross, which can hide one
 - **Flow matrix**: `f` shows, per hop, a letter for the address each flow met; `--report` prints the same matrix after the table
 - **Route graph**: `--dot` prints the routes as Graphviz, with silent hops as dashed edges
-- **MPLS labels**: `-e` (or `e` while running) shows the label stacks routers report in ICMP extensions (RFC 4950)
+- **MPLS labels and interfaces**: `-e` (or `e` while running) shows the label stacks routers report in ICMP extensions (RFC 4950), and the interface a probe came in on when a router names it (RFC 5837): its name, address, ifIndex and MTU, as in `[Interface in: et-0/0/2.100 203.0.113.6 ifIndex 531 MTU 9192]`. That address can differ from the one the reply comes from, and an unnumbered interface has no other. Few routers send it; Linux routers can, from late 2025, with `net.ipv4.icmp_errors_extension_mask=1`.
 - **Path MTU**: `--pmtu` finds the largest packet that crosses the path and the hop where it narrows, from the Fragmentation Needed or Packet Too Big a router sends. When large probes vanish without such a message, a black hole for path MTU discovery, it finds the size by halving, and then the hop past which they vanish, by sending probes of that size to nearer hops
 - **Hop details**: `Enter` opens every responder of a hop with its share, RTTs, routers on the way back and flows, plus RTT percentiles and a histogram
 - **Return path**: the Back column (`--fields hop,host,back,loss,avg`) counts the routers a reply crossed, from the TTL it arrived with. `9 +2` means two more than the probe crossed on the way there: the reply came back another way
@@ -94,7 +94,7 @@ Homebrew and the `.deb` install completions for bash, zsh and fish, and the rele
 
 ### Privileges
 - **macOS**: runs as a normal user (unprivileged ICMP sockets). No sudo.
-- **Linux**: ICMP works as a normal user through a ping socket when the user's group is in `net.ipv4.ping_group_range`, which systemd 243 and newer open to everyone. Check with `sysctl net.ipv4.ping_group_range`: `0 2147483647` allows all groups, `1 0` none. Ping sockets don't pass on MPLS labels. Otherwise, and for `-P udp`, mtr-ng needs raw sockets, so root or `CAP_NET_RAW`. Either run it with `sudo`, or grant the capability to the installed binary once:
+- **Linux**: ICMP works as a normal user through a ping socket when the user's group is in `net.ipv4.ping_group_range`, which systemd 243 and newer open to everyone. Check with `sysctl net.ipv4.ping_group_range`: `0 2147483647` allows all groups, `1 0` none. Ping sockets don't pass on MPLS labels or interfaces. Otherwise, and for `-P udp`, mtr-ng needs raw sockets, so root or `CAP_NET_RAW`. Either run it with `sudo`, or grant the capability to the installed binary once:
   ```bash
   sudo setcap cap_net_raw+ep "$(readlink -f "$(which mtr-ng)")"
   # or, with checks and a test run:
@@ -139,7 +139,7 @@ mtr-ng google.com
 # f           Hop table or flow matrix
 # m           Hop table or map
 # g           Hop table or route graph (branches side by side)
-# e           Show or hide MPLS labels
+# e           Show or hide MPLS labels and interfaces
 # ↑ ↓ PgUp PgDn Home End  Select and scroll hops
 # Enter       Details of the selected hop (↑ ↓ for the others)
 # a           About: what leaves this machine, and the data credits
@@ -177,7 +177,7 @@ mtr-ng -r -P udp --flows auto google.com
 mtr-ng -c 40 --flows 8 --dot google.com | dot -Tsvg > routes.svg
 mtr-ng -c 40 --flows 8 --mermaid google.com
 
-# MPLS labels under their hop
+# MPLS labels and interfaces under their hop
 mtr-ng -r -e google.com
 
 # Where each hop is, and whether its RTT allows it

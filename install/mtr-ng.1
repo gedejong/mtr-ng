@@ -69,7 +69,7 @@ Hide the first N hops: their addresses, names, ASes and locations are neither sh
 Where you are, in degrees, for distances and the plausibility check. Default: the first hop the database places in a city, with its uncertainty
 .TP
 \fB\-e\fR, \fB\-\-mpls\fR
-Show the MPLS labels routers report (RFC 4950) under their hop
+Show the MPLS labels (RFC 4950) and interfaces (RFC 5837) routers report, under their hop
 .TP
 \fB\-\-flows\fR \fI<N|auto>\fR [default: 1]
 Probe this many flows in turn, one per round. All probes of a flow look alike to load balancers (Paris traceroute), so a flow follows one path; several flows reveal the paths a load balancer spreads traffic over. With auto, new flows until every branch is found with 95% confidence (MDA\-Lite), then the fewest flows that pass every branch
@@ -227,7 +227,7 @@ Hop table or map
 Hop table or route graph
 .TP
 .B e
-Show or hide MPLS labels
+MPLS labels and interfaces
 .TP
 .B ↑ k
 Select previous hop
@@ -387,7 +387,7 @@ Draw the routes with Graphviz.
 The routes as a Mermaid flowchart, for Markdown on GitHub or GitLab.
 .TP
 .B mtr\-ng \-r \-e example.com
-Show MPLS labels under their hop.
+Show MPLS labels and the interfaces routers name (RFC 5837) under their hop.
 .TP
 .B mtr\-ng \-\-record trace.ndjson example.com
 Trace interactively and keep a log of every probe, reply and lookup.

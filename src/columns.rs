@@ -240,7 +240,7 @@ mod tests {
         hop.increment_sent(0);
         hop.add_rtt_from_addr(addr, Duration::from_millis(20));
         assert_eq!(Column::Back.value(&hop, None), "???");
-        hop.record_reply_details(addr, Some(247), &[]);
+        hop.record_reply_details(addr, Some(247), Default::default());
         assert_eq!(
             Column::Back.value(&hop, None),
             "8 +2",

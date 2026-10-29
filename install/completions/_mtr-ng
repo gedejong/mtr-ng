@@ -76,8 +76,8 @@ tcp\:"TCP SYN probes (not implemented yet)"))' \
 '--aslookup[Show the AS number of each hop. Asks Team Cymru'\''s DNS about every public address]' \
 '-g[Show where each hop is (Location and Dist columns), from a local geolocation database\: nothing is sent anywhere. A location farther away than light in fibre gets in the hop'\''s best RTT is marked with !]' \
 '--geo[Show where each hop is (Location and Dist columns), from a local geolocation database\: nothing is sent anywhere. A location farther away than light in fibre gets in the hop'\''s best RTT is marked with !]' \
-'-e[Show the MPLS labels routers report (RFC 4950) under their hop]' \
-'--mpls[Show the MPLS labels routers report (RFC 4950) under their hop]' \
+'-e[Show the MPLS labels (RFC 4950) and interfaces (RFC 5837) routers report, under their hop]' \
+'--mpls[Show the MPLS labels (RFC 4950) and interfaces (RFC 5837) routers report, under their hop]' \
 '--pmtu[Find the path MTU and where it narrows\: each round one more probe, as large as the path seems to allow, with Don'\''t Fragment set]' \
 '--show-all[Display all available columns]' \
 '--simulate[Show fake data instead of probing (for demos and testing); marked SIMULATED]' \

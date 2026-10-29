@@ -13,7 +13,7 @@
 
 use crate::args::{Args, Flows, ProbeProtocol};
 use crate::asn::AsInfo;
-use crate::icmp_ext::MplsLabel;
+use crate::icmp_ext::{Interface, MplsLabel};
 use crate::privacy::{self, StandIns};
 use crate::probe::{IcmpResponseType, ProbeResponse, MAX_FLOWS};
 use crate::session::MtrSession;
@@ -93,6 +93,8 @@ pub enum Event {
         reply_ttl: Option<u8>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mpls: Vec<MplsLabel>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        interfaces: Vec<Interface>,
     },
     Timeout {
         hop: u8,
@@ -232,6 +234,7 @@ impl Recorder {
             IcmpResponseType::Timeout => return self.timeout(response.hop, probe),
             IcmpResponseType::TooBig { .. } => return,
         };
+        let hidden = hop <= usize::from(self.privacy_hops);
         self.write(Event::Reply {
             hop: hop as u8,
             probe,
@@ -240,6 +243,11 @@ impl Recorder {
             rtt_ms: response.rtt.as_nanos() as f64 / 1e6,
             reply_ttl: response.reply_ttl,
             mpls: response.mpls.clone(),
+            // Their names and addresses would give the hop away
+            interfaces: match hidden {
+                true => Vec::new(),
+                false => response.interfaces.clone(),
+            },
         });
     }
 
@@ -410,6 +418,7 @@ mod tests {
             precise_rtt_ns: 5_000_000,
             reply_ttl: Some(62),
             mpls: Vec::new(),
+            interfaces: Vec::new(),
         }
     }
 
@@ -434,6 +443,7 @@ mod tests {
                 rtt_ms: 12.345678,
                 reply_ttl: Some(61),
                 mpls: Vec::new(),
+                interfaces: Vec::new(),
             },
         };
         let text = serde_json::to_string(&line).unwrap();

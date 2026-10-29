@@ -3,7 +3,7 @@
 //! (flows, timeouts, loss) without sockets or privileges.
 
 use crate::geo::{GeoFix, GeoSource};
-use crate::icmp_ext::MplsLabel;
+use crate::icmp_ext::{Interface, MplsLabel, Role};
 use crate::probe::{IcmpResponseType, Prober, Reply};
 use std::{
     io,
@@ -25,6 +25,9 @@ struct SimHop {
     loss: f64,
     /// MPLS label the router reports, inside a tunnel
     mpls: Option<u32>,
+    /// Name and address of the interface probes come in on, if the router says
+    /// (RFC 5837)
+    interface: Option<(&'static str, [u8; 4])>,
     /// Routers more on the way back than on the way there
     detour: u8,
 }
@@ -37,6 +40,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 1.8,
         loss: 0.0,
         mpls: None,
+        interface: None,
         detour: 0,
     },
     SimHop {
@@ -44,6 +48,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 8.5,
         loss: 0.0,
         mpls: None,
+        interface: None,
         detour: 0,
     },
     SimHop {
@@ -51,6 +56,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 10.2,
         loss: 0.05,
         mpls: None,
+        interface: None,
         detour: 0,
     },
     SimHop {
@@ -61,6 +67,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 12.0,
         loss: 0.0,
         mpls: Some(24005),
+        interface: None,
         detour: 0,
     },
     SimHop {
@@ -72,6 +79,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 13.5,
         loss: 0.0,
         mpls: Some(24017),
+        interface: None,
         detour: 0,
     },
     // Rate-limits ICMP to zero, as many backbone routers do
@@ -80,6 +88,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 0.0,
         loss: 1.0,
         mpls: None,
+        interface: None,
         detour: 0,
     },
     // Answers come back through another transit network, two routers longer.
@@ -88,6 +97,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 21.0,
         loss: 0.01,
         mpls: None,
+        interface: Some(("et-0/0/2.100", [203, 0, 113, 6])),
         detour: 2,
     },
     SimHop {
@@ -95,6 +105,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 23.5,
         loss: 0.0,
         mpls: None,
+        interface: None,
         detour: 2,
     },
 ];
@@ -213,6 +224,7 @@ impl Prober for SimProber {
                 PATH[0].rtt_ms,
                 255,
                 None,
+                Vec::new(),
             )),
             Some(hop) if hop.routers.is_empty() || rand::random::<f64>() < hop.loss => None,
             Some(hop) => {
@@ -223,12 +235,20 @@ impl Prober for SimProber {
                     bottom: true,
                     ttl: 1,
                 });
+                let interface = hop.interface.map(|(name, addr)| Interface {
+                    role: Role::Incoming,
+                    index: Some(531),
+                    addr: Some(IpAddr::from(addr)),
+                    name: Some(name.to_string()),
+                    mtu: Some(9192),
+                });
                 Some((
                     IcmpResponseType::TimeExceeded,
                     IpAddr::from(addr),
                     hop.rtt_ms,
                     255 - (ttl - 1) - hop.detour,
                     mpls,
+                    interface.into_iter().collect(),
                 ))
             }
             None => Some((
@@ -237,10 +257,11 @@ impl Prober for SimProber {
                 TARGET_RTT_MS,
                 64 - PATH.len() as u8 - PATH[PATH.len() - 1].detour,
                 None,
+                Vec::new(),
             )),
         };
 
-        if let Some((kind, source, rtt_ms, reply_ttl, mpls)) = reply {
+        if let Some((kind, source, rtt_ms, reply_ttl, mpls, interfaces)) = reply {
             // Up to 15% jitter, and now and then a spike to three times the RTT
             let factor = if rand::random::<f64>() < 0.02 {
                 3.0
@@ -255,6 +276,7 @@ impl Prober for SimProber {
                 received_at: sent_at + rtt,
                 ttl: Some(reply_ttl),
                 mpls: mpls.into_iter().collect(),
+                interfaces,
             };
             let tx = self.tx.clone();
             tokio::spawn(async move {

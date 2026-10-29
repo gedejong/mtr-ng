@@ -197,7 +197,8 @@ pub struct Args {
     #[arg(long, value_name = "LAT,LON", value_parser = coordinates, allow_hyphen_values = true)]
     pub origin: Option<(f64, f64)>,
 
-    /// Show the MPLS labels routers report (RFC 4950) under their hop
+    /// Show the MPLS labels (RFC 4950) and interfaces (RFC 5837) routers report,
+    /// under their hop
     #[arg(short = 'e', long)]
     pub mpls: bool,
 

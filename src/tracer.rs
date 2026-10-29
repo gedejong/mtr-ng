@@ -147,6 +147,7 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                     precise_rtt_ns: rtt.as_nanos(),
                     reply_ttl: reply.ttl,
                     mpls: reply.mpls,
+                    interfaces: reply.interfaces,
                 };
                 let (name, asn, resolver) = {
                     let mut s = session.lock().unwrap();
@@ -340,6 +341,7 @@ fn expire(session: &Shared, in_flight: &mut HashMap<u16, InFlight>, timeout: Dur
                 precise_rtt_ns: 0,
                 reply_ttl: None,
                 mpls: Vec::new(),
+                interfaces: Vec::new(),
             });
         }
     }
@@ -480,6 +482,7 @@ mod tests {
                     received_at: sent_at + Duration::from_millis(u64::from(hops)),
                     ttl: Some(64 - hops),
                     mpls: mpls.into_iter().collect(),
+                    interfaces: Vec::new(),
                 });
             }
             Ok((seq, sent_at))

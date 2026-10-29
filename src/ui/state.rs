@@ -94,7 +94,7 @@ pub struct UiState {
     pub colors: ColorSupport,
     pub visualization: VisualizationMode,
     pub show_hostnames: bool,
-    /// MPLS labels on rows of their own under the hop (`-e`)
+    /// MPLS labels and interfaces on rows of their own under the hop (`-e`)
     pub show_mpls: bool,
     /// Selected row and scroll offset of the hop table or flow matrix.
     pub table: TableState,

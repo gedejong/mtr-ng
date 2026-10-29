@@ -187,6 +187,13 @@ add_namespaces() {
             nsysctl "$ns" net.ipv4.fib_multipath_hash_fields=0x003f \
                 net.ipv6.fib_multipath_hash_fields=0x003f
         fi
+        # Name the incoming interface in ICMP errors (RFC 5837), which -e
+        # shows. Kernels from late 2025 on can; older ones, such as Docker
+        # Desktop's 6.12, lack the setting.
+        if ip netns exec "$ns" test -e /proc/sys/net/ipv4/icmp_errors_extension_mask; then
+            nsysctl "$ns" net.ipv4.icmp_errors_extension_mask=1 \
+                net.ipv6.icmp.errors_extension_mask=1
+        fi
     done
 }
 

@@ -1,6 +1,7 @@
 use crate::args::{Flows, ProbeProtocol};
 use crate::asn::AsInfo;
 use crate::geo::{self, GeoFix, GeoSource, Inflation, Origin};
+use crate::icmp_ext::Extensions;
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::privacy::StandIns;
@@ -429,7 +430,11 @@ impl MtrSession {
             // Only path MTU probes are large enough; the tracer hands these on.
             IcmpResponseType::TooBig { .. } => return true,
         }
-        self.hops[index].record_reply_details(addr, response.reply_ttl, &response.mpls);
+        let ext = Extensions {
+            mpls: response.mpls.clone(),
+            interfaces: response.interfaces.clone(),
+        };
+        self.hops[index].record_reply_details(addr, response.reply_ttl, ext);
         if self.is_hidden(index + 1) {
             return true;
         }
@@ -602,6 +607,7 @@ impl MtrSession {
                 rtt_ms,
                 reply_ttl,
                 mpls,
+                interfaces,
             } => {
                 let Some(index) = index(hop) else { return };
                 // A negative or absurd RTT becomes 0
@@ -619,6 +625,7 @@ impl MtrSession {
                     precise_rtt_ns: rtt.as_nanos(),
                     reply_ttl,
                     mpls,
+                    interfaces,
                 });
             }
             Event::Timeout { hop, probe } => {
@@ -785,6 +792,7 @@ mod tests {
             precise_rtt_ns: 10_000_000,
             reply_ttl: None,
             mpls: Vec::new(),
+            interfaces: Vec::new(),
         }
     }
 

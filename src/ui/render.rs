@@ -12,7 +12,7 @@ use crate::args::{Column, ProbeProtocol};
 use crate::columns::{self, format_ms};
 use crate::geo::{self, Origin};
 use crate::hop_stats::ResponderStats;
-use crate::icmp_ext::MplsLabel;
+use crate::icmp_ext::{Interface, MplsLabel};
 use crate::privacy;
 use crate::topology;
 use crate::utils::network::truncate_hostname;
@@ -194,8 +194,8 @@ enum RowKind<'a> {
     Hop,
     /// One more address that answered for the hop
     Alternate(&'a ResponderStats),
-    /// A line about the hop or alternate above it: an MPLS label (`-e`), or where
-    /// the path MTU drops (`--pmtu`)
+    /// A line about the hop or alternate above it: an MPLS label or interface
+    /// (`-e`), or where the path MTU drops (`--pmtu`)
     Note,
 }
 
@@ -219,7 +219,7 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
             kind: RowKind::Hop,
         });
         if ui.show_mpls {
-            rows.extend(mpls_rows(hop, hop.mpls()));
+            rows.extend(extension_rows(hop, hop.mpls(), hop.interfaces()));
         }
         for alt in hop.get_alternate_paths() {
             let host = format!(
@@ -233,7 +233,7 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
                 kind: RowKind::Alternate(alt),
             });
             if ui.show_mpls {
-                rows.extend(mpls_rows(hop, &alt.mpls));
+                rows.extend(extension_rows(hop, &alt.mpls, &alt.interfaces));
             }
         }
         rows.extend(
@@ -250,13 +250,18 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
     rows
 }
 
-/// A row per label, under the hop or alternate that reported them.
-fn mpls_rows<'a>(hop: &'a HopStats, labels: &[MplsLabel]) -> Vec<HostRow<'a>> {
+/// A row per label and interface, under the hop or alternate that reported them.
+fn extension_rows<'a>(
+    hop: &'a HopStats,
+    labels: &[MplsLabel],
+    interfaces: &[Interface],
+) -> Vec<HostRow<'a>> {
+    let labels = labels.iter().map(ToString::to_string);
     labels
-        .iter()
-        .map(|label| HostRow {
+        .chain(interfaces.iter().map(ToString::to_string))
+        .map(|text| HostRow {
             hop,
-            host: format!("  {label}"),
+            host: format!("  {text}"),
             kind: RowKind::Note,
         })
         .collect()
@@ -756,6 +761,24 @@ fn detail_lines(
                 lines.push(Line::from(vec![
                     letter_span(letter, ui.colors),
                     Span::raw(format!("  {label}")),
+                ]));
+            }
+        }
+    }
+
+    let named: Vec<_> = letters
+        .iter()
+        .map(|&(letter, addr)| (letter, &hop.responders[&addr]))
+        .filter(|(_, r)| !r.interfaces.is_empty())
+        .collect();
+    if !named.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("Interfaces (RFC 5837)", bold));
+        for (letter, responder) in named {
+            for interface in &responder.interfaces {
+                lines.push(Line::from(vec![
+                    letter_span(letter, ui.colors),
+                    Span::raw(format!("  {interface}")),
                 ]));
             }
         }
@@ -1269,7 +1292,11 @@ mod tests {
             bottom: true,
             ttl: 1,
         };
-        hop.record_reply_details(other, Some(252), &[label]);
+        hop.record_reply_details(
+            other,
+            Some(252),
+            crate::icmp_ext::Extensions::mpls_only(label),
+        );
         s
     }
 

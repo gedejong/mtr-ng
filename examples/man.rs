@@ -49,7 +49,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ),
     (
         "mtr-ng -r -e example.com",
-        "Show MPLS labels under their hop.",
+        "Show MPLS labels and the interfaces routers name (RFC 5837) under their hop.",
     ),
     (
         "mtr-ng --record trace.ndjson example.com",

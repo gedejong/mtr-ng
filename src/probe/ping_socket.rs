@@ -144,6 +144,7 @@ impl Message<'_> {
             probe: echo_fields(echo),
             ttl: self.ttl,
             mpls: Vec::new(),
+            interfaces: Vec::new(),
         })
     }
 }
