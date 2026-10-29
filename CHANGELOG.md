@@ -2,18 +2,34 @@
 
 Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/mtr-ng/releases).
 
-## Unreleased
+## 0.5.0 - 2026-10-29
 
-- Windows can probe: without administrator rights, through Windows' ICMP API, as `tracert` does. ICMP only, over IPv4 and IPv6; the API builds the packets itself, so `--flows`, `-P udp`, `--pmtu` and MPLS labels don't work there. Tested over loopback only, so there's no Windows download yet.
+IPv6, UDP probes, and less need for sudo on Linux. `--flows auto` finds every branch of the load balancers on the path, and `--pmtu` finds the path MTU, where it narrows, and where its black holes are.
+
+### Load balancers
+
 - `--flows auto` finds every branch of the load balancers on the path, then follows one flow per branch (MDA-Lite). Each round sends a new flow until every hop has answered enough flows to be 95% sure that no branch was missed: 6 flows where one address answered, 11 where two did. Then the fewest flows that together pass every address take turns, so each branch keeps its own loss and RTT, and every ten minutes the search starts over. A note under each balanced hop says how many branches it has; a report without `-c` runs until the search is done and ends with what it found, including where branches cross, which can hide one.
-- IPv6. A name with both kinds of address is traced over IPv6 when this machine has an IPv6 route, else over IPv4; `-4` and `-6` choose. MPLS labels and stable flows work over IPv6 too.
 - `-P udp` sends UDP datagrams to port 33434 and up, one port per flow. Load balancers spread UDP by port far more often than they spread ICMP, so `--flows` over UDP shows paths that ICMP doesn't. It needs no sudo on macOS, and root or `CAP_NET_RAW` on Linux.
-- On Linux, ICMP no longer needs root or `CAP_NET_RAW` where `net.ipv4.ping_group_range` allows ping sockets, as it does by default on systemd 243 and newer. Ping sockets don't pass on MPLS labels.
 - IPv6 probes carry a flow label per flow, which is what Linux and many routers hash IPv6 on.
+
+### IPv6 and the way back
+
+- IPv6. A name with both kinds of address is traced over IPv6 when this machine has an IPv6 route, else over IPv4; `-4` and `-6` choose. MPLS labels and stable flows work over IPv6 too.
 - The Back column (`--fields hop,host,back,loss,avg`) counts the routers a reply crossed on its way back, from the TTL it arrived with, and shows `+2` when that is two more than the probe crossed on the way there: the reply came back another way. It works for IPv6 replies too, whose hop limit is now read on every socket kind.
+
+### Path MTU
+
 - `--pmtu` finds the path MTU and the hop where it narrows: each round one more probe, as large as the path seems to allow, with Don't Fragment set. Routers that can't forward it say how much their next link takes; when large probes vanish without a word, a black hole, the size is found by halving, and then the hop past which they vanish, by sending probes of that size to nearer hops.
-- A trace in which no hop answers says so, in the table and as a warning after a report, instead of showing an empty table. UDP probes to the machine itself are the common case: checksum offload leaves their checksums unfinished.
+
+### Privileges and platforms
+
+- On Linux, ICMP no longer needs root or `CAP_NET_RAW` where `net.ipv4.ping_group_range` allows ping sockets, as it does by default on systemd 243 and newer. Ping sockets don't pass on MPLS labels.
 - On Linux, the `.deb` gives mtr-ng `CAP_NET_RAW` on install, so UDP probes and MPLS labels work without sudo (with `libcap2-bin`, which it recommends). mtr-ng opens its raw sockets first and then gives up the capability, setuid root, and as root every capability but reading files, before it resolves the target or reads a packet.
+- Windows can probe: without administrator rights, through Windows' ICMP API, as `tracert` does. ICMP only, over IPv4 and IPv6; the API builds the packets itself, so `--flows`, `-P udp`, `--pmtu` and MPLS labels don't work there. Tested over loopback only, so there's no Windows download yet.
+
+### Smaller things
+
+- A trace in which no hop answers says so, in the table and as a warning after a report, instead of showing an empty table. UDP probes to the machine itself are the common case: checksum offload leaves their checksums unfinished.
 - The man page's privileges section and bug link were out of date.
 
 ## 0.4.0 - 2026-10-28
