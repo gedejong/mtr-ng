@@ -45,6 +45,7 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 ### Interface Modes
 - **Interactive UI**: Real-time terminal interface with keyboard controls
 - **Report Mode**: Clean output for automation and scripting
+- **Prometheus exporter**: `--metrics PORT` serves per-hop loss and RTT for Prometheus to scrape, alongside the TUI or, with `-r`, until stopped
 - **Colour Depth**: Detected from `COLORTERM`/`TERM` (none, 16, 256 or true colour); `c` cycles through them
 
 ### Performance & Compatibility
@@ -185,6 +186,10 @@ mtr-ng -r -g --origin 52.37,4.89 google.com
 
 # A report to share: hops 1 and 2 are hidden and never looked up
 mtr-ng -r --privacy-hops 2 google.com
+
+# Trace until stopped, for Prometheus to scrape at http://127.0.0.1:9819/metrics;
+# Ctrl-C prints the report
+mtr-ng -r -n --metrics 9819 google.com
 ```
 
 ## Advanced Features
@@ -208,9 +213,27 @@ In `--json` each hub carries a `geo` object (city, country, lat, lon, accuracy_k
 Router names are often better evidence. Large networks name their routers after the city they stand in, each in codes of its own: Arelion's `adm` is Amsterdam, `win` Vienna and `san` San Antonio, while to Cogent, which uses airport codes, `san` is San Diego. mtr-ng carries the codes of Arelion, Cogent, Hurricane Electric and Lumen, taken from the router lists in their looking glasses (and, for Cogent's other sites, OurAirports' list of large airports). When a hop's name has one, that city goes before the database, unless the RTT rules it out and not the database's location; the hop details say `adm in its name`. The names come from reverse DNS, so `-n` turns this off.
 
 ### Privacy
-What mtr-ng sends, apart from the probes themselves: the target's name and, unless `-n`, the name of every address that answers go to this machine's resolver; with `-z`, every public address that answers goes to Team Cymru's DNS service. Locations are looked up in a local database, and private addresses are never looked up anywhere. `a` in the TUI lists this for the running trace, with the data sources and their licences.
+What mtr-ng sends, apart from the probes themselves: the target's name and, unless `-n`, the name of every address that answers go to this machine's resolver; with `-z`, every public address that answers goes to Team Cymru's DNS service. Locations are looked up in a local database, and private addresses are never looked up anywhere. With `--metrics`, anyone who can reach its address can read the trace. `a` in the TUI lists this for the running trace, with the data sources and their licences.
 
 `--privacy-hops N` hides the first N hops, usually your own network and your provider's first routers, in the TUI and in every report format: their addresses, names, ASes and locations show as `(hidden)` or not at all, the local host name in the report header too, and they are never looked up. Load-balanced branches among them stay apart, as `A (hidden)` and `B (hidden)` in the flow matrix.
+
+### Prometheus
+`--metrics [ADDR:]PORT` serves the trace at `http://ADDR:PORT/metrics` for as long as it runs, as OpenMetrics to scrapers that ask for it, Prometheus among them, and in the older Prometheus text format to the rest. A bare port listens on 127.0.0.1; `0.0.0.0:9819` or `[::]:9819` opens it to the network, and with it the trace. With `-r` and no `-c` mtr-ng runs until Ctrl-C or SIGTERM and then prints the report, which suits a systemd service; without `-r` the TUI runs as usual and serves alongside. Hops hidden by `--privacy-hops` stay hidden here.
+
+| Metric | Type | Labels besides `target` |
+|---|---|---|
+| `mtr_ng_trace_info` | info | `target_addr`, `protocol`, `version` |
+| `mtr_ng_rounds_total` | counter | |
+| `mtr_ng_path_hops`, `mtr_ng_target_reached` | gauge | |
+| `mtr_ng_path_mtu_bytes` | gauge, with `--pmtu` | |
+| `mtr_ng_hop_sent_total`, `_received_total`, `_lost_total` | counter | `hop` |
+| `mtr_ng_hop_loss_ratio` | gauge, in-flight probes left out | `hop` |
+| `mtr_ng_hop_rtt_seconds` | summary: quantiles 0.5, 0.9 and 0.99 over the last 600 probes, sum and count over all | `hop` |
+| `mtr_ng_hop_last_rtt_seconds`, `_best_`, `_worst_`, `mtr_ng_hop_rtt_stddev_seconds`, `mtr_ng_hop_jitter_seconds` | gauge | `hop` |
+| `mtr_ng_hop_responder_info` | info | `hop`, `addr`, and `host`, `asn`, `prefix`, `as_name` when known |
+| `mtr_ng_hop_responder_replies_total` | counter | `hop`, `addr` |
+
+Counters let Prometheus work out any window: the loss at hop 5 over the last five minutes is `rate(mtr_ng_hop_lost_total{hop="5"}[5m]) / (rate(mtr_ng_hop_lost_total{hop="5"}[5m]) + rate(mtr_ng_hop_received_total{hop="5"}[5m]))`, and its mean RTT `rate(mtr_ng_hop_rtt_seconds_sum[5m]) / rate(mtr_ng_hop_rtt_seconds_count[5m])`. A route change shows as a new address in `mtr_ng_hop_responder_replies_total`.
 
 ### Simulation Mode
 `--simulate` answers probes from a made-up path instead of the network, through the same probing loop as real probes, and marks the screen SIMULATED. The path has a load-balanced pair of routers inside an MPLS tunnel, a router that never answers, some loss and the odd latency spike. Its addresses come from the documentation ranges and its names end in `.example`. It comes with made-up locations, including one the light-speed check rules out, so `-g` and the map work without a database.

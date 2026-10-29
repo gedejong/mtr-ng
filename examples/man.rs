@@ -52,6 +52,10 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Show MPLS labels under their hop.",
     ),
     (
+        "mtr-ng -r -n --metrics 9819 example.com",
+        "Trace until stopped, for Prometheus to scrape at http://127.0.0.1:9819/metrics. See METRICS.",
+    ),
+    (
         "mtr-ng -r -c 30 --pmtu example.com",
         "Find the path MTU and the hop where it narrows.",
     ),
@@ -82,8 +86,20 @@ the name of every address that answers to this machine's resolver, and with -z e
 address that answers to Team Cymru's DNS service. Locations come from a local database. \
 Private addresses are never looked up anywhere. --privacy-hops N hides the first N hops in \
 the TUI and every report format, with the local host name, and never looks them up; branches \
-among them stay apart. The a key lists what the running trace sends, and the data sources \
-with their licences.";
+among them stay apart, and they are hidden from --metrics too. With --metrics, anyone who can \
+reach its address can read the trace. The a key lists what the running trace sends, and the \
+data sources with their licences.";
+
+const METRICS: &str = "--metrics [ADDR:]PORT serves the trace at http://ADDR:PORT/metrics while \
+it runs, in OpenMetrics to scrapers that ask for it, as Prometheus does, and in the Prometheus \
+text format to the rest. A bare port listens on 127.0.0.1. With --report and no --count, mtr-ng \
+runs until stopped by Ctrl-C or SIGTERM, then prints the report. Per hop there are counters of \
+probes sent, received and lost (mtr_ng_hop_sent_total and so on), the loss ratio, a summary of \
+the round-trip times (mtr_ng_hop_rtt_seconds, with quantiles over the last 600 probes and sum \
+and count over all), the last, best and worst RTT, its standard deviation and jitter, and per \
+address that answered an info metric with its name and AS (mtr_ng_hop_responder_info) and a \
+counter of its replies. Every sample is labelled with the target. Ports below 1024 need \
+privileges mtr-ng has given up by then.";
 
 const PRIVILEGES: &str = "On macOS mtr-ng needs no privileges: it reads the routers' answers \
 with an unprivileged ICMP socket, for ICMP and UDP probes alike. On Linux, ICMP works without \
@@ -191,6 +207,7 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
         writeln!(out, ".PP\n{}", roff(paragraph))?;
     }
 
+    writeln!(out, ".SH METRICS\n{}", roff(METRICS))?;
     writeln!(out, ".SH PRIVACY\n{}", roff(PRIVACY))?;
     writeln!(out, ".SH PRIVILEGES\n{}", roff(PRIVILEGES))?;
     writeln!(

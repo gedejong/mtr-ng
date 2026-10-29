@@ -7,7 +7,7 @@ use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::privacy::{self, show};
 use crate::utils::network;
-use crate::{topology, tracer, HopStats, MtrSession, Result};
+use crate::{metrics, topology, tracer, HopStats, MtrSession, Result};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -477,11 +477,45 @@ fn geojson(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Value {
     json!({"type": "FeatureCollection", "features": features})
 }
 
+/// Ctrl-C, or on Unix SIGTERM. Never, if they can't be caught.
+async fn stopped() {
+    let ctrl_c = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                () = ctrl_c => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    ctrl_c.await;
+}
+
 pub async fn run_report(mut session: MtrSession) -> Result<()> {
     let start = chrono::Utc::now();
     let prober = session.open_probe_engine()?;
+    let listener = match session.args.metrics {
+        Some(addr) => Some(metrics::bind(addr).await?),
+        None => None,
+    };
     let shared = Arc::new(Mutex::new(session));
-    tracer::run(Arc::clone(&shared), prober).await?;
+    let server =
+        listener.map(|listener| tokio::spawn(metrics::serve(listener, Arc::clone(&shared))));
+    // Stopped early, the report shows what there is
+    tokio::select! {
+        result = tracer::run(Arc::clone(&shared), prober) => result?,
+        () = stopped() => {}
+    }
+    if let Some(server) = server {
+        server.abort();
+    }
     session = shared.lock().unwrap().clone();
     session.redact();
     if let Some(why) = session.silence() {

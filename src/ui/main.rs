@@ -8,7 +8,7 @@ use super::events::{action_for, apply, Effect};
 use super::render::render;
 use super::state::UiState;
 use crate::probe::Prober;
-use crate::{tracer, MtrSession, Result};
+use crate::{metrics, tracer, MtrSession, Result};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use std::{
@@ -20,6 +20,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
+    net::TcpListener,
     sync::{mpsc, Notify},
     time::MissedTickBehavior,
 };
@@ -34,10 +35,14 @@ const INPUT_POLL: Duration = Duration::from_millis(100);
 pub async fn run_interactive(mut session: MtrSession) -> Result<()> {
     // Open sockets before touching the terminal so failures print normally.
     let prober = session.open_probe_engine()?;
+    let listener = match session.args.metrics {
+        Some(addr) => Some(metrics::bind(addr).await?),
+        None => None,
+    };
 
     // try_init installs a panic hook that restores the terminal before unwinding.
     let mut terminal = ratatui::try_init()?;
-    let result = run_event_loop(&mut terminal, session, prober).await;
+    let result = run_event_loop(&mut terminal, session, prober, listener).await;
     ratatui::restore();
     result
 }
@@ -99,6 +104,7 @@ async fn run_event_loop(
     terminal: &mut DefaultTerminal,
     mut session: MtrSession,
     prober: Box<dyn Prober>,
+    listener: Option<TcpListener>,
 ) -> Result<()> {
     let mut ui = UiState::new(&session.args);
     let updated = Arc::new(Notify::new());
@@ -107,6 +113,8 @@ async fn run_event_loop(
     let session = Arc::new(Mutex::new(session));
 
     let mut trace = tokio::spawn(tracer::run(Arc::clone(&session), prober));
+    let server =
+        listener.map(|listener| tokio::spawn(metrics::serve(listener, Arc::clone(&session))));
     let mut tracing = true;
 
     let (tx, mut events) = mpsc::unbounded_channel();
@@ -159,5 +167,8 @@ async fn run_event_loop(
     };
 
     trace.abort();
+    if let Some(server) = server {
+        server.abort();
+    }
     result
 }

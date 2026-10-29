@@ -1131,13 +1131,18 @@ fn about_lines(session: &MtrSession, width: usize) -> Vec<Line<'static>> {
         false => "AS lookups: none (-z sends public addresses to Team Cymru).".to_string(),
     });
     sent.push("Locations: nothing, the database is on this machine.".to_string());
+    if let Some(addr) = args.metrics {
+        sent.push(format!(
+            "Metrics: anyone who can reach http://{addr}/metrics can read this trace (--metrics)."
+        ));
+    }
     if args.privacy_hops > 0 {
         let hops = match args.privacy_hops {
             1 => "Hop 1 is".to_string(),
             n => format!("Hops 1-{n} are"),
         };
         sent.push(format!(
-            "{hops} never looked up, and hidden here and in reports (--privacy-hops)."
+            "{hops} never looked up, and hidden here, in reports and in metrics (--privacy-hops)."
         ));
     }
 

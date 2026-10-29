@@ -410,6 +410,11 @@ impl HopStats {
         (self.rtt_m2 / (self.received - 1) as f64).sqrt() / 1e6
     }
 
+    /// All RTTs added up, for the mean over any stretch of time
+    pub fn rtt_sum(&self) -> Duration {
+        Duration::from_nanos(u64::try_from(self.rtt_sum_ns).unwrap_or(u64::MAX))
+    }
+
     /// Probes sent but neither answered nor timed out yet.
     pub fn in_flight(&self) -> usize {
         self.history

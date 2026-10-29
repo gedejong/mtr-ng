@@ -5,6 +5,7 @@ pub mod geo;
 pub mod hop_stats;
 pub mod icmp_ext;
 pub mod mda;
+pub mod metrics;
 pub mod pmtu;
 pub mod privacy;
 pub mod privileges;

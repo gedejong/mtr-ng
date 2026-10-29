@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq)]
@@ -118,7 +119,7 @@ pub struct Args {
     /// Target hostname or IP address
     pub target: String,
 
-    /// Number of rounds to run (default: until quit; 10 in report mode)
+    /// Number of rounds to run (default: until quit; 10 in report mode, unless --metrics)
     #[arg(short, long, value_parser = at_least_one)]
     pub count: Option<usize>,
 
@@ -236,6 +237,12 @@ pub struct Args {
     #[arg(short = 'P', long, value_enum, default_value = "icmp")]
     pub protocol: ProbeProtocol,
 
+    /// Serve the statistics for Prometheus at http://ADDR/metrics while tracing. A
+    /// bare port listens on 127.0.0.1. With --report and no --count, mtr-ng runs
+    /// until stopped, then prints the report
+    #[arg(long, value_name = "[ADDR:]PORT", value_parser = listen_addr)]
+    pub metrics: Option<SocketAddr>,
+
     /// Report mode: print errors only, no warnings
     #[arg(short, long)]
     pub quiet: bool,
@@ -250,6 +257,16 @@ fn at_least_one(s: &str) -> Result<usize, String> {
         Ok(0) => Err("must be at least 1".to_string()),
         Ok(n) => Ok(n),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// `9819` (on 127.0.0.1), `0.0.0.0:9819` or `[::]:9819`
+fn listen_addr(s: &str) -> Result<SocketAddr, String> {
+    match s.parse::<u16>() {
+        Ok(port) => Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+        Err(_) => s
+            .parse()
+            .map_err(|_| "expected PORT or ADDRESS:PORT, such as 9819 or 0.0.0.0:9819".to_string()),
     }
 }
 

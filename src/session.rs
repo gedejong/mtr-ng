@@ -589,6 +589,7 @@ mod tests {
             geoip_mmdb: None,
             origin: None,
             privacy_hops: 0,
+            metrics: None,
             log_file: None,
         };
 
@@ -634,6 +635,7 @@ mod tests {
             geoip_mmdb: None,
             origin: None,
             privacy_hops: 0,
+            metrics: None,
             log_file: None,
         };
 
@@ -899,6 +901,7 @@ mod tests {
             geoip_mmdb: None,
             origin: None,
             privacy_hops: 0,
+            metrics: None,
             log_file: None,
         };
 

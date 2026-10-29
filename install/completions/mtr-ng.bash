@@ -23,7 +23,7 @@ _mtr__ng() {
 
     case "${cmd}" in
         mtr__ng)
-            opts="-c -i -M -4 -6 -r -j -C -n -z -g -e -P -q -h -V --count --interval --max-hops --report --json --csv --dot --mermaid --geojson --numeric --aslookup --geo --geoip-mmdb --privacy-hops --origin --mpls --flows --pmtu --sparkline-scale --ema-alpha --fields --show-all --simulate --protocol --quiet --log-file --help --version"
+            opts="-c -i -M -4 -6 -r -j -C -n -z -g -e -P -q -h -V --count --interval --max-hops --report --json --csv --dot --mermaid --geojson --numeric --aslookup --geo --geoip-mmdb --privacy-hops --origin --mpls --flows --pmtu --sparkline-scale --ema-alpha --fields --show-all --simulate --protocol --metrics --quiet --log-file --help --version"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -87,6 +87,10 @@ _mtr__ng() {
                     ;;
                 -P)
                     COMPREPLY=($(compgen -W "icmp udp tcp" -- "${cur}"))
+                    return 0
+                    ;;
+                --metrics)
+                    COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
                 --log-file)

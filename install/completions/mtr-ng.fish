@@ -1,4 +1,4 @@
-complete -c mtr-ng -s c -l count -d 'Number of rounds to run (default: until quit; 10 in report mode)' -r
+complete -c mtr-ng -s c -l count -d 'Number of rounds to run (default: until quit; 10 in report mode, unless --metrics)' -r
 complete -c mtr-ng -s i -l interval -d 'Time between rounds in milliseconds (at least 100, except with --simulate)' -r
 complete -c mtr-ng -s M -l max-hops -d 'Maximum number of hops (1-255)' -r
 complete -c mtr-ng -l geoip-mmdb -d 'Geolocation database in MaxMind\'s format: DB-IP City Lite or GeoLite2 City. Default: the newest .mmdb in ~/.local/share/mtr-ng, then the usual system places' -r -F
@@ -32,6 +32,7 @@ graph\t'RTT sparkline graph'"
 complete -c mtr-ng -s P -l protocol -d 'Probe protocol (tcp is not implemented yet)' -r -f -a "icmp\t'ICMP Echo (ping) - default and most common'
 udp\t'UDP datagrams to port 33434 and up, one port per flow'
 tcp\t'TCP SYN probes (not implemented yet)'"
+complete -c mtr-ng -l metrics -d 'Serve the statistics for Prometheus at http://ADDR/metrics while tracing. A bare port listens on 127.0.0.1. With --report and no --count, mtr-ng runs until stopped, then prints the report' -r
 complete -c mtr-ng -l log-file -d 'Append debug logs to this file (level can be overridden with RUST_LOG)' -r -F
 complete -c mtr-ng -s 4 -d 'Use IPv4 only'
 complete -c mtr-ng -s 6 -d 'Use IPv6 only'

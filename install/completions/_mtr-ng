@@ -15,8 +15,8 @@ _mtr-ng() {
 
     local context curcontext="$curcontext" state line
     _arguments "${_arguments_options[@]}" : \
-'-c+[Number of rounds to run (default\: until quit; 10 in report mode)]:COUNT:_default' \
-'--count=[Number of rounds to run (default\: until quit; 10 in report mode)]:COUNT:_default' \
+'-c+[Number of rounds to run (default\: until quit; 10 in report mode, unless --metrics)]:COUNT:_default' \
+'--count=[Number of rounds to run (default\: until quit; 10 in report mode, unless --metrics)]:COUNT:_default' \
 '-i+[Time between rounds in milliseconds (at least 100, except with --simulate)]:INTERVAL:_default' \
 '--interval=[Time between rounds in milliseconds (at least 100, except with --simulate)]:INTERVAL:_default' \
 '-M+[Maximum number of hops (1-255)]:MAX_HOPS:_default' \
@@ -54,6 +54,7 @@ tcp\:"TCP SYN probes (not implemented yet)"))' \
 '--protocol=[Probe protocol (tcp is not implemented yet)]:PROTOCOL:((icmp\:"ICMP Echo (ping) - default and most common"
 udp\:"UDP datagrams to port 33434 and up, one port per flow"
 tcp\:"TCP SYN probes (not implemented yet)"))' \
+'--metrics=[Serve the statistics for Prometheus at http\://ADDR/metrics while tracing. A bare port listens on 127.0.0.1. With --report and no --count, mtr-ng runs until stopped, then prints the report]:[ADDR:]PORT:_default' \
 '--log-file=[Append debug logs to this file (level can be overridden with RUST_LOG)]:PATH:_files' \
 '(-6)-4[Use IPv4 only]' \
 '-6[Use IPv6 only]' \

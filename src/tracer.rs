@@ -56,7 +56,10 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
         let s = session.lock().unwrap();
         (s.target_addr, s.args.clone(), s.probe_timeout)
     };
-    let rounds = args.count.or(args.report.then_some(DEFAULT_REPORT_CYCLES));
+    // An exporter (--metrics) runs until stopped, report or not
+    let rounds = args
+        .count
+        .or((args.report && args.metrics.is_none()).then_some(DEFAULT_REPORT_CYCLES));
     // A report without -c waits for --flows auto to find every branch
     let finish_discovery = args.report && args.count.is_none();
     let discovering = || {
