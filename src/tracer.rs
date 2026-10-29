@@ -264,7 +264,7 @@ fn expire_mtu_probes(session: &Shared, in_flight: &mut HashMap<u16, MtuProbe>, t
             .is_some_and(|hop| hop.received > 0);
         debug!("Path MTU probe of {} bytes vanished", probe.size);
         if let (true, Some(pmtu)) = (answers, s.pmtu.as_mut()) {
-            pmtu.lost(probe.size);
+            pmtu.lost(probe.size, probe.ttl);
         }
     }
     s.notify();
@@ -626,5 +626,12 @@ mod tests {
         assert_eq!((pmtu.mtu(), pmtu.black_hole()), (Some(1300), Some(1301)));
         assert!(pmtu.drops.is_empty(), "no router said a word");
         assert_eq!(s.hops[11].loss_percent, 0.0, "small probes unaffected");
+        let hole = pmtu.hole.as_ref().unwrap();
+        assert!(hole.found, "located too");
+        assert_eq!((hole.passed, hole.lost_at), (5, 6), "past hop 5");
+        assert_eq!(
+            s.notes_after(5),
+            ["probes over 1300 bytes vanish past this hop"]
+        );
     }
 }

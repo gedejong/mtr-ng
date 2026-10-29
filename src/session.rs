@@ -179,15 +179,19 @@ impl MtrSession {
     }
 
     /// TTL and size of this round's path MTU probe, if one is due: to the end of
-    /// the path, once the target answered or after a few rounds without it.
-    pub fn mtu_probe(&self, round: usize) -> Option<(u8, u16)> {
-        let size = self.pmtu.as_ref()?.probe_size()?;
+    /// the path, once the target answered or after a few rounds without it, and
+    /// once a black hole is found, to the hops it may be near.
+    pub fn mtu_probe(&mut self, round: usize) -> Option<(u8, u16)> {
         let end_known = self.hops.iter().any(|hop| hop.is_target);
         if !end_known && round < 3 {
             return None;
         }
-        let ttl = u8::try_from(self.display_hop_count()).ok()?;
-        (ttl > 0).then_some((ttl, size))
+        let end = u8::try_from(self.display_hop_count())
+            .ok()
+            .filter(|&ttl| ttl > 0)?;
+        let hops = &self.hops;
+        let answers = |ttl: u8| hops[usize::from(ttl) - 1].received > 0;
+        self.pmtu.as_mut()?.next_probe(end, answers)
     }
 
     /// The hop `addr` answered at, if it answered any.

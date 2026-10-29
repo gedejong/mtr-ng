@@ -22,7 +22,7 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Flow matrix**: `f` shows, per hop, a letter for the address each flow met; `--report` prints the same matrix after the table
 - **Route graph**: `--dot` prints the routes as Graphviz, with silent hops as dashed edges
 - **MPLS labels**: `-e` (or `e` while running) shows the label stacks routers report in ICMP extensions (RFC 4950)
-- **Path MTU**: `--pmtu` finds the largest packet that crosses the path and the hop where it narrows, from the Fragmentation Needed or Packet Too Big a router sends. When large probes vanish without such a message, a black hole for path MTU discovery, it finds the size by halving
+- **Path MTU**: `--pmtu` finds the largest packet that crosses the path and the hop where it narrows, from the Fragmentation Needed or Packet Too Big a router sends. When large probes vanish without such a message, a black hole for path MTU discovery, it finds the size by halving, and then the hop past which they vanish, by sending probes of that size to nearer hops
 - **Hop details**: `Enter` opens every responder of a hop with its share, RTTs, routers on the way back and flows, plus RTT percentiles and a histogram
 - **Return path**: the Back column (`--fields hop,host,back,loss,avg`) counts the routers a reply crossed, from the TTL it arrived with. `9 +2` means two more than the probe crossed on the way there: the reply came back another way
 

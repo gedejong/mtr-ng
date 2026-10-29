@@ -543,6 +543,7 @@ fn json_pmtu(pmtu: &PathMtu) -> Value {
         "start": pmtu.start,
         "mtu": pmtu.mtu(),
         "black_hole": pmtu.black_hole(),
+        "black_hole_after": pmtu.hole.as_ref().filter(|hole| hole.found).map(|hole| hole.passed),
         "trying": pmtu.probe_size(),
         "drops": pmtu.drops.iter().map(|drop| json!({
             "hop": drop.hop,

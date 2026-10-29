@@ -226,7 +226,7 @@ just netlab -- mtr-ng -P udp -r -c 8 -n --flows 8 target  # so do UDP flows, by 
 just netlab --hash-policy 0 -- mtr-ng -r -c 8 -n --flows 8 target6  # and IPv6, by flow label
 just netlab --wide -- mtr-ng -P udp -r -n --flows auto target  # 3 branches at hop 3, 16 flows
 just netlab -- mtr-ng --pmtu -r -c 5 -n target           # MTU 1500 → 1400 past hop 4
-just netlab --black-hole -- mtr-ng --pmtu -i 300 -r -c 150 -n target  # found by halving
+just netlab --black-hole -- mtr-ng --pmtu -i 300 -r -c 150 -n target  # found by halving, past hop 4
 just netlab --shell                                       # shell in the client namespace
 ```
 
