@@ -55,7 +55,9 @@ cargo install --locked --git https://github.com/gedejong/mtr-ng
 - **Linux**: ICMP through a ping socket when the user's group is in `net.ipv4.ping_group_range` (systemd 243 and newer allow every group), without MPLS labels. Raw sockets, needed otherwise and for `-P udp`, take root or the `CAP_NET_RAW` file capability: `sudo setcap cap_net_raw+ep /usr/bin/mtr-ng` (or `scripts/setup-capabilities.sh`). A capability is narrower than setuid root. Reinstalling the binary drops it.
 - **Windows**: not supported yet.
 
-Packagers on Linux can set the capability in a post-install script, as Debian's `mtr` does. The `.deb` doesn't do this yet (BACKLOG X4).
+The `.deb` sets the capability in its post-install script (`packaging/deb/postinst`), as Debian's `mtr` does for `mtr-packet`, and recommends `libcap2-bin` for `setcap`; without it, the script says how to grant the capability and the install still succeeds. Other Linux packages can do the same. A setuid-root install works too.
+
+mtr-ng opens its raw sockets in `main`, before anything else, and then gives up setuid root and every Linux capability (root keeps `CAP_DAC_READ_SEARCH`, to read a database in a private home directory) while it is still the only thread (`src/privileges.rs`).
 
 ## Cutting a release
 

@@ -13,6 +13,7 @@ Rust reimplementation of `mtr` (traceroute + ping) with a ratatui TUI and a `--r
 - `src/report.rs`: `--report` text (golden-tested `format_table`, flow matrix when `--flows` > 1), `--json` (mtr field names, plus `geo`), `--csv`, `--dot` and `--geojson` (RFC 7946, [lon, lat]).
 - `src/columns.rs`: header, chooser label and value of every `Column`, shared by TUI, report and man page. `src/asn.rs`: `-z` lookups via Team Cymru DNS, public addresses only.
 - `src/ui/`: TUI. `main.rs` event loop (input thread, coalesced redraws from a session snapshot), `render.rs` all drawing (table, flow matrix, detail pane, overlays, column layout), `map.rs` the world map view (coastlines in `coastline.bin`, written by `examples/coastline.rs` from Natural Earth), `events.rs` keymap tables (also generate help and man page), `state.rs` modes, views, selection and column chooser, `visualization.rs` RTT scale, sparkline and histogram cells, colours.
+- `src/main.rs` opens the raw sockets (`probe::open_raw_sockets`), then `src/privileges.rs` gives up setuid root and Linux capabilities, and only then does the tokio runtime start. Capabilities belong to each thread, so nothing may start a thread before that.
 - `src/args.rs`: clap CLI plus `validate()` for cross-flag rules. `src/utils.rs`: small formatting helpers.
 - `examples/man.rs` generates `install/mtr-ng.1`; `tests/man_page.rs` fails when it is stale. After changing flags, keys or columns: `cargo run --example man > install/mtr-ng.1`.
 

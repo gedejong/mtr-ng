@@ -95,7 +95,9 @@ sudo cp install/mtr-ng.1 /usr/local/share/man/man1/
   # or, with checks and a test run:
   scripts/setup-capabilities.sh
   ```
-  The capability is narrower than sudo (raw sockets only, not full root). Reinstalling replaces the file and drops it, so set it again afterwards.
+  The capability is narrower than sudo (raw sockets only, not full root). Copying a new binary over the old one drops it, so set it again afterwards. The `.deb` sets it on install, when `setcap` (package `libcap2-bin`) is there.
+
+  However it gets them, mtr-ng opens its raw sockets first and then gives the privileges up before it resolves the target or reads a packet, as mtr's `mtr-packet` does: a capability-holding user ends up with no capabilities, and root keeps only the right to read files.
 - **Windows**: compiles, but probing doesn't work yet.
 
 mtr-ng never falls back to fake data: if it can't probe, it exits with an error. Use `--simulate` for a demo without network access.

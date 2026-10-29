@@ -10,7 +10,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -490,6 +490,27 @@ impl Ours {
     }
 }
 
+/// Raw ICMP and ICMPv6 sockets opened at startup, before privileges were given up
+static RAW_SOCKETS: Mutex<[Option<Socket>; 2]> = Mutex::new([None, None]);
+
+/// Open a raw socket for each family while this process may (as root, with
+/// CAP_NET_RAW or setuid root), so that it can give those privileges up before
+/// doing anything else (see `privileges`). The engine takes them later. Nothing
+/// on macOS, which probes through unprivileged sockets.
+pub fn open_raw_sockets() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let families = [
+        (Domain::IPV4, Protocol::ICMPV4),
+        (Domain::IPV6, Protocol::ICMPV6),
+    ];
+    let mut sockets = RAW_SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
+    for (slot, (domain, protocol)) in sockets.iter_mut().zip(families) {
+        *slot = Socket::new(domain, Type::RAW, Some(protocol)).ok();
+    }
+}
+
 /// Open the ICMP or ICMPv6 socket, and say what kind it is and, for a Linux ping
 /// socket, which identifier the kernel gave it.
 ///
@@ -506,6 +527,10 @@ fn open_icmp_socket(ipv6: bool) -> Result<(Socket, SocketKind, Option<u16>)> {
         if let Ok(socket) = Socket::new(domain, Type::DGRAM, Some(protocol)) {
             return Ok((socket, SocketKind::Datagram, None));
         }
+    }
+    let opened = RAW_SOCKETS.lock().unwrap_or_else(|e| e.into_inner())[usize::from(ipv6)].take();
+    if let Some(socket) = opened {
+        return Ok((socket, SocketKind::Raw, None));
     }
     let raw_error = match Socket::new(domain, Type::RAW, Some(protocol)) {
         Ok(socket) => return Ok((socket, SocketKind::Raw, None)),

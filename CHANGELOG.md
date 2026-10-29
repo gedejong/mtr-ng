@@ -11,6 +11,7 @@ Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/
 - The Back column (`--fields hop,host,back,loss,avg`) counts the routers a reply crossed on its way back, from the TTL it arrived with, and shows `+2` when that is two more than the probe crossed on the way there: the reply came back another way. It works for IPv6 replies too, whose hop limit is now read on every socket kind.
 - `--pmtu` finds the path MTU and the hop where it narrows: each round one more probe, as large as the path seems to allow, with Don't Fragment set. Routers that can't forward it say how much their next link takes; when large probes vanish without a word, a black hole, the size is found by halving.
 - A trace in which no hop answers says so, in the table and as a warning after a report, instead of showing an empty table. UDP probes to the machine itself are the common case: checksum offload leaves their checksums unfinished.
+- On Linux, the `.deb` gives mtr-ng `CAP_NET_RAW` on install, so UDP probes and MPLS labels work without sudo (with `libcap2-bin`, which it recommends). mtr-ng opens its raw sockets first and then gives up the capability, setuid root, and as root every capability but reading files, before it resolves the target or reads a packet.
 - The man page's privileges section and bug link were out of date.
 
 ## 0.4.0 - 2026-10-28

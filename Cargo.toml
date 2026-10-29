@@ -34,6 +34,9 @@ Unicode sparklines, real-time visualization, jitter analysis, and advanced colum
 customization. Perfect for network troubleshooting and monitoring.
 """
 depends = "$auto"
+# setcap, which postinst uses to grant CAP_NET_RAW
+recommends = "libcap2-bin"
+maintainer-scripts = "packaging/deb/"
 section = "net"
 priority = "optional"
 assets = [

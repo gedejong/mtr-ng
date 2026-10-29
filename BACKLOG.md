@@ -203,10 +203,11 @@ These refactors unblock most fixes above and every feature below.
   - **d. Linux unprivileged UDP:** tracepath-style with `IP_RECVERR`, no sysctl needed; a real `-P udp`. *M* *(m6: `-P udp` done wherever an ICMP socket can read the errors: raw sockets, and the datagram ICMP socket on macOS, without sudo. Ports fixed per flow (destination 33434 + flow), the seq in the UDP checksum, Port Unreachable ends the path. Unprivileged on Linux is left out on purpose: a UDP socket's error queue identifies the socket, not the probe, and returns only the quoted payload, which is empty when a router quotes the minimum 8 bytes. Matching would need a socket per probe in flight, which breaks fixed ports, or one probe at a time, as tracepath does. mtr-ng says so and suggests `setcap`. Limit: checksum offload leaves the quoted checksum unfinished on loopback, so UDP to the machine itself goes unmatched.)*
   - **e. Windows unprivileged ICMP:** `IcmpSendEcho2Ex`/`Icmp6SendEcho2` via `windows-sys`, as tracert and WinMTR do. Time it with `Instant` (the API reports whole ms). *M*
   - **f. TCP SYN:** defer. *L*
-- [ ] **X4 Privileges.**
+- [x] **X4 Privileges.**
   - Linux: a deb postinst `setcap`, and drop capabilities after opening sockets (`caps` crate), as Debian's mtr does.
   - FreeBSD: setuid-root with an immediate privilege drop, or document `doas`.
   - Not needed on macOS/Windows once b/e exist. *S-M*
+  - *(m6: `main` is synchronous: it opens a raw socket per family (`probe::open_raw_sockets`, which the engine takes later), gives up setuid root (`setgid`/`setuid` to the real ids), opens the log, and drops every capability with `capset` (no `caps` crate), all before the tokio runtime starts a thread, since capabilities are per thread. Root keeps `CAP_DAC_READ_SEARCH`: without it `sudo mtr-ng --geoip-mmdb ~/x.mmdb` failed on a private home directory. The `.deb` runs `setcap cap_net_raw+ep` in `packaging/deb/postinst`, recommends `libcap2-bin`, and explains itself when `setcap` is missing. Lab: every thread ends with no capabilities for a user with the file capability (UDP works), 0x4 for root, and a setuid-root copy run by a user ends as that user; the `.deb` built with cargo-deb installs with `cap_net_raw=ep`. FreeBSD: the setuid path compiles but is untested; `doas` undocumented.)*
 
 ## Build, CI and distribution
 
@@ -297,4 +298,4 @@ PMTU/black-hole detection and an OpenMetrics exporter are further gaps in trippy
 3. **A UI that can grow.** *(Done, apart from the tail of C8.)* U1-U3, after which B14-B26 mostly fall out. Add F5 and F11 (JSON/CSV) as cheap wins. C3, C4 (cargo-dist), C6-C9.
 4. **Stable flows and multi-route.** *(Done: R3, F1 for ICMP, F2 apart from the DAG and Mermaid, F9 for MPLS, F14, F13 partly; simulation became a `Prober`.)* R3, F1, F2, F9, F14.
 5. **Where is it.** *(Done: F6 with local databases, F7 apart from Stretch, F8, F12 partly; `--simulate` has made-up locations, one of them impossible.)* F12, F6, F7, F8.
-6. **Platforms and depth.** X3a/c/d/e, X4, IPv6, F4, F3, F10, F13. *(In progress: IPv6 (X3a), X3c, X3d, F1 for UDP and IPv6, F13, F10, the netlab namespace lab (`just netlab`). Open: F3, X3e, X4, F4 (see its lab finding).)*
+6. **Platforms and depth.** X3a/c/d/e, X4, IPv6, F4, F3, F10, F13. *(In progress: IPv6 (X3a), X3c, X3d, F1 for UDP and IPv6, F13, F10, X4, the netlab namespace lab (`just netlab`). Open: F3, X3e, F4 (see its lab finding).)*
