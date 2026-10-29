@@ -66,6 +66,15 @@ jobs:
         run: |
           ./target/debug/mtr-ng -r -c 2 -n 127.0.0.1 | tee smoke.txt
           grep -Eq '1\.\|-- +127\.0\.0\.1' smoke.txt
+      - name: Smoke test (Windows, ICMP API)
+        if: runner.os == 'Windows'
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          ./target/debug/mtr-ng.exe -r -c 2 -n 127.0.0.1 | tee smoke.txt
+          grep -Eq '1\.\|-- +127\.0\.0\.1' smoke.txt
+          ./target/debug/mtr-ng.exe -r -c 2 -n ::1 | tee smoke6.txt
+          grep -Eq '1\.\|-- +::1' smoke6.txt
 
   freebsd:
     name: Check (FreeBSD)

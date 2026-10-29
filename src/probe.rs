@@ -19,11 +19,15 @@ use std::{
 use crate::args::ProbeProtocol;
 use crate::icmp_ext::{mpls_labels, mpls_labels_v6, MplsLabel};
 
+#[cfg(windows)]
+mod icmp_api;
 #[cfg(target_os = "linux")]
 mod ping_socket;
 #[cfg(unix)]
 mod recvmsg;
 use anyhow::{anyhow, Result};
+#[cfg(windows)]
+pub use icmp_api::IcmpApi;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc;
 
@@ -496,9 +500,9 @@ static RAW_SOCKETS: Mutex<[Option<Socket>; 2]> = Mutex::new([None, None]);
 /// Open a raw socket for each family while this process may (as root, with
 /// CAP_NET_RAW or setuid root), so that it can give those privileges up before
 /// doing anything else (see `privileges`). The engine takes them later. Nothing
-/// on macOS, which probes through unprivileged sockets.
+/// on macOS and Windows, which probe without raw sockets.
 pub fn open_raw_sockets() {
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", windows)) {
         return;
     }
     let families = [

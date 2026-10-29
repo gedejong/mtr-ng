@@ -71,6 +71,15 @@ maxminddb = { version = "0.32", features = ["mmap"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The ICMP API, which probes without administrator rights
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+] }
+
 [[bin]]
 name = "mtr-ng"
 path = "src/main.rs"

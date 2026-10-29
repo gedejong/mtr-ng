@@ -4,6 +4,7 @@ Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/
 
 ## Unreleased
 
+- Windows can probe: without administrator rights, through Windows' ICMP API, as `tracert` does. ICMP only, over IPv4 and IPv6; the API builds the packets itself, so `--flows`, `-P udp`, `--pmtu` and MPLS labels don't work there. Tested over loopback only, so there's no Windows download yet.
 - `--flows auto` finds every branch of the load balancers on the path, then follows one flow per branch (MDA-Lite). Each round sends a new flow until every hop has answered enough flows to be 95% sure that no branch was missed: 6 flows where one address answered, 11 where two did. Then the fewest flows that together pass every address take turns, so each branch keeps its own loss and RTT, and every ten minutes the search starts over. A note under each balanced hop says how many branches it has; a report without `-c` runs until the search is done and ends with what it found, including where branches cross, which can hide one.
 - IPv6. A name with both kinds of address is traced over IPv6 when this machine has an IPv6 route, else over IPv4; `-4` and `-6` choose. MPLS labels and stable flows work over IPv6 too.
 - `-P udp` sends UDP datagrams to port 33434 and up, one port per flow. Load balancers spread UDP by port far more often than they spread ICMP, so `--flows` over UDP shows paths that ICMP doesn't. It needs no sudo on macOS, and root or `CAP_NET_RAW` on Linux.

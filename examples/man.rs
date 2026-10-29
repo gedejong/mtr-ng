@@ -76,8 +76,10 @@ every group is on systemd 243 and newer, but a ping socket shows no MPLS labels.
 MPLS labels need root or the CAP_NET_RAW capability \
 (setcap cap_net_raw+ep \"$(command -v mtr-ng)\"), which the Debian package grants on \
 install. mtr-ng opens its raw sockets first and then gives up these privileges before it \
-resolves the target or reads a packet; root keeps only the right to read files. Windows is not \
-supported yet, and TCP probes are not implemented yet.";
+resolves the target or reads a packet; root keeps only the right to read files. On Windows \
+mtr-ng needs no administrator either: it sends echo requests through Windows' ICMP API, which \
+builds them itself, so there are no flows, UDP probes, MPLS labels or --pmtu. TCP probes are not \
+implemented yet.";
 
 const BACK: &str = "The back column counts the routers a reply crossed from the TTL it arrived \
 with, assuming it left with the next common initial TTL up (32, 64, 128 or 255). When that differs \

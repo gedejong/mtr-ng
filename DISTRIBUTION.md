@@ -25,7 +25,7 @@ Releases are built by [dist](https://github.com/axodotdev/cargo-dist) from `dist
 
 Targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl` (static, for Alpine). The glibc builds and the `.deb`s are built on Ubuntu 22.04 and need glibc 2.35 or newer.
 
-Windows is not shipped: it compiles but can't probe yet. FreeBSD is type-checked in CI only.
+Windows is not shipped yet: it probes through the ICMP API, but that has been tested only over CI's loopback (BACKLOG X3e). FreeBSD is type-checked in CI only.
 
 The formula is pushed to [gedejong/homebrew-tap](https://github.com/gedejong/homebrew-tap). Publishing to crates.io is paused (BACKLOG C10).
 
@@ -53,7 +53,7 @@ cargo install --locked --git https://github.com/gedejong/mtr-ng
 
 - **macOS**: unprivileged ICMP datagram sockets; no sudo, no setuid.
 - **Linux**: ICMP through a ping socket when the user's group is in `net.ipv4.ping_group_range` (systemd 243 and newer allow every group), without MPLS labels. Raw sockets, needed otherwise and for `-P udp`, take root or the `CAP_NET_RAW` file capability: `sudo setcap cap_net_raw+ep /usr/bin/mtr-ng` (or `scripts/setup-capabilities.sh`). A capability is narrower than setuid root. Reinstalling the binary drops it.
-- **Windows**: not supported yet.
+- **Windows**: the ICMP API (`IcmpSendEcho2Ex`, `Icmp6SendEcho2`), no administrator. ICMP only: no flows, UDP probes, MPLS labels or `--pmtu`.
 
 The `.deb` sets the capability in its post-install script (`packaging/deb/postinst`), as Debian's `mtr` does for `mtr-packet`, and recommends `libcap2-bin` for `setcap`; without it, the script says how to grant the capability and the install still succeeds. Other Linux packages can do the same. A setuid-root install works too.
 

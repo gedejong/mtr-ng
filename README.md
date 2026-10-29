@@ -49,7 +49,7 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 
 ### Performance & Compatibility
 - **Efficient Async**: Built with Tokio for high-performance networking
-- **Platforms**: macOS and Linux, both without sudo for ICMP (see Privileges). Windows builds but can't probe yet; FreeBSD is only type-checked.
+- **Platforms**: macOS and Linux, both without sudo for ICMP (see Privileges). Windows probes without administrator rights too, but has been tested only over loopback and has no release download yet; FreeBSD is only type-checked.
 - **IPv4 and IPv6**: a name with both kinds of address is traced over IPv6 when this machine has an IPv6 route, as a connection would be, else over IPv4; `-4` and `-6` choose. ICMP echo by default, UDP to port 33434 and up with `-P udp`; `-P tcp` exits with an error for now. Reverse DNS for hop names (`-n` turns it off).
 
 ## Installation
@@ -99,7 +99,7 @@ sudo cp install/mtr-ng.1 /usr/local/share/man/man1/
   The capability is narrower than sudo (raw sockets only, not full root). Copying a new binary over the old one drops it, so set it again afterwards. The `.deb` sets it on install, when `setcap` (package `libcap2-bin`) is there.
 
   However it gets them, mtr-ng opens its raw sockets first and then gives the privileges up before it resolves the target or reads a packet, as mtr's `mtr-packet` does: a capability-holding user ends up with no capabilities, and root keeps only the right to read files.
-- **Windows**: compiles, but probing doesn't work yet.
+- **Windows**: runs as a normal user. mtr-ng sends its echo requests through Windows' ICMP API, as `tracert` does, and that API builds the packets itself: on Windows there are no flows (`--flows`), UDP probes, MPLS labels or `--pmtu`. There is no release download yet; build it with `cargo build --release`.
 
 mtr-ng never falls back to fake data: if it can't probe, it exits with an error. Use `--simulate` for a demo without network access.
 

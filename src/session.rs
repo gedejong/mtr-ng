@@ -2,7 +2,7 @@ use crate::args::{Flows, ProbeProtocol};
 use crate::geo::{self, GeoFix, GeoSource, Origin};
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
-use crate::probe::{self, IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
+use crate::probe::{self, IcmpResponseType, ProbeResponse, Prober};
 use crate::simulate::{self, SimProber};
 use crate::{tracer, Args, HopStats, Result};
 use anyhow::{anyhow, bail};
@@ -168,13 +168,20 @@ impl MtrSession {
             };
             bail!("no {family}route to {}", self.target_addr);
         }
-        let engine = ProbeEngine::new(self.target_addr, self.args.protocol)?;
-        if self.args.pmtu {
-            engine.set_dont_fragment()?;
-            let start = probe::interface_mtu(self.target_addr).unwrap_or(1500);
-            info!("Path MTU search starts at {start}, the interface's MTU");
-            self.pmtu = Some(PathMtu::new(start, self.target_addr.is_ipv6()));
-        }
+        // Windows: ICMP only, without --pmtu (see Args::validate)
+        #[cfg(windows)]
+        let engine = probe::IcmpApi::new(self.target_addr);
+        #[cfg(not(windows))]
+        let engine = {
+            let engine = probe::ProbeEngine::new(self.target_addr, self.args.protocol)?;
+            if self.args.pmtu {
+                engine.set_dont_fragment()?;
+                let start = probe::interface_mtu(self.target_addr).unwrap_or(1500);
+                info!("Path MTU search starts at {start}, the interface's MTU");
+                self.pmtu = Some(PathMtu::new(start, self.target_addr.is_ipv6()));
+            }
+            engine
+        };
         Ok(Box::new(engine))
     }
 

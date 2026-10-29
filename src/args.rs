@@ -289,6 +289,29 @@ impl Args {
                 self.interval
             ));
         }
+        #[cfg(windows)]
+        if !self.simulate {
+            // Windows probes through its ICMP API, which builds the packets itself.
+            if self.protocol != ProbeProtocol::Icmp {
+                return Err(
+                    "only ICMP probes work on Windows: UDP and TCP probes need raw \
+                            sockets, which Windows keeps from programs"
+                        .to_string(),
+                );
+            }
+            if self.flows != Flows::Fixed(1) {
+                return Err("--flows doesn't work on Windows: Windows builds each echo \
+                            request itself, so the probes of a flow can't keep one checksum"
+                    .to_string());
+            }
+            if self.pmtu {
+                return Err(
+                    "--pmtu doesn't work on Windows: Windows doesn't pass on the \
+                            MTU a router reports"
+                        .to_string(),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -378,6 +401,26 @@ mod tests {
         assert!(parse(&["mtr-ng", "-i", "50", "x"]).is_err());
         assert!(parse(&["mtr-ng", "-i", "100", "x"]).is_ok());
         assert!(parse(&["mtr-ng", "-i", "10", "--simulate", "x"]).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_what_its_icmp_api_cannot_do() {
+        let parse = |argv: &[&str]| Args::try_parse_from(argv).unwrap().validate();
+        for flags in [
+            &["-P", "udp"][..],
+            &["--flows", "4"],
+            &["--flows", "auto"],
+            &["--pmtu"],
+        ] {
+            let argv = [&["mtr-ng"][..], flags, &["x"]].concat();
+            assert!(parse(&argv).is_err(), "{flags:?} accepted");
+            let simulated = [&["mtr-ng", "--simulate"][..], flags, &["x"]].concat();
+            assert!(
+                parse(&simulated).is_ok(),
+                "{flags:?} refused with --simulate"
+            );
+        }
     }
 
     #[test]
