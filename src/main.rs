@@ -1,8 +1,8 @@
 use anyhow::{bail, Context};
 use clap::{CommandFactory, Parser};
 use mtr_ng::{
-    args::ProbeProtocol, privileges, probe, report::run_report, ui::run_interactive, Args,
-    MtrSession, Result,
+    args::ProbeProtocol, privileges, probe, record::Replay, report::run_report,
+    ui::run_interactive, Args, MtrSession, Result,
 };
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -17,7 +17,7 @@ fn main() -> Result<()> {
             .error(clap::error::ErrorKind::ValueValidation, message)
             .exit();
     }
-    if !args.simulate {
+    if !args.simulate && args.replay.is_none() {
         probe::open_raw_sockets();
     }
     privileges::give_up_setuid()?;
@@ -38,12 +38,19 @@ async fn run(args: Args) -> Result<()> {
         bail!("--protocol tcp is not implemented yet; use icmp or udp");
     }
 
-    let session = MtrSession::new(args).await?;
+    let replay = match &args.replay {
+        Some(path) => Some(Replay::open(path).await?),
+        None => None,
+    };
+    let session = match &replay {
+        Some(replay) => replay.session(args).await?,
+        None => MtrSession::new(args).await?,
+    };
 
     if session.args.report {
-        run_report(session).await
+        run_report(session, replay).await
     } else {
-        run_interactive(session).await
+        run_interactive(session, replay).await
     }
 }
 

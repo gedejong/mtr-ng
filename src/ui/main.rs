@@ -7,8 +7,9 @@
 use super::events::{action_for, apply, Effect};
 use super::render::render;
 use super::state::UiState;
-use crate::probe::Prober;
-use crate::{metrics, tracer, MtrSession, Result};
+use crate::record::Replay;
+use crate::tracer::Trace;
+use crate::{metrics, MtrSession, Result};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use std::{
@@ -32,9 +33,9 @@ const FRAME: Duration = Duration::from_millis(50);
 /// How often the input thread checks whether it should stop.
 const INPUT_POLL: Duration = Duration::from_millis(100);
 
-pub async fn run_interactive(mut session: MtrSession) -> Result<()> {
+pub async fn run_interactive(mut session: MtrSession, replay: Option<Replay>) -> Result<()> {
     // Open sockets before touching the terminal so failures print normally.
-    let prober = session.open_probe_engine()?;
+    let trace = Trace::open(&mut session, replay)?;
     let listener = match session.args.metrics {
         Some(addr) => Some(metrics::bind(addr).await?),
         None => None,
@@ -42,7 +43,7 @@ pub async fn run_interactive(mut session: MtrSession) -> Result<()> {
 
     // try_init installs a panic hook that restores the terminal before unwinding.
     let mut terminal = ratatui::try_init()?;
-    let result = run_event_loop(&mut terminal, session, prober, listener).await;
+    let result = run_event_loop(&mut terminal, session, trace, listener).await;
     ratatui::restore();
     result
 }
@@ -103,7 +104,7 @@ fn draw(
 async fn run_event_loop(
     terminal: &mut DefaultTerminal,
     mut session: MtrSession,
-    prober: Box<dyn Prober>,
+    trace: Trace,
     listener: Option<TcpListener>,
 ) -> Result<()> {
     let mut ui = UiState::new(&session.args);
@@ -112,7 +113,7 @@ async fn run_event_loop(
     session.set_update_callback(Arc::new(move || notify.notify_one()));
     let session = Arc::new(Mutex::new(session));
 
-    let mut trace = tokio::spawn(tracer::run(Arc::clone(&session), prober));
+    let mut trace = tokio::spawn(trace.run(Arc::clone(&session)));
     let server =
         listener.map(|listener| tokio::spawn(metrics::serve(listener, Arc::clone(&session))));
     let mut tracing = true;

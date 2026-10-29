@@ -33,6 +33,9 @@ complete -c mtr-ng -s P -l protocol -d 'Probe protocol (tcp is not implemented y
 udp\t'UDP datagrams to port 33434 and up, one port per flow'
 tcp\t'TCP SYN probes (not implemented yet)'"
 complete -c mtr-ng -l metrics -d 'Serve the statistics for Prometheus at http://ADDR/metrics while tracing. A bare port listens on 127.0.0.1. With --report and no --count, mtr-ng runs until stopped, then prints the report' -r
+complete -c mtr-ng -l record -d 'Write what the trace sees to PATH as it happens, one JSON object per line, for --replay. PATH must not exist yet' -r -F
+complete -c mtr-ng -l replay -d 'Play back a --record log instead of probing: in the TUI at the pace it was recorded (see --replay-speed), with --report all at once. Sends nothing' -r -F
+complete -c mtr-ng -l replay-speed -d 'Play back this many times faster than recorded' -r
 complete -c mtr-ng -l log-file -d 'Append debug logs to this file (level can be overridden with RUST_LOG)' -r -F
 complete -c mtr-ng -s 4 -d 'Use IPv4 only'
 complete -c mtr-ng -s 6 -d 'Use IPv6 only'

@@ -55,6 +55,9 @@ tcp\:"TCP SYN probes (not implemented yet)"))' \
 udp\:"UDP datagrams to port 33434 and up, one port per flow"
 tcp\:"TCP SYN probes (not implemented yet)"))' \
 '--metrics=[Serve the statistics for Prometheus at http\://ADDR/metrics while tracing. A bare port listens on 127.0.0.1. With --report and no --count, mtr-ng runs until stopped, then prints the report]:[ADDR:]PORT:_default' \
+'(--replay)--record=[Write what the trace sees to PATH as it happens, one JSON object per line, for --replay. PATH must not exist yet]:PATH:_files' \
+'(--simulate -c --count -i --interval -M --max-hops -4 -6 --flows --pmtu -P --protocol)--replay=[Play back a --record log instead of probing\: in the TUI at the pace it was recorded (see --replay-speed), with --report all at once. Sends nothing]:PATH:_files' \
+'--replay-speed=[Play back this many times faster than recorded]:X:_default' \
 '--log-file=[Append debug logs to this file (level can be overridden with RUST_LOG)]:PATH:_files' \
 '(-6)-4[Use IPv4 only]' \
 '-6[Use IPv6 only]' \
@@ -84,7 +87,7 @@ tcp\:"TCP SYN probes (not implemented yet)"))' \
 '--help[Print help (see more with '\''--help'\'')]' \
 '-V[Print version]' \
 '--version[Print version]' \
-':target -- Target hostname or IP address:_default' \
+'::target -- Target hostname or IP address:_default' \
 && ret=0
 }
 

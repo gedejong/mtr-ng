@@ -126,6 +126,14 @@ fn status_line(session: &MtrSession, hops: &[HopStats], ui: &UiState) -> Line<'s
         spans.push(Span::styled(" SIMULATED ", badge));
         spans.push(Span::raw(" "));
     }
+    if session.replayed.is_some() {
+        let badge = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        spans.push(Span::styled(" REPLAY ", badge));
+        spans.push(Span::raw(" "));
+    }
     let addr = session.target_addr.to_string();
     let target = if session.target == addr {
         addr
@@ -1092,21 +1100,9 @@ fn render_about(f: &mut Frame, area: Rect, session: &MtrSession) {
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
-/// The About pane's text, `width` cells wide: version and licence, what this
-/// trace sends where, and whose data it shows, with the credit each asks for.
-fn about_lines(session: &MtrSession, width: usize) -> Vec<Line<'static>> {
+/// What a live trace sends, and to whom, for the About pane.
+fn live_sends(session: &MtrSession) -> Vec<String> {
     let args = &session.args;
-    let bold = Style::default().add_modifier(Modifier::BOLD);
-    // A sentence per item, wrapped under its first word
-    let item = |text: String| -> Vec<Line<'static>> {
-        let words: Vec<String> = text.split(' ').map(str::to_string).collect();
-        pack(&words, " ", width.saturating_sub(2))
-            .into_iter()
-            .enumerate()
-            .map(|(i, line)| Line::from(format!("{}{line}", if i == 0 { "• " } else { "  " })))
-            .collect()
-    };
-
     let mut sent = vec![match (session.is_simulated(), args.protocol) {
         (true, _) => "Probes: none, --simulate makes the trace up.".to_string(),
         (false, ProbeProtocol::Udp) => format!(
@@ -1131,6 +1127,35 @@ fn about_lines(session: &MtrSession, width: usize) -> Vec<Line<'static>> {
         false => "AS lookups: none (-z sends public addresses to Team Cymru).".to_string(),
     });
     sent.push("Locations: nothing, the database is on this machine.".to_string());
+    sent
+}
+
+/// The About pane's text, `width` cells wide: version and licence, what this
+/// trace sends where, and whose data it shows, with the credit each asks for.
+fn about_lines(session: &MtrSession, width: usize) -> Vec<Line<'static>> {
+    let args = &session.args;
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    // A sentence per item, wrapped under its first word
+    let item = |text: String| -> Vec<Line<'static>> {
+        let words: Vec<String> = text.split(' ').map(str::to_string).collect();
+        pack(&words, " ", width.saturating_sub(2))
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| Line::from(format!("{}{line}", if i == 0 { "• " } else { "  " })))
+            .collect()
+    };
+
+    let mut sent = match (&session.replayed, &args.replay) {
+        (Some(recorded), Some(path)) => vec![format!(
+            "Nothing: this plays back {}, recorded {} on {}.",
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy(),
+            recorded.start,
+            recorded.source
+        )],
+        _ => live_sends(session),
+    };
     if let Some(addr) = args.metrics {
         sent.push(format!(
             "Metrics: anyone who can reach http://{addr}/metrics can read this trace (--metrics)."

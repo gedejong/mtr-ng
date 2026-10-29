@@ -23,7 +23,7 @@ _mtr__ng() {
 
     case "${cmd}" in
         mtr__ng)
-            opts="-c -i -M -4 -6 -r -j -C -n -z -g -e -P -q -h -V --count --interval --max-hops --report --json --csv --dot --mermaid --geojson --numeric --aslookup --geo --geoip-mmdb --privacy-hops --origin --mpls --flows --pmtu --sparkline-scale --ema-alpha --fields --show-all --simulate --protocol --metrics --quiet --log-file --help --version"
+            opts="-c -i -M -4 -6 -r -j -C -n -z -g -e -P -q -h -V --count --interval --max-hops --report --json --csv --dot --mermaid --geojson --numeric --aslookup --geo --geoip-mmdb --privacy-hops --origin --mpls --flows --pmtu --sparkline-scale --ema-alpha --fields --show-all --simulate --protocol --metrics --record --replay --replay-speed --quiet --log-file --help --version"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -90,6 +90,18 @@ _mtr__ng() {
                     return 0
                     ;;
                 --metrics)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --record)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --replay)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --replay-speed)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

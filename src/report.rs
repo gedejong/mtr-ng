@@ -6,8 +6,10 @@ use crate::icmp_ext::MplsLabel;
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::privacy::{self, show};
+use crate::record::Replay;
+use crate::tracer::Trace;
 use crate::utils::network;
-use crate::{metrics, topology, tracer, HopStats, MtrSession, Result};
+use crate::{metrics, topology, HopStats, MtrSession, Result};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -498,9 +500,12 @@ async fn stopped() {
     ctrl_c.await;
 }
 
-pub async fn run_report(mut session: MtrSession) -> Result<()> {
-    let start = chrono::Utc::now();
-    let prober = session.open_probe_engine()?;
+pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Result<()> {
+    let recorded = session.replayed.as_ref();
+    let start = recorded
+        .and_then(|start| chrono::DateTime::parse_from_rfc3339(&start.start).ok())
+        .map_or_else(chrono::Utc::now, |start| start.with_timezone(&chrono::Utc));
+    let trace = Trace::open(&mut session, replay)?;
     let listener = match session.args.metrics {
         Some(addr) => Some(metrics::bind(addr).await?),
         None => None,
@@ -510,7 +515,7 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         listener.map(|listener| tokio::spawn(metrics::serve(listener, Arc::clone(&shared))));
     // Stopped early, the report shows what there is
     tokio::select! {
-        result = tracer::run(Arc::clone(&shared), prober) => result?,
+        result = trace.run(Arc::clone(&shared)) => result?,
         () = stopped() => {}
     }
     if let Some(server) = server {
@@ -526,9 +531,10 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
     let hops = &session.hops[..session.display_hop_count()];
     let origin = session.origin();
     let origin = origin.as_ref();
-    let source = match args.privacy_hops {
-        0 => gethostname::gethostname().to_string_lossy().into_owned(),
-        _ => privacy::HIDDEN.to_string(),
+    let source = match (args.privacy_hops, &session.replayed) {
+        (1.., _) => privacy::HIDDEN.to_string(),
+        (0, Some(recorded)) => recorded.source.clone(),
+        (0, None) => gethostname::gethostname().to_string_lossy().into_owned(),
     };
 
     if args.json {
@@ -548,6 +554,9 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         });
         if let Some(geo) = json_geo(session.geo_attribution(), origin, session.inflation()) {
             report["report"]["mtr"]["geo"] = geo;
+        }
+        if let Some(path) = &args.replay {
+            report["report"]["mtr"]["replay"] = json!(path.display().to_string());
         }
         if let Some(pmtu) = &session.pmtu {
             report["report"]["pmtu"] = json_pmtu(pmtu);
@@ -591,6 +600,13 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
     );
     if session.is_simulated() {
         println!("SIMULATED: fake data from --simulate, not a real trace");
+    }
+    if let (Some(path), Some(recorded)) = (&args.replay, &session.replayed) {
+        println!(
+            "REPLAY of {}, recorded by mtr-ng {}",
+            path.display(),
+            recorded.version
+        );
     }
     println!();
     let columns = args.get_columns();

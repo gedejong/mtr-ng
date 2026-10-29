@@ -187,6 +187,12 @@ mtr-ng -r -g --origin 52.37,4.89 google.com
 # A report to share: hops 1 and 2 are hidden and never looked up
 mtr-ng -r --privacy-hops 2 google.com
 
+# Keep a log of every probe, reply and lookup; play it back later, ten times as
+# fast, or print its report (any format) at once
+mtr-ng --record trace.ndjson google.com
+mtr-ng --replay trace.ndjson --replay-speed 10
+mtr-ng --replay trace.ndjson --json
+
 # Trace until stopped, for Prometheus to scrape at http://127.0.0.1:9819/metrics;
 # Ctrl-C prints the report
 mtr-ng -r -n --metrics 9819 google.com
@@ -234,6 +240,16 @@ What mtr-ng sends, apart from the probes themselves: the target's name and, unle
 | `mtr_ng_hop_responder_replies_total` | counter | `hop`, `addr` |
 
 Counters let Prometheus work out any window: the loss at hop 5 over the last five minutes is `rate(mtr_ng_hop_lost_total{hop="5"}[5m]) / (rate(mtr_ng_hop_lost_total{hop="5"}[5m]) + rate(mtr_ng_hop_received_total{hop="5"}[5m]))`, and its mean RTT `rate(mtr_ng_hop_rtt_seconds_sum[5m]) / rate(mtr_ng_hop_rtt_seconds_count[5m])`. A route change shows as a new address in `mtr_ng_hop_responder_replies_total`.
+
+### Record and replay
+`--record PATH` writes what the trace sees as it happens, one JSON object per line: what was traced, from where and how, then each probe sent, each reply (from whom, its RTT, TTL and MPLS labels) or timeout, and each name and AS that arrived, stamped with the seconds since the start.
+```json
+{"t":0.0,"event":"start","version":"0.5.0","start":"2026-10-29T21:40:49Z","source":"laptop","target":"1.1.1.1","target_addr":"1.1.1.1","protocol":"icmp","flows":"1","interval_ms":1000,"max_hops":30,"simulated":false}
+{"t":1.005632,"event":"sent","hop":1,"flow":0,"probe":1}
+{"t":1.011853,"event":"reply","hop":1,"probe":1,"from":"192.168.1.1","kind":"time_exceeded","rtt_ms":6.221,"reply_ttl":64}
+{"t":1.0302,"event":"name","addr":"198.51.100.1","name":"core-1.isp.example"}
+```
+`--replay PATH` plays a log back without sending a probe or a lookup: in the TUI at the pace it was recorded, or `--replay-speed` times faster, and with `-r` (or `--json`, `--csv`, `--dot`, `--mermaid`, `--geojson`) as a report printed at once. The replay rebuilds the same statistics, since it gives the session the same events; only the path MTU search and the branch search of `--flows auto` are not recorded, so their notes are missing. PATH must not exist when recording, so a log is never overwritten. Hops hidden by `--privacy-hops` are recorded hidden. An hour at one round a second takes about 10 MB.
 
 ### Simulation Mode
 `--simulate` answers probes from a made-up path instead of the network, through the same probing loop as real probes, and marks the screen SIMULATED. The path has a load-balanced pair of routers inside an MPLS tunnel, a router that never answers, some loss and the odd latency spike. Its addresses come from the documentation ranges and its names end in `.example`. It comes with made-up locations, including one the light-speed check rules out, so `-g` and the map work without a database.

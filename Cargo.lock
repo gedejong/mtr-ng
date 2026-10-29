@@ -1314,6 +1314,7 @@ dependencies = [
  "maxminddb",
  "rand 0.10.3",
  "ratatui",
+ "serde",
  "serde_json",
  "socket2",
  "tokio",

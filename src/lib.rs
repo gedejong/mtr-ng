@@ -10,6 +10,7 @@ pub mod pmtu;
 pub mod privacy;
 pub mod privileges;
 pub mod probe;
+pub mod record;
 pub mod report;
 pub mod session;
 pub mod simulate;

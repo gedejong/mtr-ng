@@ -117,6 +117,7 @@ impl Column {
 #[command(version = env!("CARGO_PKG_VERSION"))]
 pub struct Args {
     /// Target hostname or IP address
+    #[arg(required_unless_present = "replay", default_value = "")]
     pub target: String,
 
     /// Number of rounds to run (default: until quit; 10 in report mode, unless --metrics)
@@ -243,6 +244,25 @@ pub struct Args {
     #[arg(long, value_name = "[ADDR:]PORT", value_parser = listen_addr)]
     pub metrics: Option<SocketAddr>,
 
+    /// Write what the trace sees to PATH as it happens, one JSON object per line,
+    /// for --replay. PATH must not exist yet
+    #[arg(long, value_name = "PATH", conflicts_with = "replay")]
+    pub record: Option<PathBuf>,
+
+    /// Play back a --record log instead of probing: in the TUI at the pace it
+    /// was recorded (see --replay-speed), with --report all at once. Sends
+    /// nothing
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["simulate", "count", "interval", "max_hops", "ipv4", "ipv6", "flows", "pmtu", "protocol"]
+    )]
+    pub replay: Option<PathBuf>,
+
+    /// Play back this many times faster than recorded
+    #[arg(long, value_name = "X", default_value = "1", value_parser = speed, requires = "replay")]
+    pub replay_speed: f64,
+
     /// Report mode: print errors only, no warnings
     #[arg(short, long)]
     pub quiet: bool,
@@ -302,6 +322,13 @@ fn coordinates(s: &str) -> Result<(f64, f64), String> {
         return Err("latitude must be within ±90 and longitude within ±180".to_string());
     }
     Ok((lat, lon))
+}
+
+fn speed(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(x) if x > 0.0 && x.is_finite() => Ok(x),
+        _ => Err("expected a number above 0, such as 10 or 0.5".to_string()),
+    }
 }
 
 fn smoothing_factor(s: &str) -> Result<f64, String> {

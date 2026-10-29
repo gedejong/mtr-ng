@@ -62,6 +62,7 @@ socket2 = { version = "0.6", features = ["all"] }
 ratatui = "0.30"
 unicode-width = "0.2"
 gethostname = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 chrono = "0.4"
 tracing = "0.1"

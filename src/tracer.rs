@@ -11,6 +11,7 @@
 use crate::args::Flows;
 use crate::mda::Mda;
 use crate::probe::{self, IcmpResponseType, ProbeResponse, Prober, Reply};
+use crate::record::Replay;
 use crate::session::{MtrSession, DEFAULT_REPORT_CYCLES};
 use crate::Result;
 use hickory_resolver::proto::rr::RData;
@@ -33,6 +34,40 @@ const SWEEP_INTERVAL: Duration = Duration::from_millis(50);
 const DNS_GRACE: Duration = Duration::from_secs(3);
 
 type Shared = Arc<Mutex<MtrSession>>;
+
+/// Where a trace's replies come from: probes on the network, or a `--record`
+/// log played back.
+pub enum Trace {
+    Live(Box<dyn Prober>),
+    Replay(Box<Replay>),
+}
+
+impl Trace {
+    /// Open the prober, or for a replay only the geolocation database.
+    pub fn open(session: &mut MtrSession, replay: Option<Replay>) -> Result<Self> {
+        match replay {
+            Some(replay) => {
+                session.open_geo()?;
+                Ok(Self::Replay(Box::new(replay)))
+            }
+            None => Ok(Self::Live(session.open_probe_engine()?)),
+        }
+    }
+
+    /// Run until done: see `run`, or to the end of the log, at once for a report.
+    pub async fn run(self, session: Shared) -> Result<()> {
+        match self {
+            Self::Live(prober) => run(session, prober).await,
+            Self::Replay(replay) => {
+                let speed = {
+                    let s = session.lock().unwrap();
+                    (!s.args.report).then_some(s.args.replay_speed)
+                };
+                replay.run(session, speed).await
+            }
+        }
+    }
+}
 
 /// A probe on the wire, waiting for its reply.
 struct InFlight {
@@ -160,6 +195,9 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
         while dns.join_next().await.is_some() {}
     })
     .await;
+    if let Some(recorder) = &session.lock().unwrap().recorder {
+        recorder.flush();
+    }
     Ok(())
 }
 
@@ -174,7 +212,7 @@ fn send_round(
 ) {
     let mut s = session.lock().unwrap();
     for hop in 0..s.num_hosts {
-        let ordinal = s.hops[hop].increment_sent(flow);
+        let ordinal = s.sent(hop, flow);
         match prober.send(target, (hop + 1) as u8, flow, None) {
             Ok((seq, sent_at)) => {
                 let probe = InFlight {
@@ -185,12 +223,12 @@ fn send_round(
                 };
                 if let Some(old) = in_flight.insert(seq, probe) {
                     // Sequence numbers wrapped onto a probe that never got an answer
-                    s.hops[old.hop].record_timeout(Some(old.ordinal));
+                    s.lost(old.hop, old.ordinal);
                 }
             }
             Err(e) => {
                 debug!("Sending to TTL {} failed: {e}", hop + 1);
-                s.hops[hop].record_timeout(Some(ordinal));
+                s.lost(hop, ordinal);
             }
         }
     }
@@ -593,6 +631,88 @@ mod tests {
         assert_eq!(hop3.mpls, [label]);
         assert_eq!(hop3.reply_ttl, Some(61));
         assert!(s.hops[1].responders[&router(2).unwrap()].mpls.is_empty());
+    }
+
+    /// A log path of its own for each test, removed first
+    fn log_path(name: &str) -> std::path::PathBuf {
+        let file = format!("mtr-ng-{}-{name}.ndjson", std::process::id());
+        let path = std::env::temp_dir().join(file);
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[tokio::test]
+    async fn a_recorded_trace_replays_to_the_same_statistics() {
+        let path = log_path("same");
+        let mut prober = balanced();
+        prober.mpls = Some((
+            3,
+            MplsLabel {
+                label: 24005,
+                tc: 0,
+                bottom: true,
+                ttl: 1,
+            },
+        ));
+        prober.fail_ttl = Some(9); // lost without being sent
+        let record = [
+            "-c",
+            "4",
+            "--flows",
+            "2",
+            "--record",
+            path.to_str().unwrap(),
+        ];
+        let live = trace_with(prober, &record).await;
+
+        let replay = Replay::open(&path).await.unwrap();
+        let args = Args::parse_from(["mtr-ng", "--replay", path.to_str().unwrap()]);
+        let shared = Arc::new(Mutex::new(replay.session(args).await.unwrap()));
+        replay.run(Arc::clone(&shared), None).await.unwrap();
+        let replayed = shared.lock().unwrap().clone();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(replayed.target, "192.0.2.1");
+        assert_eq!(replayed.flows(), 2);
+        assert_eq!(replayed.display_hop_count(), 12);
+        let responders = |hop: &crate::HopStats| {
+            let mut responders: Vec<_> = hop
+                .responders
+                .values()
+                .map(|r| (r.addr, r.replies, r.reply_ttl, r.mpls.clone()))
+                .collect();
+            responders.sort_by_key(|r| r.0);
+            responders
+        };
+        let flows = |hop: &crate::HopStats| -> Vec<(u16, usize, usize)> {
+            hop.flows
+                .iter()
+                .map(|(&f, s)| (f, s.sent, s.received))
+                .collect()
+        };
+        for (a, b) in live.hops.iter().zip(&replayed.hops) {
+            let hop = a.hop;
+            assert_eq!((a.sent, a.received), (b.sent, b.received), "hop {hop}");
+            assert_eq!(a.loss_percent, b.loss_percent, "hop {hop}");
+            assert_eq!(a.history, b.history, "hop {hop}");
+            assert_eq!(
+                (a.best_rtt, a.worst_rtt, a.avg_rtt, a.last_rtt, a.jitter_avg),
+                (b.best_rtt, b.worst_rtt, b.avg_rtt, b.last_rtt, b.jitter_avg),
+                "hop {hop}"
+            );
+            assert_eq!(a.is_target, b.is_target, "hop {hop}");
+            assert_eq!(responders(a), responders(b), "hop {hop}");
+            assert_eq!(flows(a), flows(b), "hop {hop}");
+        }
+        assert_eq!(
+            replayed.hops[8].loss_percent, 100.0,
+            "the probes that failed"
+        );
+        assert_eq!(
+            replayed.hops[4].responders.len(),
+            2,
+            "two flows, two branches"
+        );
     }
 
     /// A trace with `--pmtu` and the search starting at 1500 bytes

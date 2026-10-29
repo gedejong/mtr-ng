@@ -52,6 +52,14 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Show MPLS labels under their hop.",
     ),
     (
+        "mtr-ng --record trace.ndjson example.com",
+        "Trace interactively and keep a log of every probe, reply and lookup.",
+    ),
+    (
+        "mtr-ng --replay trace.ndjson --replay-speed 10",
+        "Play the log back in the TUI ten times as fast; with -r, print its report at once. See RECORD AND REPLAY.",
+    ),
+    (
         "mtr-ng -r -n --metrics 9819 example.com",
         "Trace until stopped, for Prometheus to scrape at http://127.0.0.1:9819/metrics. See METRICS.",
     ),
@@ -89,6 +97,16 @@ the TUI and every report format, with the local host name, and never looks them 
 among them stay apart, and they are hidden from --metrics too. With --metrics, anyone who can \
 reach its address can read the trace. The a key lists what the running trace sends, and the \
 data sources with their licences.";
+
+const RECORD: &str = "--record PATH writes what the trace sees to PATH as it happens, one JSON \
+object per line: first what was traced, from where and how, then each probe sent, each reply \
+(from whom, its RTT, TTL and MPLS labels) or timeout, and each name and AS that arrived, with \
+the seconds since the start. PATH must not exist yet. --replay PATH plays a log back into the \
+TUI at the pace it was recorded, or --replay-speed times faster, and with --report prints the \
+report at once; it sends nothing and looks nothing up, and any report format works. The path \
+MTU search and the branch search of --flows auto are not recorded. Hops hidden by \
+--privacy-hops are recorded hidden, so a log can be passed on like a report. A trace of an hour \
+at one round a second takes about 10 MB.";
 
 const METRICS: &str = "--metrics [ADDR:]PORT serves the trace at http://ADDR:PORT/metrics while \
 it runs, in OpenMetrics to scrapers that ask for it, as Prometheus does, and in the Prometheus \
@@ -207,6 +225,7 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
         writeln!(out, ".PP\n{}", roff(paragraph))?;
     }
 
+    writeln!(out, ".SH RECORD AND REPLAY\n{}", roff(RECORD))?;
     writeln!(out, ".SH METRICS\n{}", roff(METRICS))?;
     writeln!(out, ".SH PRIVACY\n{}", roff(PRIVACY))?;
     writeln!(out, ".SH PRIVILEGES\n{}", roff(PRIVILEGES))?;

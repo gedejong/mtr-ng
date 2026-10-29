@@ -6,7 +6,7 @@ use crate::probe::calculate_icmp_checksum;
 use std::fmt;
 
 /// One MPLS label stack entry, as quoted by the router.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MplsLabel {
     pub label: u32,
     /// Traffic class (formerly EXP)

@@ -5,6 +5,7 @@ use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::privacy::StandIns;
 use crate::probe::{self, IcmpResponseType, ProbeResponse, Prober};
+use crate::record::{self, Event, Recorder};
 use crate::simulate::{self, SimProber};
 use crate::{tracer, Args, HopStats, Result};
 use anyhow::{anyhow, bail};
@@ -14,7 +15,12 @@ use hickory_resolver::{
     TokioResolver,
 };
 
-use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tracing::{debug, info, warn};
 
 /// Rounds in report mode when `--count` is not given (same as mtr).
@@ -48,6 +54,10 @@ pub struct MtrSession {
     pub pmtu: Option<PathMtu>,
     /// The search for load-balanced branches, with `--flows auto`
     pub mda: Option<Mda>,
+    /// Where `--record` writes what the session is told
+    pub recorder: Option<Arc<Recorder>>,
+    /// With `--replay`, the first line of the log
+    pub replayed: Option<record::Start>,
 }
 
 impl MtrSession {
@@ -98,6 +108,13 @@ impl MtrSession {
         }
         let num_hosts = hops.len();
         let mda = (args.flows == Flows::Auto).then(Mda::new);
+        let recorder = match &args.record {
+            Some(path) => {
+                let start = record::start(&args, &args.target, target_addr);
+                Some(Recorder::create(path, start, args.privacy_hops)?)
+            }
+            None => None,
+        };
 
         Ok(Self {
             target: args.target.clone(),
@@ -115,6 +132,8 @@ impl MtrSession {
             locations: HashMap::new(),
             pmtu: None,
             mda,
+            recorder,
+            replayed: None,
         })
     }
 
@@ -160,6 +179,11 @@ impl MtrSession {
             self.dns_names.insert(self.target_addr, target);
             self.dns_names
                 .extend(simulate::names().map(|(addr, name)| (addr, Some(name))));
+            if let Some(recorder) = &self.recorder {
+                for (&addr, name) in &self.dns_names {
+                    recorder.name(addr, name);
+                }
+            }
             if self.args.pmtu {
                 self.pmtu = Some(PathMtu::new(1500, self.target_addr.is_ipv6()));
             }
@@ -216,7 +240,7 @@ impl MtrSession {
 
     /// The made-up locations with `--simulate`, else `--geoip-mmdb` or the first
     /// database found. Asking for locations when there is none is an error.
-    fn open_geo(&mut self) -> Result<()> {
+    pub fn open_geo(&mut self) -> Result<()> {
         self.geo_source = match self.is_simulated() {
             true => Some(Arc::new(simulate::SimGeo::new(self.target_addr))),
             false => geo::open(self.args.geoip_mmdb.as_deref())?,
@@ -374,6 +398,9 @@ impl MtrSession {
     /// Returns false if the response refers to a hop outside the table.
     pub fn apply_response(&mut self, response: &ProbeResponse) -> bool {
         let index = response.hop;
+        if let Some(recorder) = self.recorder.as_ref().filter(|_| index < self.hops.len()) {
+            recorder.response(response);
+        }
         let Some(hop) = self.hops.get_mut(index) else {
             return false;
         };
@@ -431,6 +458,9 @@ impl MtrSession {
     /// A city code in the name goes before the database's location, unless the
     /// RTT so far rules the name's city out and not the database's.
     pub fn set_hostname(&mut self, addr: IpAddr, name: Option<String>) {
+        if let Some(recorder) = &self.recorder {
+            recorder.name(addr, &name);
+        }
         if let Some(name) = &name {
             debug!("Resolved {} to {}", addr, name);
             let ruled_out = |fix: &GeoFix| self.ruled_out(addr, fix);
@@ -458,6 +488,9 @@ impl MtrSession {
 
     /// Start the statistics over, keeping what is known about the path itself.
     pub fn reset_statistics(&mut self) {
+        if let Some(recorder) = &self.recorder {
+            recorder.reset();
+        }
         for hop in &mut self.hops {
             let mut fresh = HopStats::new(hop.hop);
             fresh.set_ema_alpha(hop.ema_alpha);
@@ -483,6 +516,9 @@ impl MtrSession {
     /// Store an AS lookup result, with the AS's name if it is known already, and
     /// show it on every hop where `addr` answered.
     pub fn set_asn(&mut self, addr: IpAddr, asn: Option<AsInfo>) {
+        if let Some(recorder) = &self.recorder {
+            recorder.asn(addr, &asn);
+        }
         let asn = asn.map(|mut info| {
             if let Some(Some(name)) = self.as_names.get(&info.number) {
                 info.name = Some(name.clone());
@@ -510,6 +546,9 @@ impl MtrSession {
 
     /// Store the name of AS `number` and show it wherever that AS answered.
     pub fn set_as_name(&mut self, number: u32, name: Option<String>) {
+        if let Some(recorder) = &self.recorder {
+            recorder.as_name(number, &name);
+        }
         self.as_names.insert(number, name.clone());
         let Some(name) = name else { return };
         for (&addr, info) in &mut self.asns {
@@ -522,6 +561,83 @@ impl MtrSession {
                     hop.set_asn_for_addr(addr, info.clone());
                 }
             }
+        }
+    }
+
+    /// Count a probe sent to hop `index` (from 0) in `flow`. Returns its number
+    /// at the hop, which its reply or timeout names.
+    pub fn sent(&mut self, index: usize, flow: u16) -> u64 {
+        let probe = self.hops[index].increment_sent(flow);
+        if let Some(recorder) = &self.recorder {
+            recorder.sent(index, flow, probe);
+        }
+        probe
+    }
+
+    /// Count probe `probe` to hop `index` as lost without waiting: it could not
+    /// be sent, or its sequence number came round again.
+    pub fn lost(&mut self, index: usize, probe: u64) {
+        if let Some(recorder) = &self.recorder {
+            recorder.timeout(index, probe);
+        }
+        self.hops[index].record_timeout(Some(probe));
+    }
+
+    /// Apply an event from a `--record` log.
+    pub fn replay(&mut self, event: Event) {
+        let hops = self.hops.len();
+        let index = |hop: u8| usize::from(hop).checked_sub(1).filter(|&i| i < hops);
+        match event {
+            Event::Sent { hop, flow, .. } => {
+                if let Some(index) = index(hop) {
+                    self.args.flows = record::flows_with(self.args.flows, flow);
+                    self.sent(index, flow);
+                }
+            }
+            Event::Reply {
+                hop,
+                probe,
+                from,
+                kind,
+                rtt_ms,
+                reply_ttl,
+                mpls,
+            } => {
+                let Some(index) = index(hop) else { return };
+                // A negative or absurd RTT becomes 0
+                let rtt = Duration::from_nanos((rtt_ms * 1e6).round() as u64);
+                let now = Instant::now();
+                self.apply_response(&ProbeResponse {
+                    hop: index,
+                    ordinal: Some(probe),
+                    seq: 0,
+                    source_addr: from,
+                    icmp_type: kind.into(),
+                    rtt,
+                    send_time: now,
+                    receive_time: now,
+                    precise_rtt_ns: rtt.as_nanos(),
+                    reply_ttl,
+                    mpls,
+                });
+            }
+            Event::Timeout { hop, probe } => {
+                if let Some(index) = index(hop) {
+                    self.lost(index, probe);
+                }
+            }
+            Event::Name { addr, name } => self.set_hostname(addr, name),
+            Event::Asn { addr, asn, prefix } => {
+                let info = asn.map(|number| AsInfo {
+                    number,
+                    prefix,
+                    name: None,
+                });
+                self.set_asn(addr, info);
+            }
+            Event::AsName { asn, name } => self.set_as_name(asn, name),
+            Event::Reset => self.reset_statistics(),
+            Event::Start(_) => {}
         }
     }
 
@@ -590,6 +706,9 @@ mod tests {
             origin: None,
             privacy_hops: 0,
             metrics: None,
+            record: None,
+            replay: None,
+            replay_speed: 1.0,
             log_file: None,
         };
 
@@ -636,6 +755,9 @@ mod tests {
             origin: None,
             privacy_hops: 0,
             metrics: None,
+            record: None,
+            replay: None,
+            replay_speed: 1.0,
             log_file: None,
         };
 
@@ -902,6 +1024,9 @@ mod tests {
             origin: None,
             privacy_hops: 0,
             metrics: None,
+            record: None,
+            replay: None,
+            replay_speed: 1.0,
             log_file: None,
         };
 
