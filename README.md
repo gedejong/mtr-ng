@@ -35,8 +35,8 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Origin**: distances are measured from `--origin LAT,LON`, or else from the first hop placed in a city
 
 ### Column Selection System
-- **Flexible Fields**: Choose from 18 columns
-  - `hop`, `host`, `asn`, `geo`, `dist`, `reach`, `back`
+- **Flexible Fields**: Choose from 20 columns
+  - `hop`, `host`, `asn`, `as-name`, `prefix`, `geo`, `dist`, `reach`, `back`
   - `loss`, `sent`, `last`, `avg`, `ema`, `jitter`, `jitter-avg`, `best`, `worst`, `stdev`, `graph`
 - **Quick Presets**: `--show-all` for complete metrics, custom combinations via `--fields`
 - **Interactive Chooser**: `o` opens a column chooser to show, hide and reorder columns
@@ -155,8 +155,10 @@ mtr-ng google.com --csv > trace.csv
 # The located hops and the path as GeoJSON, for geojson.io, QGIS or GitHub
 mtr-ng -c 20 --geojson google.com > path.geojson
 
-# AS numbers via Team Cymru's DNS (public addresses only)
+# AS numbers via Team Cymru's DNS (public addresses only); the detail pane
+# (Enter) adds each AS's name and the prefix the router is in
 mtr-ng -z google.com
+mtr-ng -r --fields hop,host,asn,as-name,prefix,loss,avg google.com
 
 # Follow 8 flows: the report ends with which address each flow met
 mtr-ng -r -c 40 --flows 8 google.com
@@ -227,6 +229,12 @@ Monitor network stability with comprehensive jitter metrics:
 | `hop`       | Hop number                     | `1`      |
 | `host`      | Hostname/IP address            | `gateway.local` |
 | `asn`       | Origin AS (with `-z`)          | `AS13335` |
+| `as-name`   | The AS's handle                | `CLOUDFLARENET` |
+| `prefix`    | Announced prefix               | `1.1.1.0/24` |
+| `geo`       | Location (with `-g`)           | `Amsterdam, NL` |
+| `dist`      | Distance from the origin, km   | `357`    |
+| `reach`     | Farthest the best RTT reaches, km | `1071` |
+| `back`      | Routers on the way back        | `6 +1`   |
 | `loss`      | Packet loss percentage         | `2.0%`   |
 | `sent`      | Packets sent                   | `10`     |
 | `last`      | Most recent RTT               | `15.2ms` |

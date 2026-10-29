@@ -2,6 +2,10 @@
 
 Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/mtr-ng/releases).
 
+## Unreleased
+
+- AS lookups (`-z`) also find the prefix each router's address is announced in and the AS's name. The detail pane (Enter) shows both, `--fields ...,as-name,prefix` adds them as columns, and the JSON and CSV carry them. A name is asked for once per AS.
+
 ## 0.5.0 - 2026-10-29
 
 IPv6, UDP probes, and less need for sudo on Linux. `--flows auto` finds every branch of the load balancers on the path, and `--pmtu` finds the path MTU, where it narrows, and where its black holes are.

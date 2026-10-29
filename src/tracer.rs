@@ -302,11 +302,22 @@ fn expire(session: &Shared, in_flight: &mut HashMap<u16, InFlight>, timeout: Dur
     s.notify();
 }
 
+/// The origin AS of `addr`, then the AS's name if no other address asked for it.
 async fn asn_lookup(session: Shared, resolver: hickory_resolver::TokioResolver, addr: IpAddr) {
     let asn = crate::asn::lookup(&resolver, addr).await;
-    let mut s = session.lock().unwrap();
-    s.set_asn(addr, asn);
-    s.notify();
+    let number = asn.as_ref().map(|info| info.number);
+    let name_wanted = {
+        let mut s = session.lock().unwrap();
+        s.set_asn(addr, asn);
+        s.notify();
+        number.filter(|&n| s.want_as_name(n))
+    };
+    if let Some(number) = name_wanted {
+        let name = crate::asn::lookup_name(&resolver, number).await;
+        let mut s = session.lock().unwrap();
+        s.set_as_name(number, name);
+        s.notify();
+    }
 }
 
 async fn reverse_lookup(session: Shared, resolver: hickory_resolver::TokioResolver, addr: IpAddr) {

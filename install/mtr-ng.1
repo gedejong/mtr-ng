@@ -101,6 +101,10 @@ host: Hostname/IP address
 .IP \(bu 2
 asn: Origin AS number (looked up with \-\-aslookup)
 .IP \(bu 2
+as\-name: The AS\*(Aqs name, its handle as the registry has it (looked up with the ASN)
+.IP \(bu 2
+prefix: The announced prefix the address is in (looked up with the ASN)
+.IP \(bu 2
 geo: Where the hop is, from the geolocation database (see \-\-geo)
 .IP \(bu 2
 dist: Distance from the origin in km (see \-\-origin)
@@ -265,6 +269,12 @@ Host name or address
 .TP
 .B asn
 Autonomous system
+.TP
+.B as\-name
+Autonomous system's name
+.TP
+.B prefix
+Announced prefix
 .TP
 .B geo
 Location (city, country)

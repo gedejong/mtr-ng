@@ -25,6 +25,10 @@ pub enum Column {
     Host,
     /// Origin AS number (looked up with --aslookup)
     Asn,
+    /// The AS's name, its handle as the registry has it (looked up with the ASN)
+    AsName,
+    /// The announced prefix the address is in (looked up with the ASN)
+    Prefix,
     /// Where the hop is, from the geolocation database (see --geo)
     Geo,
     /// Distance from the origin in km (see --origin)
@@ -64,6 +68,8 @@ impl Column {
             Column::Hop,
             Column::Host,
             Column::Asn,
+            Column::AsName,
+            Column::Prefix,
             Column::Geo,
             Column::Dist,
             Column::Reach,
@@ -346,9 +352,13 @@ impl Args {
         self.geo || self.geojson || self.fields.as_ref().is_some_and(named)
     }
 
-    /// AS numbers are looked up for `--aslookup`, or when the ASN column is chosen.
+    /// AS numbers are looked up for `--aslookup`, or when a column shows them.
     pub fn wants_asn(&self) -> bool {
-        self.aslookup || self.get_columns().contains(&Column::Asn)
+        self.aslookup
+            || self
+                .get_columns()
+                .iter()
+                .any(|c| matches!(c, Column::Asn | Column::AsName | Column::Prefix))
     }
 }
 

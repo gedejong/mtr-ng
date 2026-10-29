@@ -1,3 +1,4 @@
+use crate::asn::AsInfo;
 use crate::geo::{self, Assessment, GeoFix, Origin};
 use crate::icmp_ext::MplsLabel;
 use crate::utils;
@@ -64,8 +65,8 @@ pub struct RttSpread {
 pub struct ResponderStats {
     pub addr: IpAddr,
     pub hostname: Option<String>,
-    /// Origin AS number, with `--aslookup`
-    pub asn: Option<u32>,
+    /// Origin AS, prefix and AS name, with `--aslookup`
+    pub asn: Option<AsInfo>,
     pub replies: usize,
     pub last_seen: Instant,
     pub last_rtt: Option<Duration>,
@@ -137,7 +138,7 @@ pub struct HopStats {
     /// Primary responder (the address with the most replies)
     pub addr: Option<IpAddr>,
     pub hostname: Option<String>,
-    pub asn: Option<u32>,
+    pub asn: Option<AsInfo>,
     /// Where the geolocation database puts the primary responder
     pub geo: Option<GeoFix>,
     pub sent: usize,
@@ -323,7 +324,7 @@ impl HopStats {
         if switch {
             self.addr = Some(addr);
             self.hostname = self.responders[&addr].hostname.clone();
-            self.asn = self.responders[&addr].asn;
+            self.asn = self.responders[&addr].asn.clone();
             self.geo = self.responders[&addr].geo.clone();
         }
     }
@@ -483,9 +484,9 @@ impl HopStats {
         }
     }
 
-    pub fn set_asn_for_addr(&mut self, addr: IpAddr, asn: u32) {
+    pub fn set_asn_for_addr(&mut self, addr: IpAddr, asn: AsInfo) {
         if Some(addr) == self.addr {
-            self.asn = Some(asn);
+            self.asn = Some(asn.clone());
         }
         if let Some(responder) = self.responders.get_mut(&addr) {
             responder.asn = Some(asn);

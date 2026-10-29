@@ -1,4 +1,5 @@
 use crate::args::Column;
+use crate::columns;
 use crate::geo::{self, Origin};
 use crate::hop_stats::FlowStats;
 use crate::icmp_ext::MplsLabel;
@@ -104,7 +105,7 @@ fn format_table(
     lines
 }
 
-/// Host, ASN and location left-aligned, numbers right-aligned, one space between
+/// Host, AS columns and location left-aligned, numbers right-aligned, one space between
 /// columns.
 fn align(cells: &[String], columns: &[Column], widths: &[usize]) -> String {
     let mut line = String::new();
@@ -113,7 +114,10 @@ fn align(cells: &[String], columns: &[Column], widths: &[usize]) -> String {
             line.push(' ');
         }
         let pad = " ".repeat(width.saturating_sub(cell.width()));
-        if matches!(column, Column::Host | Column::Asn | Column::Geo) {
+        if matches!(
+            column,
+            Column::Host | Column::Asn | Column::AsName | Column::Prefix | Column::Geo
+        ) {
             line.push_str(cell);
             line.push_str(&pad);
         } else {
@@ -208,7 +212,6 @@ fn json_hubs(
     flows: u16,
     origin: Option<&Origin>,
 ) -> Vec<Value> {
-    let asn_of = |n: Option<u32>| n.map_or("AS???".to_string(), |n| format!("AS{n}"));
     hops.iter()
         .filter(|hop| hop.sent > 0)
         .map(|hop| {
@@ -228,7 +231,11 @@ fn json_hubs(
                 "JAvg": json_ms(hop.jitter_avg),
             });
             if asn && hop.addr.is_some() {
-                hub["ASN"] = json!(asn_of(hop.asn));
+                hub["ASN"] = json!(columns::as_value(Column::Asn, hop.asn.as_ref()));
+                if let Some(info) = &hop.asn {
+                    hub["prefix"] = json!(info.prefix);
+                    hub["as_name"] = json!(info.name);
+                }
             }
             if !hop.mpls().is_empty() {
                 hub["MPLS"] = json_mpls(hop.mpls());
@@ -288,7 +295,7 @@ fn csv_field(text: &str) -> String {
     }
 }
 
-const CSV_HEADER: &str = "hop,host,ip,asn,loss_pct,sent,last_ms,avg_ms,ema_ms,best_ms,worst_ms,stdev_ms,jitter_ms,jitter_avg_ms,location,lat,lon,dist_km,impossible";
+const CSV_HEADER: &str = "hop,host,ip,asn,prefix,as_name,loss_pct,sent,last_ms,avg_ms,ema_ms,best_ms,worst_ms,stdev_ms,jitter_ms,jitter_avg_ms,location,lat,lon,dist_km,impossible";
 
 /// A header row, then one row per probed hop. Empty fields mean no reply, or no
 /// ASN or location.
@@ -301,12 +308,17 @@ fn csv_rows(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Vec<St
     let rows = hops.iter().filter(|hop| hop.sent > 0).map(|hop| {
         let stdev = (hop.received > 0).then(|| format!("{:.3}", hop.stddev_ms()));
         let fix = hop.geo.as_ref();
+        let asn = hop.asn.as_ref();
         let assessment = hop.assess(origin);
         [
             hop.hop.to_string(),
             csv_field(&host_label(hop, numeric)),
             hop.addr.map(|a| a.to_string()).unwrap_or_default(),
-            hop.asn.map(|n| format!("AS{n}")).unwrap_or_default(),
+            asn.map(|a| format!("AS{}", a.number)).unwrap_or_default(),
+            asn.and_then(|a| a.prefix.clone()).unwrap_or_default(),
+            asn.and_then(|a| a.name.as_deref())
+                .map(csv_field)
+                .unwrap_or_default(),
             format!("{:.1}", hop.loss_percent),
             hop.sent.to_string(),
             ms(hop.last_rtt),
@@ -660,8 +672,22 @@ mod tests {
         assert_eq!(hubs[2]["Loss%"], 33.3);
         assert_eq!(hubs[3]["Wrst"], 1005.2);
         assert!(hubs[0].get("ASN").is_none(), "ASN only with --aslookup");
-        let with_asn = json_hubs(&path(), false, true, 1, None);
+        let mut hops = path();
+        let with_asn = json_hubs(&hops, false, true, 1, None);
         assert_eq!(with_asn[0]["ASN"], "AS???");
+        assert!(with_asn[0].get("prefix").is_none());
+        hops[0].set_asn_for_addr(
+            IpAddr::from([192, 168, 1, 1]),
+            crate::asn::AsInfo {
+                number: 64496,
+                prefix: Some("192.168.0.0/16".into()),
+                name: None,
+            },
+        );
+        let with_asn = json_hubs(&hops, false, true, 1, None);
+        assert_eq!(with_asn[0]["ASN"], "AS64496");
+        assert_eq!(with_asn[0]["prefix"], "192.168.0.0/16");
+        assert_eq!(with_asn[0]["as_name"], Value::Null, "not known yet");
         assert!(hubs[0].get("flows").is_none(), "flows only with --flows");
     }
 
@@ -870,14 +896,25 @@ mod tests {
     #[test]
     fn csv_has_a_header_and_quotes_awkward_names() {
         let mut hops = path();
-        hops[0].set_hostname_for_addr(IpAddr::from([192, 168, 1, 1]), "a,\"b\"".to_string());
+        let gateway = IpAddr::from([192, 168, 1, 1]);
+        hops[0].set_hostname_for_addr(gateway, "a,\"b\"".to_string());
         let rows = csv_rows(&hops, false, None);
         assert_eq!(rows[0], CSV_HEADER);
         assert_eq!(
             rows[1],
-            r#"1,"a,""b""",192.168.1.1,,0.0,3,3.000,2.000,1.290,1.000,3.000,1.000,1.000,1.000,,,,,"#
+            r#"1,"a,""b""",192.168.1.1,,,,0.0,3,3.000,2.000,1.290,1.000,3.000,1.000,1.000,1.000,,,,,"#
         );
-        assert_eq!(rows[2], "2,???,,,100.0,3,,,,,,,,,,,,,");
+        assert_eq!(rows[2], "2,???,,,,,100.0,3,,,,,,,,,,,,,");
+        hops[0].set_asn_for_addr(
+            gateway,
+            crate::asn::AsInfo {
+                number: 64496,
+                prefix: Some("192.168.0.0/16".into()),
+                name: Some("EXAMPLE - Example, Inc., NL".into()),
+            },
+        );
+        assert!(csv_rows(&hops, false, None)[1]
+            .contains(r#",AS64496,192.168.0.0/16,"EXAMPLE - Example, Inc., NL",0.0,"#));
         assert_eq!(rows.len(), 5);
     }
 }

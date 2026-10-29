@@ -1,5 +1,6 @@
 //! Origin AS lookups through Team Cymru's IP-to-ASN DNS service
-//! (<https://www.team-cymru.com/ip-asn-mapping>), as `mtr -z` does.
+//! (<https://www.team-cymru.com/ip-asn-mapping>), as `mtr -z` does, with the
+//! announced prefix and the AS's name.
 
 use hickory_resolver::{proto::rr::RData, TokioResolver};
 use std::fmt::Write;
@@ -50,19 +51,58 @@ fn query_name(addr: IpAddr) -> String {
     }
 }
 
-/// The first AS in an answer like `13335 | 1.1.1.0/24 | AU | apnic | 2011-08-11`.
-/// A prefix announced by several ASes lists them all, space-separated.
-fn parse_origin(txt: &str) -> Option<u32> {
-    txt.split('|')
-        .next()?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+/// What Team Cymru knows about the network an address is in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsInfo {
+    /// The origin AS
+    pub number: u32,
+    /// The most specific announced prefix the address is in, as `1.1.1.0/24`
+    pub prefix: Option<String>,
+    /// The AS's registered name, as `CLOUDFLARENET - Cloudflare, Inc., US`
+    pub name: Option<String>,
 }
 
-pub async fn lookup(resolver: &TokioResolver, addr: IpAddr) -> Option<u32> {
-    let answer = resolver.txt_lookup(query_name(addr)).await.ok()?;
+impl AsInfo {
+    /// The name's first word, the network's handle: `CLOUDFLARENET`, `TWELVE99`.
+    /// Registries write the rest differently (`GOOGLE - Google LLC, US`, `TWELVE99
+    /// Arelion, fka Telia Carrier, SE`), but the handle always comes first.
+    pub fn handle(&self) -> Option<&str> {
+        let first = self.name.as_deref()?.split_whitespace().next()?;
+        Some(first.trim_end_matches(','))
+    }
+}
+
+/// The first AS and the prefix in an answer like `13335 | 1.1.1.0/24 | AU |
+/// apnic | 2011-08-11`. A prefix announced by several ASes lists them all,
+/// space-separated.
+fn parse_origin(txt: &str) -> Option<AsInfo> {
+    let mut fields = txt.split('|').map(str::trim);
+    let number = fields.next()?.split_whitespace().next()?.parse().ok()?;
+    let prefix = fields
+        .next()
+        .filter(|p| p.contains('/'))
+        .map(str::to_string);
+    Some(AsInfo {
+        number,
+        prefix,
+        name: None,
+    })
+}
+
+/// The name in an answer like `13335 | US | arin | 2010-07-14 | CLOUDFLARENET -
+/// Cloudflare, Inc., US`.
+fn parse_name(txt: &str) -> Option<String> {
+    let name = txt.split('|').nth(4)?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The first TXT string in the answer to `name` that `parse` accepts.
+async fn txt<T>(
+    resolver: &TokioResolver,
+    name: String,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Option<T> {
+    let answer = resolver.txt_lookup(name).await.ok()?;
     answer
         .answers()
         .iter()
@@ -70,9 +110,19 @@ pub async fn lookup(resolver: &TokioResolver, addr: IpAddr) -> Option<u32> {
             RData::TXT(txt) => txt
                 .txt_data
                 .iter()
-                .find_map(|part| parse_origin(&String::from_utf8_lossy(part))),
+                .find_map(|part| parse(&String::from_utf8_lossy(part))),
             _ => None,
         })
+}
+
+/// The origin AS and prefix of `addr`; the name comes from `lookup_name`.
+pub async fn lookup(resolver: &TokioResolver, addr: IpAddr) -> Option<AsInfo> {
+    txt(resolver, query_name(addr), parse_origin).await
+}
+
+/// The registered name of AS `number`, asked once per AS.
+pub async fn lookup_name(resolver: &TokioResolver, number: u32) -> Option<String> {
+    txt(resolver, format!("AS{number}.asn.cymru.com."), parse_name).await
 }
 
 #[cfg(test)]
@@ -94,16 +144,47 @@ mod tests {
     }
 
     #[test]
-    fn origin_is_the_first_as() {
+    fn origin_is_the_first_as_with_its_prefix() {
+        let info = parse_origin("13335 | 1.1.1.0/24 | AU | apnic | 2011-08-11").unwrap();
+        assert_eq!(info.number, 13335);
+        assert_eq!(info.prefix.as_deref(), Some("1.1.1.0/24"));
         assert_eq!(
-            parse_origin("13335 | 1.1.1.0/24 | AU | apnic | 2011-08-11"),
-            Some(13335)
-        );
-        assert_eq!(
-            parse_origin("6939 1299 | 192.0.2.0/24 | US | arin | "),
+            parse_origin("6939 1299 | 192.0.2.0/24 | US | arin | ").map(|i| i.number),
             Some(6939)
         );
+        assert_eq!(
+            parse_origin("15169").map(|i| (i.number, i.prefix)),
+            Some((15169, None))
+        );
         assert_eq!(parse_origin("NA | 10.0.0.0/8 | | |"), None);
+    }
+
+    #[test]
+    fn names_and_their_handles() {
+        let name =
+            parse_name("13335 | US | arin | 2010-07-14 | CLOUDFLARENET - Cloudflare, Inc., US");
+        assert_eq!(
+            name.as_deref(),
+            Some("CLOUDFLARENET - Cloudflare, Inc., US")
+        );
+        assert_eq!(parse_name("64496 | ZZ | other | | "), None);
+        assert_eq!(parse_name("64496"), None);
+
+        let handle = |name: &str| {
+            AsInfo {
+                number: 1,
+                prefix: None,
+                name: Some(name.to_string()),
+            }
+            .handle()
+            .map(str::to_string)
+        };
+        assert_eq!(handle("GOOGLE - Google LLC, US").as_deref(), Some("GOOGLE"));
+        assert_eq!(
+            handle("TWELVE99 Arelion, fka Telia Carrier, SE").as_deref(),
+            Some("TWELVE99")
+        );
+        assert_eq!(handle("ZAYO-6461, US").as_deref(), Some("ZAYO-6461"));
     }
 
     #[test]

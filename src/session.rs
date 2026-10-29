@@ -1,4 +1,5 @@
 use crate::args::{Flows, ProbeProtocol};
+use crate::asn::AsInfo;
 use crate::geo::{self, GeoFix, GeoSource, Origin};
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
@@ -35,7 +36,9 @@ pub struct MtrSession {
     /// Reverse DNS results per address; `None` while pending or when there is no name
     dns_names: HashMap<IpAddr, Option<String>>,
     /// Origin AS per address, with `--aslookup`; `None` while pending or unknown
-    asns: HashMap<IpAddr, Option<u32>>,
+    asns: HashMap<IpAddr, Option<AsInfo>>,
+    /// AS names per AS number; `None` while pending or unknown
+    as_names: HashMap<u32, Option<String>>,
     /// The geolocation database, if there is one
     geo_source: Option<Arc<dyn GeoSource>>,
     /// Locations per address; `None` when the database doesn't know it
@@ -106,6 +109,7 @@ impl MtrSession {
             probe_timeout: tracer::PROBE_TIMEOUT,
             dns_names: HashMap::new(),
             asns: HashMap::new(),
+            as_names: HashMap::new(),
             geo_source: None,
             locations: HashMap::new(),
             pmtu: None,
@@ -352,7 +356,7 @@ impl MtrSession {
             self.hops[index].set_hostname_for_addr(addr, name.clone());
         }
         if let Some(Some(asn)) = self.asns.get(&addr) {
-            self.hops[index].set_asn_for_addr(addr, *asn);
+            self.hops[index].set_asn_for_addr(addr, asn.clone());
         }
         if let Some(fix) = self.locate(addr) {
             self.hops[index].set_geo_for_addr(addr, fix);
@@ -422,16 +426,49 @@ impl MtrSession {
         true
     }
 
-    /// Store an AS lookup result and show it on every hop where `addr` answered.
-    pub fn set_asn(&mut self, addr: IpAddr, asn: Option<u32>) {
-        if let Some(asn) = asn {
+    /// Store an AS lookup result, with the AS's name if it is known already, and
+    /// show it on every hop where `addr` answered.
+    pub fn set_asn(&mut self, addr: IpAddr, asn: Option<AsInfo>) {
+        let asn = asn.map(|mut info| {
+            if let Some(Some(name)) = self.as_names.get(&info.number) {
+                info.name = Some(name.clone());
+            }
+            info
+        });
+        if let Some(asn) = &asn {
             for hop in &mut self.hops {
                 if hop.responders.contains_key(&addr) {
-                    hop.set_asn_for_addr(addr, asn);
+                    hop.set_asn_for_addr(addr, asn.clone());
                 }
             }
         }
         self.asns.insert(addr, asn);
+    }
+
+    /// True the first time AS `number` is seen: the caller should look up its name.
+    pub fn want_as_name(&mut self, number: u32) -> bool {
+        if self.as_names.contains_key(&number) {
+            return false;
+        }
+        self.as_names.insert(number, None);
+        true
+    }
+
+    /// Store the name of AS `number` and show it wherever that AS answered.
+    pub fn set_as_name(&mut self, number: u32, name: Option<String>) {
+        self.as_names.insert(number, name.clone());
+        let Some(name) = name else { return };
+        for (&addr, info) in &mut self.asns {
+            let Some(info) = info.as_mut().filter(|i| i.number == number) else {
+                continue;
+            };
+            info.name = Some(name.clone());
+            for hop in &mut self.hops {
+                if hop.responders.contains_key(&addr) {
+                    hop.set_asn_for_addr(addr, info.clone());
+                }
+            }
+        }
     }
 
     /// Tell the UI that something changed.

@@ -2,6 +2,7 @@
 //! read headers, names and values from here.
 
 use crate::args::Column;
+use crate::asn::AsInfo;
 use crate::geo::{self, Assessment, Origin};
 use crate::HopStats;
 use std::time::Duration;
@@ -27,6 +28,18 @@ pub fn routers_back(back: Option<u8>, hop: u8) -> String {
     }
 }
 
+/// The Asn, AsName or Prefix column for a responder with `asn`, `???` where it
+/// isn't known (yet).
+pub fn as_value(column: Column, asn: Option<&AsInfo>) -> String {
+    let known = match column {
+        Column::Asn => return asn.map_or("AS???".to_string(), |a| format!("AS{}", a.number)),
+        Column::AsName => asn.and_then(AsInfo::handle),
+        Column::Prefix => asn.and_then(|a| a.prefix.as_deref()),
+        _ => None,
+    };
+    known.unwrap_or("???").to_string()
+}
+
 impl Column {
     /// Short header, as mtr prints it.
     pub fn header(self) -> &'static str {
@@ -34,6 +47,8 @@ impl Column {
             Column::Hop => "",
             Column::Host => "Host",
             Column::Asn => "ASN",
+            Column::AsName => "AS name",
+            Column::Prefix => "Prefix",
             Column::Geo => "Location",
             Column::Dist => "Dist",
             Column::Reach => "Reach",
@@ -58,6 +73,8 @@ impl Column {
             Column::Hop => "Hop number",
             Column::Host => "Host name or address",
             Column::Asn => "Autonomous system",
+            Column::AsName => "Autonomous system's name",
+            Column::Prefix => "Announced prefix",
             Column::Geo => "Location (city, country)",
             Column::Dist => "Distance from the origin, km",
             Column::Reach => "Farthest the best RTT reaches, km",
@@ -80,7 +97,13 @@ impl Column {
     pub fn is_numeric(self) -> bool {
         !matches!(
             self,
-            Column::Hop | Column::Host | Column::Asn | Column::Geo | Column::Graph
+            Column::Hop
+                | Column::Host
+                | Column::Asn
+                | Column::AsName
+                | Column::Prefix
+                | Column::Geo
+                | Column::Graph
         )
     }
 
@@ -95,9 +118,9 @@ impl Column {
     }
 
     /// The value of a numeric column, in milliseconds, percent or km (`???` when
-    /// there is nothing to measure), the AS number or the location. Distances are
-    /// from `origin`; `!` marks a location the hop's RTT rules out. Empty for hop,
-    /// host and graph.
+    /// there is nothing to measure), the AS, its name or prefix, or the location.
+    /// Distances are from `origin`; `!` marks a location the hop's RTT rules out.
+    /// Empty for hop, host and graph.
     pub fn value(self, hop: &HopStats, origin: Option<&Origin>) -> String {
         let ms = format_ms;
         let assessment = || hop.assess(origin);
@@ -120,11 +143,8 @@ impl Column {
             Column::Worst => ms(hop.worst_rtt),
             Column::Stdev if hop.received == 0 => "???".to_string(),
             Column::Stdev => format!("{:.1}", hop.stddev_ms()),
-            Column::Asn => match (hop.asn, hop.addr) {
-                (Some(asn), _) => format!("AS{asn}"),
-                (None, Some(_)) => "AS???".to_string(),
-                (None, None) => String::new(),
-            },
+            Column::Asn | Column::AsName | Column::Prefix if hop.addr.is_none() => String::new(),
+            Column::Asn | Column::AsName | Column::Prefix => as_value(self, hop.asn.as_ref()),
             Column::Geo => match (&hop.geo, hop.addr) {
                 (Some(fix), _) => format!("{}{}", fix.place(), mark(assessment())),
                 (None, Some(_)) => "???".to_string(),
@@ -203,6 +223,29 @@ mod tests {
             "8 +2",
             "255 - 247 routers back"
         );
+    }
+
+    #[test]
+    fn as_columns_fill_in_as_lookups_return() {
+        let mut hop = HopStats::new(3);
+        let values = |hop: &HopStats| {
+            [Column::Asn, Column::AsName, Column::Prefix].map(|c| c.value(hop, None))
+        };
+        assert_eq!(values(&hop), ["", "", ""], "nobody answered");
+        let addr = "192.0.2.1".parse().unwrap();
+        hop.increment_sent(0);
+        hop.add_rtt_from_addr(addr, Duration::from_millis(5));
+        assert_eq!(values(&hop), ["AS???", "???", "???"]);
+        let mut info = AsInfo {
+            number: 13335,
+            prefix: Some("192.0.2.0/24".into()),
+            name: None,
+        };
+        hop.set_asn_for_addr(addr, info.clone());
+        assert_eq!(values(&hop), ["AS13335", "???", "192.0.2.0/24"]);
+        info.name = Some("CLOUDFLARENET - Cloudflare, Inc., US".into());
+        hop.set_asn_for_addr(addr, info);
+        assert_eq!(values(&hop), ["AS13335", "CLOUDFLARENET", "192.0.2.0/24"]);
     }
 
     #[test]

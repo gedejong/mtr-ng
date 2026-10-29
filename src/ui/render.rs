@@ -269,8 +269,8 @@ fn cell_text(column: Column, row: &HostRow, origin: Option<&Origin>) -> String {
         (Column::Back, RowKind::Alternate(alt)) => {
             columns::routers_back(alt.routers_back(), row.hop.hop)
         }
-        (Column::Asn, RowKind::Alternate(alt)) => {
-            alt.asn.map_or("AS???".to_string(), |n| format!("AS{n}"))
+        (Column::Asn | Column::AsName | Column::Prefix, RowKind::Alternate(alt)) => {
+            columns::as_value(column, alt.asn.as_ref())
         }
         _ => String::new(),
     }
@@ -368,7 +368,12 @@ fn render_table(
     let columns = &columns[..widths.len()];
 
     let header = Row::new(columns.iter().map(|&c| match c {
-        Column::Host | Column::Asn | Column::Geo | Column::Graph => Line::from(c.header()),
+        Column::Host
+        | Column::Asn
+        | Column::AsName
+        | Column::Prefix
+        | Column::Geo
+        | Column::Graph => Line::from(c.header()),
         _ => right(c.header()),
     }))
     .style(Style::default().add_modifier(Modifier::BOLD));
@@ -396,7 +401,7 @@ fn render_table(
                         _ => line.alignment(Alignment::Right),
                     })
                 }
-                Column::Asn | Column::Geo => Cell::from(text),
+                Column::Asn | Column::AsName | Column::Prefix | Column::Geo => Cell::from(text),
                 _ => Cell::from(right(text)),
             });
         let style = match row.kind {
@@ -632,6 +637,7 @@ fn detail_lines(
             hop, &letters, names, flows, width, ui.colors,
         ));
     }
+    lines.extend(network_lines(hop, &letters, ui.colors, width));
     lines.extend(location_lines(hop, &letters, session, ui.colors, width));
 
     lines.push(Line::from(""));
@@ -698,6 +704,43 @@ fn detail_lines(
             "+N or -N: that many more or fewer, so the reply came back another way.",
             dim,
         ));
+    }
+    lines
+}
+
+/// Each responder's AS with its name, and the prefix it is in. Nothing before
+/// an AS lookup has returned.
+fn network_lines(
+    hop: &HopStats,
+    letters: &[(char, IpAddr)],
+    colors: ColorSupport,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let known: Vec<_> = letters
+        .iter()
+        .filter_map(|&(letter, addr)| Some((letter, hop.responders[&addr].asn.as_ref()?)))
+        .collect();
+    if known.is_empty() {
+        return Vec::new();
+    }
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(""), Line::styled("Network", bold)];
+    for (letter, info) in known {
+        let mut facts = vec![match &info.name {
+            Some(name) => format!("AS{} {name}", info.number),
+            None => format!("AS{}", info.number),
+        }];
+        facts.extend(info.prefix.clone());
+        for (i, text) in pack(&facts, " · ", width.saturating_sub(3))
+            .into_iter()
+            .enumerate()
+        {
+            let lead = match i {
+                0 => letter_span(letter, colors),
+                _ => Span::raw(" "),
+            };
+            lines.push(Line::from(vec![lead, Span::raw(format!("  {text}"))]));
+        }
     }
     lines
 }
@@ -798,7 +841,7 @@ fn responder_lines(
         Some(name) if names => format!("{name} ({})", r.addr),
         _ => r.addr.to_string(),
     };
-    let asn = |r: &ResponderStats| r.asn.map(|n| format!("AS{n}"));
+    let asn = |r: &ResponderStats| r.asn.as_ref().map(|a| format!("AS{}", a.number));
     let flows_of = |r: &ResponderStats| {
         let met: BTreeSet<u16> = hop
             .flows
