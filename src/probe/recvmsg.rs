@@ -11,6 +11,48 @@ use std::{
     ptr,
 };
 
+/// The ICMPv6 types a trace reads: Destination Unreachable, Packet Too Big, Time
+/// Exceeded, Parameter Problem and Echo Reply.
+const ICMPV6_WANTED: [u8; 5] = [1, 2, 3, 4, 129];
+
+/// `ICMP6_FILTER`, which libc doesn't define: Linux numbers it 1, the BSDs 18.
+const ICMP6_FILTER: libc::c_int = if cfg!(target_os = "linux") { 1 } else { 18 };
+
+/// An `icmp6_filter` that passes `wanted` and nothing else. RFC 3542 leaves the
+/// sense of a bit to the system: Linux blocks the types whose bit is set, the
+/// BSDs and macOS pass them.
+fn icmpv6_filter(wanted: &[u8], set_blocks: bool) -> [u32; 8] {
+    let mut passed = [0u32; 8];
+    for &kind in wanted {
+        passed[usize::from(kind >> 5)] |= 1 << (kind & 31);
+    }
+    match set_blocks {
+        true => passed.map(|word| !word),
+        false => passed,
+    }
+}
+
+/// Let only the ICMPv6 types a trace reads reach `fd`. A raw ICMPv6 socket
+/// otherwise wakes for every neighbour solicitation, router advertisement and
+/// multicast listener report on the link.
+pub(super) fn filter_icmpv6(fd: RawFd) -> io::Result<()> {
+    let filter = icmpv6_filter(&ICMPV6_WANTED, cfg!(target_os = "linux"));
+    // SAFETY: a valid descriptor and a 32-byte icmp6_filter, the size passed.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_ICMPV6,
+            ICMP6_FILTER,
+            filter.as_ptr().cast(),
+            mem::size_of_val(&filter) as libc::socklen_t,
+        )
+    };
+    match ret {
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
 /// Turn on the boolean socket option `name` at `level`.
 pub(super) fn set_option(fd: RawFd, level: libc::c_int, name: libc::c_int) -> io::Result<()> {
     set_int_option(fd, level, name, 1)
@@ -241,6 +283,26 @@ mod tests {
     use super::*;
     use socket2::{Domain, Protocol, Socket, Type};
     use std::os::fd::AsRawFd;
+
+    #[test]
+    fn the_icmpv6_filter_passes_errors_and_echo_replies() {
+        let passes = icmpv6_filter(&ICMPV6_WANTED, false);
+        let will_pass =
+            |filter: &[u32; 8], kind: u8| filter[usize::from(kind >> 5)] >> (kind & 31) & 1 == 1;
+        for kind in 0..=255u8 {
+            assert_eq!(
+                will_pass(&passes, kind),
+                ICMPV6_WANTED.contains(&kind),
+                "{kind}"
+            );
+        }
+        let blocks = icmpv6_filter(&ICMPV6_WANTED, true);
+        assert!(
+            !will_pass(&blocks, 3) && will_pass(&blocks, 135),
+            "inverted for Linux"
+        );
+        assert_eq!(passes[4], 1 << 1, "129 is bit 1 of word 4");
+    }
 
     #[test]
     fn loopback_has_an_mtu() {

@@ -225,7 +225,7 @@ impl ProbeEngine {
             if ipv6 { "v6" } else { "" }
         );
         if ipv6 {
-            set_ipv6_options(&socket);
+            set_ipv6_options(&socket, kind);
         }
         let udp = match protocol {
             ProbeProtocol::Icmp => None,
@@ -667,12 +667,19 @@ fn open_udp_sender(target: IpAddr, kind: SocketKind) -> Result<UdpSender> {
 /// Ask the kernel for each reply's hop limit, which an ICMPv6 socket doesn't show
 /// in the packet, and on Linux to send the flow label in each destination address
 /// (it ignores it otherwise; elsewhere the label is always sent). Routers balance
-/// IPv6 on the flow label, so each flow sets its own.
-fn set_ipv6_options(socket: &Socket) {
+/// IPv6 on the flow label, so each flow sets its own. A raw or datagram ICMPv6
+/// socket also gets a filter for the types a trace reads; a ping socket only
+/// sees its own echo replies anyway.
+fn set_ipv6_options(socket: &Socket, kind: SocketKind) {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
         let fd = socket.as_raw_fd();
+        if matches!(kind, SocketKind::Raw | SocketKind::Datagram) {
+            if let Err(e) = recvmsg::filter_icmpv6(fd) {
+                tracing::debug!("cannot filter ICMPv6 types: {e}");
+            }
+        }
         if let Err(e) = recvmsg::set_option(fd, libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT) {
             tracing::debug!("cannot read IPv6 hop limits: {e}");
         }
@@ -682,7 +689,7 @@ fn set_ipv6_options(socket: &Socket) {
         }
     }
     #[cfg(not(unix))]
-    let _ = socket;
+    let _ = (socket, kind);
 }
 
 /// `addr` with flow label `label`. sin6_flowinfo is in network byte order, and
