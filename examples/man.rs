@@ -76,6 +76,10 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Measure distances from Amsterdam, which also tightens the light-speed check.",
     ),
     (
+        "mtr-ng -r --ipmap example.com",
+        "Also place the hops with RIPE IPmap, which measures where routers are. See GEOLOCATION.",
+    ),
+    (
         "mtr-ng -c 20 --geojson example.com > path.geojson",
         "Save the located hops and the path for a map viewer such as geojson.io.",
     ),
@@ -91,8 +95,9 @@ const EXAMPLES: &[(&str, &str)] = &[
 
 const PRIVACY: &str = "Apart from the probes, mtr-ng sends the target's name and, unless -n, \
 the name of every address that answers to this machine's resolver, and with -z every public \
-address that answers to Team Cymru's DNS service. Locations come from a local database. \
-Private addresses are never looked up anywhere. --privacy-hops N hides the first N hops in \
+address that answers to Team Cymru's DNS service. Locations come from a local database, and \
+with --ipmap every public address that answers also goes to RIPE IPmap, which may measure it \
+from RIPE Atlas probes. Private addresses are never looked up anywhere. --privacy-hops N hides the first N hops in \
 the TUI and every report format, with the local host name, and never looks them up; branches \
 among them stay apart, and they are hidden from --metrics too. With --metrics, anyone who can \
 reach its address can read the trace. The a key lists what the running trace sends, and the \
@@ -149,7 +154,7 @@ balanced hop gives its branches; a report without -c runs until the search is do
 with what it found. Where branches cross between hops, one address leading to several and \
 another reached from several, a branch may have been missed: MDA-Lite assumes they don't cross.";
 
-const GEOLOCATION: [&str; 3] = [
+const GEOLOCATION: [&str; 4] = [
     "With -g, the geo, dist or stretch columns, or the map (m), mtr-ng places hops with a local \
      database in MaxMind's format: --geoip-mmdb, else the newest .mmdb in \
      ~/.local/share/mtr-ng, else dbip-city-lite.mmdb or GeoLite2-City.mmdb in \
@@ -168,6 +173,12 @@ const GEOLOCATION: [&str; 3] = [
      The stretch column is a hop's best RTT, less that hop's, over the round trip light in \
      fibre needs for the distance: 1.0 is a straight fibre, most paths take 2 or 3. The \
      report and the map also compare the path through the located hops with the great circle.",
+    "--ipmap also asks RIPE IPmap (ipmap.ripe.net) where each public address that answers is, \
+     with or without a database. IPmap measures routers from nearby RIPE Atlas probes and \
+     scores each answer; mtr-ng takes city-level answers that score 30 or more, which rest on \
+     measurements, and none for anycast addresses. Such an answer replaces the database's \
+     location, but not a city from the router's name, nor when the RTT rules it out and not \
+     the database's location. See PRIVACY.",
 ];
 
 /// Escapes text for roff, where a backslash starts an escape and `-` is a hyphen.

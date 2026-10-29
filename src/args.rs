@@ -181,6 +181,13 @@ pub struct Args {
     #[arg(short = 'g', long)]
     pub geo: bool,
 
+    /// Also ask RIPE IPmap where each public address that answers is, and trust
+    /// its answers that rest on measurements. Sends those addresses to the RIPE
+    /// NCC, which may measure them from RIPE Atlas probes. Works without a local
+    /// database; shows the Location and Dist columns like -g
+    #[arg(long)]
+    pub ipmap: bool,
+
     /// Geolocation database in MaxMind's format: DB-IP City Lite or GeoLite2 City.
     /// Default: the newest .mmdb in ~/.local/share/mtr-ng, then the usual system places
     #[arg(long, value_name = "PATH")]
@@ -392,7 +399,7 @@ impl Args {
             if self.aslookup {
                 extra.push(Column::Asn);
             }
-            if self.geo {
+            if self.geo || self.ipmap {
                 extra.extend([Column::Geo, Column::Dist]);
             }
             columns.splice(2..2, extra);

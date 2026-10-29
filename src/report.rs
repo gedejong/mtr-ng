@@ -199,6 +199,17 @@ fn geo_notes(
             topology::ranges(&named)
         ));
     }
+    let measured: std::collections::BTreeSet<u16> = hops
+        .iter()
+        .filter(|hop| hop.geo.as_ref().is_some_and(|fix| fix.from_ipmap.is_some()))
+        .map(|hop| u16::from(hop.hop))
+        .collect();
+    if !measured.is_empty() {
+        notes.push(format!(
+            "Placed by RIPE IPmap: hop {}",
+            topology::ranges(&measured)
+        ));
+    }
     if let Some(credit) = attribution {
         notes.push(format!("Locations: {credit}"));
     }
@@ -293,6 +304,7 @@ fn json_hubs(
                     "stretch": json_stretch(assessment),
                     "impossible": assessment.is_some_and(|a| a.impossible),
                     "from_name": fix.from_name,
+                    "from_ipmap": fix.from_ipmap,
                 });
             }
             if flows > 1 {
@@ -449,6 +461,7 @@ fn geojson(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Value {
             "stretch": json_stretch(assessment),
             "impossible": impossible,
             "from_name": fix.from_name,
+            "from_ipmap": fix.from_ipmap,
             "loss_pct": (hop.loss_percent * 10.0).round() / 10.0,
             "sent": hop.sent,
             "best_ms": json_ms(hop.best_rtt),
@@ -559,7 +572,11 @@ pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Resu
                 "hubs": json_hubs(hops, args.numeric, args.wants_asn(), session.flows(), origin),
             }
         });
-        if let Some(geo) = json_geo(session.geo_attribution(), origin, session.inflation()) {
+        if let Some(geo) = json_geo(
+            session.geo_attribution().as_deref(),
+            origin,
+            session.inflation(),
+        ) {
             report["report"]["mtr"]["geo"] = geo;
         }
         if let Some(path) = &args.replay {
@@ -579,7 +596,11 @@ pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Resu
         collection["target"] = json!(session.target);
         collection["start"] = json!(start.to_rfc3339());
         collection["simulated"] = json!(session.is_simulated());
-        if let Some(geo) = json_geo(session.geo_attribution(), origin, session.inflation()) {
+        if let Some(geo) = json_geo(
+            session.geo_attribution().as_deref(),
+            origin,
+            session.inflation(),
+        ) {
             collection["geo"] = geo;
         }
         println!("{}", serde_json::to_string_pretty(&collection)?);
@@ -626,7 +647,7 @@ pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Resu
         &columns,
         origin,
         session.inflation(),
-        session.geo_attribution(),
+        session.geo_attribution().as_deref(),
     );
     if !notes.is_empty() {
         println!();

@@ -88,6 +88,7 @@ pub fn locate(hostname: &str) -> Option<GeoFix> {
             city: Some(city.to_string()),
             country: Some(country.to_string()),
             from_name: Some(code.to_string()),
+            from_ipmap: None,
         })
     })
 }

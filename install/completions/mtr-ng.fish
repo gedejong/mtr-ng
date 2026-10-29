@@ -48,6 +48,7 @@ complete -c mtr-ng -l geojson -d 'Print the located hops and the path between th
 complete -c mtr-ng -s n -l numeric -d 'Show IP addresses instead of hostnames'
 complete -c mtr-ng -s z -l aslookup -d 'Show the AS number of each hop. Asks Team Cymru\'s DNS about every public address'
 complete -c mtr-ng -s g -l geo -d 'Show where each hop is (Location and Dist columns), from a local geolocation database: nothing is sent anywhere. A location farther away than light in fibre gets in the hop\'s best RTT is marked with !'
+complete -c mtr-ng -l ipmap -d 'Also ask RIPE IPmap where each public address that answers is, and trust its answers that rest on measurements. Sends those addresses to the RIPE NCC, which may measure them from RIPE Atlas probes. Works without a local database; shows the Location and Dist columns like -g'
 complete -c mtr-ng -s e -l mpls -d 'Show the MPLS labels (RFC 4950) and interfaces (RFC 5837) routers report, under their hop'
 complete -c mtr-ng -l pmtu -d 'Find the path MTU and where it narrows: each round one more probe, as large as the path seems to allow, with Don\'t Fragment set'
 complete -c mtr-ng -l show-all -d 'Display all available columns'

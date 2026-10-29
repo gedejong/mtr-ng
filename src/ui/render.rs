@@ -10,7 +10,7 @@ use super::visualization::{
 };
 use crate::args::{Column, ProbeProtocol};
 use crate::columns::{self, format_ms};
-use crate::geo::{self, Origin};
+use crate::geo::{self, GeoFix, Origin};
 use crate::hop_stats::ResponderStats;
 use crate::icmp_ext::{Interface, MplsLabel};
 use crate::privacy;
@@ -875,6 +875,9 @@ fn location_lines(
         if let Some(code) = &fix.from_name {
             place.push_str(&format!(" ({code} in its name)"));
         }
+        if let Some(score) = fix.from_ipmap {
+            place.push_str(&format!(" (RIPE IPmap, score {score})"));
+        }
         let mut facts = vec![place];
         let assessment = origin.and_then(|o| geo::assess(fix, responder.best_rtt, &o));
         if let Some(a) = assessment {
@@ -911,10 +914,15 @@ fn location_lines(
             ]));
         }
     }
-    // Credit the database where it placed something; names need none
-    let from_database = placed.iter().any(|(_, _, fix)| fix.from_name.is_none());
-    if let Some(credit) = session.geo_attribution().filter(|_| from_database) {
-        let dim = Style::default().add_modifier(Modifier::DIM);
+    // Credit the database or IPmap where they placed something; names need none
+    let from = |source: fn(&GeoFix) -> bool| placed.iter().any(|(_, _, fix)| source(fix));
+    let database = from(|fix| fix.from_name.is_none() && fix.from_ipmap.is_none());
+    let credits = [
+        session.database_attribution().filter(|_| database),
+        from(|fix| fix.from_ipmap.is_some()).then_some(geo::ipmap::ATTRIBUTION),
+    ];
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    for credit in credits.into_iter().flatten() {
         lines.push(Line::styled(credit.to_string(), dim));
     }
     lines
@@ -1149,7 +1157,12 @@ fn live_sends(session: &MtrSession) -> Vec<String> {
             .to_string(),
         false => "AS lookups: none (-z sends public addresses to Team Cymru).".to_string(),
     });
-    sent.push("Locations: nothing, the database is on this machine.".to_string());
+    sent.push(match args.ipmap && !session.is_simulated() {
+        true => "Locations: each public address that answers, to RIPE IPmap (--ipmap), \
+                 which may measure it from RIPE Atlas probes. Private addresses never leave."
+            .to_string(),
+        false => "Locations: nothing, the database is on this machine.".to_string(),
+    });
     sent
 }
 
@@ -1196,7 +1209,7 @@ fn about_lines(session: &MtrSession, width: usize) -> Vec<Line<'static>> {
 
     let data = [
         session.geo_attribution().map_or_else(
-            || "Locations: no database (see -g).".to_string(),
+            || "Locations: no database (see -g), no IPmap (see --ipmap).".to_string(),
             |credit| format!("Locations: {credit}."),
         ),
         "Router names: city codes from the looking glasses of Arelion, Cogent, Hurricane \

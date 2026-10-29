@@ -184,6 +184,9 @@ mtr-ng -r -e google.com
 mtr-ng -r -g google.com
 mtr-ng -r -g --origin 52.37,4.89 google.com
 
+# Also ask RIPE IPmap, which places routers by measurement, and needs no database
+mtr-ng -r --ipmap google.com
+
 # A report to share: hops 1 and 2 are hidden and never looked up
 mtr-ng -r --privacy-hops 2 google.com
 
@@ -214,12 +217,14 @@ A database places a router where its owner registered it, often a head office a 
 
 The `stretch` column turns the same arithmetic around: a hop's best RTT, less the origin hop's (so the local network and the access line don't count), over the round trip light in fibre needs for the distance. 1.0 would be a straight fibre; most paths take 2 or 3, and a hop well above its neighbours sits behind a detour. Hops nearer than 100 km get none, since there the routers' own delay is most of the RTT. The report also says how long the path through the located hops is against the great circle to the last of them, as does the map's key.
 
-In `--json` each hub carries a `geo` object (city, country, lat, lon, accuracy_km, distance_km, impossible, from_name), and `mtr.geo` says whose locations they are and where distances are measured from. `--geojson` is RFC 7946: coordinates are [longitude, latitude], ruled-out hops are points with `"impossible": true` (red in viewers that read simplestyle-spec) and stay off the path, and a path across the date line is cut there.
+In `--json` each hub carries a `geo` object (city, country, lat, lon, accuracy_km, distance_km, impossible, from_name, from_ipmap), and `mtr.geo` says whose locations they are and where distances are measured from. `--geojson` is RFC 7946: coordinates are [longitude, latitude], ruled-out hops are points with `"impossible": true` (red in viewers that read simplestyle-spec) and stay off the path, and a path across the date line is cut there.
 
 Router names are often better evidence. Large networks name their routers after the city they stand in, each in codes of its own: Arelion's `adm` is Amsterdam, `win` Vienna and `san` San Antonio, while to Cogent, which uses airport codes, `san` is San Diego. mtr-ng carries the codes of Arelion, Cogent, Hurricane Electric and Lumen, taken from the router lists in their looking glasses (and, for Cogent's other sites, OurAirports' list of large airports). When a hop's name has one, that city goes before the database, unless the RTT rules it out and not the database's location; the hop details say `adm in its name`. The names come from reverse DNS, so `-n` turns this off.
 
+`--ipmap` also asks [RIPE IPmap](https://ipmap.ripe.net) where each public address that answers is. IPmap places routers by measuring them from nearby RIPE Atlas probes, which a database can't, and gives each answer a score: those resting on measurements scored 38 to 57 in testing, those resting only on reverse DNS, crowdsourcing or a city's population 30 or less, and those were wrong about as often as right. mtr-ng takes city-level answers that score 30 or more, and none for anycast addresses, which have no one place. Such an answer replaces the database's location, but not a city from the router's name, and not when the RTT rules it out and not the database's location. The hop details say `RIPE IPmap, score 51`, and the credits name IPmap wherever its locations are shown. `--ipmap` works without a database too. It sends the addresses to the RIPE NCC (see Privacy), so it is off unless asked for.
+
 ### Privacy
-What mtr-ng sends, apart from the probes themselves: the target's name and, unless `-n`, the name of every address that answers go to this machine's resolver; with `-z`, every public address that answers goes to Team Cymru's DNS service. Locations are looked up in a local database, and private addresses are never looked up anywhere. With `--metrics`, anyone who can reach its address can read the trace. `a` in the TUI lists this for the running trace, with the data sources and their licences.
+What mtr-ng sends, apart from the probes themselves: the target's name and, unless `-n`, the name of every address that answers go to this machine's resolver; with `-z`, every public address that answers goes to Team Cymru's DNS service. Locations are looked up in a local database, and with `--ipmap` every public address that answers also goes to RIPE IPmap, which may measure it from RIPE Atlas probes. Private addresses are never looked up anywhere. With `--metrics`, anyone who can reach its address can read the trace. `a` in the TUI lists this for the running trace, with the data sources and their licences.
 
 `--privacy-hops N` hides the first N hops, usually your own network and your provider's first routers, in the TUI and in every report format: their addresses, names, ASes and locations show as `(hidden)` or not at all, the local host name in the report header too, and they are never looked up. Load-balanced branches among them stay apart, as `A (hidden)` and `B (hidden)` in the flow matrix.
 

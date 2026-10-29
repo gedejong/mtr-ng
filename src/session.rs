@@ -45,6 +45,8 @@ pub struct MtrSession {
     dns_names: HashMap<IpAddr, Option<String>>,
     /// Origin AS per address, with `--aslookup`; `None` while pending or unknown
     asns: HashMap<IpAddr, Option<AsInfo>>,
+    /// IPmap's locations, with `--ipmap`; `None` while pending or not sure enough
+    ipmap: HashMap<IpAddr, Option<GeoFix>>,
     /// AS names per AS number; `None` while pending or unknown
     as_names: HashMap<u32, Option<String>>,
     /// The geolocation database, if there is one
@@ -129,6 +131,7 @@ impl MtrSession {
             dns_names: HashMap::new(),
             asns: HashMap::new(),
             as_names: HashMap::new(),
+            ipmap: HashMap::new(),
             geo_source: None,
             locations: HashMap::new(),
             pmtu: None,
@@ -246,7 +249,8 @@ impl MtrSession {
             true => Some(Arc::new(simulate::SimGeo::new(self.target_addr))),
             false => geo::open(self.args.geoip_mmdb.as_deref())?,
         };
-        if self.geo_source.is_none() && self.args.wants_geo() {
+        // IPmap can do without a database
+        if self.geo_source.is_none() && self.args.wants_geo() && !self.args.ipmap {
             bail!(
                 "no geolocation database found. Get DB-IP's free one with\n  {}\nor pass --geoip-mmdb PATH",
                 geo::DOWNLOAD
@@ -260,14 +264,36 @@ impl MtrSession {
         self.geo_source = Some(source);
     }
 
-    /// Whose data the locations are, as its licence asks to be credited.
-    pub fn geo_attribution(&self) -> Option<&str> {
+    /// Whose data the locations are, as their licences ask to be credited: the
+    /// database's, and IPmap's with `--ipmap`.
+    pub fn geo_attribution(&self) -> Option<String> {
+        let ipmap = self.args.ipmap && !self.is_simulated();
+        let credits: Vec<&str> = [
+            self.database_attribution(),
+            ipmap.then_some(geo::ipmap::ATTRIBUTION),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!credits.is_empty()).then(|| credits.join("; "))
+    }
+
+    /// The database's credit alone
+    pub fn database_attribution(&self) -> Option<&str> {
         self.geo_source.as_deref().map(GeoSource::attribution)
+    }
+
+    /// Whether hops are placed at all: by a database, or by IPmap
+    fn locating(&self) -> bool {
+        self.geo_source.is_some() || self.args.ipmap
     }
 
     /// Where `addr` is, looked up once. Private and special addresses are never
     /// looked up; the simulation's documentation addresses are.
     fn locate(&mut self, addr: IpAddr) -> Option<GeoFix> {
+        if let Some(known) = self.locations.get(&addr) {
+            return known.clone();
+        }
         let source = self.geo_source.as_ref()?;
         let public = crate::asn::is_public(addr) || self.args.simulate;
         self.locations
@@ -471,8 +497,7 @@ impl MtrSession {
             let ruled_out = |fix: &GeoFix| self.ruled_out(addr, fix);
             let database = self.locations.get(&addr).cloned().flatten();
             let named = self
-                .geo_source
-                .is_some()
+                .locating()
                 .then(|| geo::names::locate(name))
                 .flatten()
                 .filter(|fix| !ruled_out(fix) || database.as_ref().is_none_or(ruled_out));
@@ -569,6 +594,45 @@ impl MtrSession {
         }
     }
 
+    /// True the first time a public address is seen with `--ipmap`: the caller
+    /// should ask IPmap where it is.
+    pub fn want_ipmap(&mut self, addr: IpAddr) -> bool {
+        if !self.args.ipmap
+            || self.is_simulated()
+            || !crate::asn::is_public(addr)
+            || self.ipmap.contains_key(&addr)
+        {
+            return false;
+        }
+        self.ipmap.insert(addr, None);
+        true
+    }
+
+    /// Store IPmap's answer for `addr` and place it there, unless a city code in
+    /// its name does (names go first), or the RTT rules IPmap's place out and
+    /// not the one it has.
+    pub fn set_ipmap(&mut self, addr: IpAddr, fix: Option<GeoFix>) {
+        if let Some(recorder) = &self.recorder {
+            recorder.ipmap(addr, &fix);
+        }
+        self.ipmap.insert(addr, fix.clone());
+        let Some(fix) = fix else { return };
+        let current = self.locations.get(&addr).cloned().flatten();
+        let keep = current.as_ref().is_some_and(|current| {
+            let named = current.from_name.is_some();
+            !self.ruled_out(addr, current) && (named || self.ruled_out(addr, &fix))
+        });
+        if keep {
+            return;
+        }
+        self.locations.insert(addr, Some(fix.clone()));
+        for hop in &mut self.hops {
+            if hop.responders.contains_key(&addr) {
+                hop.set_geo_for_addr(addr, fix.clone());
+            }
+        }
+    }
+
     /// Count a probe sent to hop `index` (from 0) in `flow`. Returns its number
     /// at the hop, which its reply or timeout names.
     pub fn sent(&mut self, index: usize, flow: u16) -> u64 {
@@ -643,6 +707,7 @@ impl MtrSession {
                 self.set_asn(addr, info);
             }
             Event::AsName { asn, name } => self.set_as_name(asn, name),
+            Event::Ipmap { addr, location } => self.set_ipmap(addr, location),
             Event::Reset => self.reset_statistics(),
             Event::Start(_) => {}
         }
@@ -712,6 +777,7 @@ mod tests {
             geoip_mmdb: None,
             origin: None,
             privacy_hops: 0,
+            ipmap: false,
             metrics: None,
             record: None,
             replay: None,
@@ -761,6 +827,7 @@ mod tests {
             geoip_mmdb: None,
             origin: None,
             privacy_hops: 0,
+            ipmap: false,
             metrics: None,
             record: None,
             replay: None,
@@ -977,6 +1044,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ipmap_places_what_the_database_has_wrong_but_not_what_names_place() {
+        use crate::geo::tests::{city, FakeGeo};
+        let mut session = session_for(&["-n", "--ipmap", "1.1.1.1"]).await;
+        assert!(session.want_ipmap(IpAddr::from([8, 8, 8, 8])));
+        assert!(
+            !session.want_ipmap(IpAddr::from([8, 8, 8, 8])),
+            "asked once"
+        );
+        assert!(!session.want_ipmap(IpAddr::from([10, 0, 0, 1])), "private");
+        let known = [
+            ([8, 8, 8, 8], city("Amsterdam", "NL", 52.37, 4.89)),
+            ([9, 9, 9, 9], city("Mountain View", "US", 37.39, -122.08)),
+            ([1, 1, 1, 1], city("Sydney", "AU", -33.87, 151.21)),
+        ];
+        let known = known.into_iter().map(|(a, fix)| (IpAddr::from(a), fix));
+        session.set_geo_source(Arc::new(FakeGeo(known.collect())));
+        let path = [[8, 8, 8, 8], [9, 9, 9, 9], [1, 1, 1, 1]];
+        for (ttl, from) in path.into_iter().enumerate() {
+            session.apply_response(&response(ttl, IcmpResponseType::TimeExceeded, from));
+        }
+        let measured = |place: &str, lat, lon| GeoFix {
+            from_ipmap: Some(45),
+            ..city(place, "NL", lat, lon)
+        };
+
+        // The database put a router 10 ms away in California; IPmap measured it
+        let nine = IpAddr::from([9, 9, 9, 9]);
+        session.set_ipmap(nine, Some(measured("Rotterdam", 51.92, 4.48)));
+        let fix = session.hops[1].geo.clone().unwrap();
+        assert_eq!(
+            (fix.place(), fix.from_ipmap),
+            ("Rotterdam, NL".into(), Some(45))
+        );
+        assert_eq!(session.hops[1].responders[&nine].geo, Some(fix));
+
+        // A city code in the name goes first, and stays first
+        let one = IpAddr::from([1, 1, 1, 1]);
+        session.set_hostname(one, Some("adm-b3-link.ip.twelve99.net".into()));
+        session.set_ipmap(one, Some(measured("Utrecht", 52.09, 5.12)));
+        assert_eq!(
+            session.hops[2].geo.as_ref().unwrap().from_name.as_deref(),
+            Some("adm")
+        );
+
+        // IPmap's place 10 ms rules out doesn't replace one it allows
+        let eight = IpAddr::from([8, 8, 8, 8]);
+        let far = GeoFix {
+            from_ipmap: Some(40),
+            ..city("Tokyo", "JP", 35.68, 139.69)
+        };
+        session.set_ipmap(eight, Some(far));
+        assert_eq!(
+            session.hops[0].geo.as_ref().map(GeoFix::place),
+            Some("Amsterdam, NL".into())
+        );
+        assert_eq!(
+            session.geo_attribution().unwrap(),
+            "test locations; RIPE IPmap, by the RIPE NCC"
+        );
+    }
+
+    #[tokio::test]
     async fn a_named_database_that_cannot_be_read_is_an_error() {
         let mut session =
             session_for(&["-g", "--geoip-mmdb", "/nonexistent/x.mmdb", "1.1.1.1"]).await;
@@ -1031,6 +1160,7 @@ mod tests {
             geoip_mmdb: None,
             origin: None,
             privacy_hops: 0,
+            ipmap: false,
             metrics: None,
             record: None,
             replay: None,

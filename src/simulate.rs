@@ -162,6 +162,7 @@ impl GeoSource for SimGeo {
             city: Some(city.to_string()),
             country: Some(country.to_string()),
             from_name: None,
+            from_ipmap: None,
         })
     }
 

@@ -149,7 +149,7 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                     mpls: reply.mpls,
                     interfaces: reply.interfaces,
                 };
-                let (name, asn, resolver) = {
+                let (name, asn, ipmap, resolver) = {
                     let mut s = session.lock().unwrap();
                     s.apply_response(&response);
                     if let Some(mda) = s.mda.as_mut() {
@@ -160,8 +160,12 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                     let shown = !s.is_hidden(probe.hop + 1);
                     let name = shown && !s.args.numeric && s.want_lookup(reply.source);
                     let asn = shown && s.want_asn(reply.source);
-                    (name, asn, s.resolver.clone())
+                    let ipmap = shown && s.want_ipmap(reply.source);
+                    (name, asn, ipmap, s.resolver.clone())
                 };
+                if ipmap {
+                    dns.spawn(ipmap_lookup(Arc::clone(&session), reply.source));
+                }
                 if name {
                     dns.spawn(reverse_lookup(Arc::clone(&session), resolver.clone(), reply.source));
                 }
@@ -364,6 +368,18 @@ async fn asn_lookup(session: Shared, resolver: hickory_resolver::TokioResolver, 
         s.set_as_name(number, name);
         s.notify();
     }
+}
+
+/// Where RIPE IPmap puts `addr`. The HTTP client blocks, so on a thread of
+/// tokio's blocking pool, which starts long after privileges are given up.
+async fn ipmap_lookup(session: Shared, addr: IpAddr) {
+    let fix = tokio::task::spawn_blocking(move || crate::geo::ipmap::locate(addr))
+        .await
+        .ok()
+        .flatten();
+    let mut s = session.lock().unwrap();
+    s.set_ipmap(addr, fix);
+    s.notify();
 }
 
 async fn reverse_lookup(session: Shared, resolver: hickory_resolver::TokioResolver, addr: IpAddr) {

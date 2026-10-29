@@ -13,6 +13,7 @@
 
 use crate::args::{Args, Flows, ProbeProtocol};
 use crate::asn::AsInfo;
+use crate::geo::GeoFix;
 use crate::icmp_ext::{Interface, MplsLabel};
 use crate::privacy::{self, StandIns};
 use crate::probe::{IcmpResponseType, ProbeResponse, MAX_FLOWS};
@@ -115,6 +116,11 @@ pub enum Event {
     AsName {
         asn: u32,
         name: Option<String>,
+    },
+    /// RIPE IPmap's answer (`--ipmap`), if it was sure enough
+    Ipmap {
+        addr: IpAddr,
+        location: Option<GeoFix>,
     },
     /// The statistics were started over (`r` in the TUI)
     Reset,
@@ -271,6 +277,13 @@ impl Recorder {
     pub fn as_name(&self, asn: u32, name: &Option<String>) {
         let name = name.clone();
         self.write(Event::AsName { asn, name });
+    }
+
+    pub fn ipmap(&self, addr: IpAddr, location: &Option<GeoFix>) {
+        if !self.hidden(addr) {
+            let location = location.clone();
+            self.write(Event::Ipmap { addr, location });
+        }
     }
 
     pub fn reset(&self) {
@@ -480,6 +493,12 @@ mod tests {
         };
         live.set_asn(core, Some(info));
         live.set_as_name(64500, Some("EXAMPLE".to_string()));
+        let measured = GeoFix {
+            from_ipmap: Some(45),
+            ..crate::geo::tests::city("Rotterdam", "NL", 51.92, 4.48)
+        };
+        live.set_ipmap(core, Some(measured.clone()));
+        live.set_ipmap(gateway, Some(measured.clone()));
         live.recorder.as_ref().unwrap().flush();
 
         let text = std::fs::read_to_string(&path).unwrap();
@@ -499,6 +518,12 @@ mod tests {
         assert_eq!(asn.prefix.as_deref(), Some("198.51.100.0/24"));
         assert_eq!(asn.name.as_deref(), Some("EXAMPLE"));
         assert_eq!(hop2.responders[&core].reply_ttl, Some(62));
+        assert_eq!(hop2.geo, Some(measured));
+        assert_eq!(
+            text.matches(r#""event":"ipmap""#).count(),
+            1,
+            "not the hidden one"
+        );
     }
 
     #[tokio::test]

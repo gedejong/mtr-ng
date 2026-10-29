@@ -63,6 +63,8 @@ ratatui = "0.30"
 unicode-width = "0.2"
 gethostname = "1"
 serde = { version = "1", features = ["derive"] }
+# --ipmap: HTTPS to RIPE IPmap, rustls with ring and webpki-roots, no system TLS
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 chrono = "0.4"
 tracing = "0.1"

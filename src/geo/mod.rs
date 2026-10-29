@@ -7,6 +7,7 @@
 //! and every location is checked against the speed of light: a reply can't have
 //! come from farther than light in fibre gets in its RTT.
 
+pub mod ipmap;
 mod name_codes;
 pub mod names;
 
@@ -41,8 +42,8 @@ curl -fL \"https://download.db-ip.com/free/dbip-city-lite-$(date +%Y-%m).mmdb.gz
 gunzip > ~/.local/share/mtr-ng/dbip.part && \
 mv ~/.local/share/mtr-ng/dbip.part ~/.local/share/mtr-ng/dbip-city-lite.mmdb";
 
-/// Where an address is, as a database or the router's name has it.
-#[derive(Debug, Clone, PartialEq)]
+/// Where an address is, as a database, the router's name or RIPE IPmap has it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GeoFix {
     pub lat: f64,
     pub lon: f64,
@@ -54,6 +55,9 @@ pub struct GeoFix {
     /// The city code in the router's name this comes from, such as `adm`; None
     /// when it comes from the database
     pub from_name: Option<String>,
+    /// RIPE IPmap's score, when it comes from there (`--ipmap`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_ipmap: Option<u8>,
 }
 
 impl GeoFix {
@@ -261,6 +265,7 @@ impl<S: AsRef<[u8]> + Send + Sync> GeoSource for Mmdb<S> {
             city: city.city.names.english.map(str::to_string),
             country: city.country.iso_code.map(str::to_string),
             from_name: None,
+            from_ipmap: None,
         })
     }
 
@@ -384,6 +389,7 @@ pub mod tests {
             city: Some(name.to_string()),
             country: Some(country.to_string()),
             from_name: None,
+            from_ipmap: None,
         }
     }
 

@@ -15,7 +15,8 @@ Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/
 - `--metrics [ADDR:]PORT` serves the trace for Prometheus at `/metrics`: per hop, counters of probes sent, received and lost, the loss ratio, an RTT summary with quantiles over the last 600 probes, the last, best and worst RTT, and which addresses answered with their names and ASes. OpenMetrics goes to scrapers that ask for it, the Prometheus text format to the rest. It runs alongside the TUI, or with `-r` and no `-c` until stopped. A bare port listens on 127.0.0.1 only.
 - `--record PATH` keeps a log of the trace, one JSON object per line: each probe sent, each reply or timeout, and each name and AS that arrived. `--replay PATH` plays it back in the TUI, at the recorded pace or `--replay-speed` times faster, or with `-r` and the other report formats prints its report at once, without sending anything. Hops hidden by `--privacy-hops` are recorded hidden.
 - A report stopped with Ctrl-C, or SIGTERM, prints what it has so far instead of nothing.
-- `a` opens an About pane: what the running trace sends where (DNS to your resolver, AS lookups to Team Cymru, nothing for locations), and the data sources with their licences.
+- `--ipmap` also asks RIPE IPmap where each public address that answers is. IPmap places routers by measuring them from nearby RIPE Atlas probes, so it finds the routers a database puts at their owner's head office. Only answers backed by measurements count (a score of 30 or more), anycast addresses get none, and a city from the router's name still goes first. It works without a database, and is off unless asked for, since it sends the addresses to the RIPE NCC.
+- `a` opens an About pane: what the running trace sends where (DNS to your resolver, AS lookups to Team Cymru, addresses to RIPE IPmap with `--ipmap`), and the data sources with their licences.
 
 ## 0.5.0 - 2026-10-29
 
