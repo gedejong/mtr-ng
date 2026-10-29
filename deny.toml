@@ -1,0 +1,32 @@
+# cargo deny check (https://embarkstudios.github.io/cargo-deny/): advisories,
+# licences, duplicate crates and where crates come from. CI runs it in the Lint
+# job; locally, `cargo install cargo-deny --locked` first.
+
+[advisories]
+yanked = "deny"
+# Unmaintained crates deep in the tree are someone else's to replace
+unmaintained = "workspace"
+
+[licenses]
+# Licences that permit distributing the binary under MIT OR Apache-2.0. Where a
+# crate offers a choice (r-efi's LGPL-2.1-or-later among MIT and Apache-2.0),
+# one allowed option is enough.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of a crate cost build time, not correctness
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

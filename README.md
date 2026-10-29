@@ -88,6 +88,9 @@ sudo cp target/release/mtr-ng /usr/local/bin/
 sudo cp install/mtr-ng.1 /usr/local/share/man/man1/
 ```
 
+### Shell completions
+Homebrew and the `.deb` install completions for bash, zsh and fish, and the release archives carry them (`mtr-ng.bash`, `_mtr-ng`, `mtr-ng.fish`). From a checkout or after `cargo install`, they are in `install/completions/`; for zsh, for example, copy `_mtr-ng` into a directory on your `$fpath`.
+
 ### Privileges
 - **macOS**: runs as a normal user (unprivileged ICMP sockets). No sudo.
 - **Linux**: ICMP works as a normal user through a ping socket when the user's group is in `net.ipv4.ping_group_range`, which systemd 243 and newer open to everyone. Check with `sysctl net.ipv4.ping_group_range`: `0 2147483647` allows all groups, `1 0` none. Ping sockets don't pass on MPLS labels. Otherwise, and for `-P udp`, mtr-ng needs raw sockets, so root or `CAP_NET_RAW`. Either run it with `sudo`, or grant the capability to the installed binary once:

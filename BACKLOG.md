@@ -2,7 +2,7 @@
 
 Compiled 2026-10-27 from a full review (networking core, statistics/reporting, TUI, portability/CI, feature research). Line numbers refer to commit `59605fa`.
 
-**Status:** milestones 1-5 are done, apart from the tail of C8. Ticked items are fixed; *italic notes* record partial progress.
+**Status:** milestones 1-5 are done. Ticked items are fixed; *italic notes* record partial progress.
 
 Priority: **P0** shows wrong data or doesn't work, **P1** measurement correctness, **P2** visible defects, **P3** cleanup. Effort: S (hours), M (days), L (a week or more).
 
@@ -243,7 +243,7 @@ At the time of the review every install path was broken and CI was red.
   - It asks for confirmation before checking the platform.
   - Its warning that file capabilities are "less secure than sudo" has it backwards. *S*
 - [x] **C7 Licence mismatch.** *(m3: MIT OR Apache-2.0 with `LICENSE-MIT` and `LICENSE-APACHE`, the Rust convention; the crate, archives, `.deb` and PKGBUILD ship both.)* `Cargo.toml` says MIT OR Apache-2.0, but only MIT text ships; the README says MIT; the PKGBUILD says Apache. Pick one and align. *S*
-- [ ] **C8 Dependencies.** *(m3, mostly done: hickory 0.26, ratatui 0.30 with crossterm through its re-export, socket2 0.6, rand 0.10, `clap_mangen`, `rust-version = "1.89"` (forced by uuid via moka via hickory). hickory 0.26 resolves AAAA first by default, so the resolver is set to `Ipv4thenIpv6` until IPv6 probing exists. Open: `clap_complete`, and a `cargo-deny` run.)*
+- [x] **C8 Dependencies.** *(After 0.5.0: completions from `clap_complete` (`examples/completions.rs`, checked in under `install/completions/`, a test for staleness) in the archives, the `.deb` and the formula; `deny.toml` and a cargo-deny CI job, advisories non-blocking. The first run found no advisories, every licence permissive (r-efi offers LGPL among MIT and Apache-2.0), and one duplicate, syn 2 and 3. m3: hickory 0.26, ratatui 0.30 with crossterm through its re-export, socket2 0.6, rand 0.10, `clap_mangen`, `rust-version = "1.89"` (forced by uuid via moka via hickory). hickory 0.26 resolves AAAA first by default, so the resolver is set to `Ipv4thenIpv6` until IPv6 probing exists.)*
   - Advisories reported (via OSV) against hickory-proto 0.24, `lru` (via ratatui 0.29) and the unmaintained `paste`; upgrading to hickory 0.25+ and ratatui 0.30 + crossterm 0.29 clears them. The local `cargo-audit` is too old to read the current database, so re-check with a fresh `cargo-deny`.
   - Edition 2024 compiles cleanly.
   - Declare `rust-version`. The real minimum is 1.82 with the current lockfile and 1.88 on a fresh resolve; DISTRIBUTION.md claims 1.70.
@@ -295,7 +295,7 @@ PMTU/black-hole detection and an OpenMetrics exporter are further gaps in trippy
 
 1. **Tell the truth and unbreak.** *(Done on branch `m1-tell-the-truth`, plus B6 and X3b pulled forward.)* B1, B2, B4, B5/C1, B10, B13, B27, B31, C2, C5 (at least pull the 404 one-liner), X1. Refuse rather than fabricate; never break the user's terminal; make it installable.
 2. **Measure correctly.** *(Done: X2, R1, R2, B3, B7-B9, B11, B12, B29, X3b; R3/R4 partly.)* X2 spike first (it decides how much of R1 is written by hand), then R1, R2, R4, B3, B6-B9, B11, B12, X3b (macOS without sudo).
-3. **A UI that can grow.** *(Done, apart from the tail of C8.)* U1-U3, after which B14-B26 mostly fall out. Add F5 and F11 (JSON/CSV) as cheap wins. C3, C4 (cargo-dist), C6-C9.
+3. **A UI that can grow.** *(Done.)* U1-U3, after which B14-B26 mostly fall out. Add F5 and F11 (JSON/CSV) as cheap wins. C3, C4 (cargo-dist), C6-C9.
 4. **Stable flows and multi-route.** *(Done: R3, F1 for ICMP, F2 apart from the DAG and Mermaid, F9 for MPLS, F14, F13 partly; simulation became a `Prober`.)* R3, F1, F2, F9, F14.
 5. **Where is it.** *(Done: F6 with local databases, F7 apart from Stretch, F8, F12 partly; `--simulate` has made-up locations, one of them impossible.)* F12, F6, F7, F8.
 6. **Platforms and depth.** X3a/c/d/e, X4, IPv6, F4, F3, F10, F13. *(In progress: IPv6 (X3a), X3c, X3d, F1 for UDP and IPv6, F13, F10, X4, F3, X3e (CI only), the netlab namespace lab (`just netlab`). Open: F4 (see its lab finding).)*

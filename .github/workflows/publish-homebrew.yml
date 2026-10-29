@@ -1,6 +1,6 @@
 # Pushes the Homebrew formula that dist generates to gedejong/homebrew-tap,
-# with one addition: the man page goes to man1 (dist's formula leaves it in
-# pkgshare, off the MANPATH). Replaces dist's built-in "homebrew" publish job
+# with two additions: the man page goes to man1 (dist's formula leaves it in
+# pkgshare, off the MANPATH), and the shell completions where each shell looks. Replaces dist's built-in "homebrew" publish job
 # and uses the HOMEBREW_TAP_TOKEN_PAT secret, a token with write access to the tap.
 # release.yml calls this (publish-jobs in dist-workspace.toml).
 name: Publish to Homebrew
@@ -27,13 +27,19 @@ jobs:
           pattern: artifacts-*
           path: dist/
           merge-multiple: true
-      - name: Add the man page
+      - name: Add the man page and the shell completions
         run: |
           mkdir -p tap/Formula
-          awk '/^    install_binary_aliases!$/ { print "    man1.install \"mtr-ng.1\"" } { print }' \
-            dist/mtr-ng.rb > tap/Formula/mtr-ng.rb
-          if ! grep -q '^    man1.install "mtr-ng.1"$' tap/Formula/mtr-ng.rb; then
-            echo "::error::dist's formula template changed; the man page line was not added"
+          awk '/^    install_binary_aliases!$/ {
+                 print "    man1.install \"mtr-ng.1\""
+                 print "    bash_completion.install \"mtr-ng.bash\" => \"mtr-ng\""
+                 print "    zsh_completion.install \"_mtr-ng\""
+                 print "    fish_completion.install \"mtr-ng.fish\""
+               }
+               { print }' dist/mtr-ng.rb > tap/Formula/mtr-ng.rb
+          if ! grep -q '^    man1.install "mtr-ng.1"$' tap/Formula/mtr-ng.rb ||
+             ! grep -q '^    fish_completion.install "mtr-ng.fish"$' tap/Formula/mtr-ng.rb; then
+            echo "::error::dist's formula template changed; the man page and completion lines were not added"
             exit 1
           fi
           ruby -c tap/Formula/mtr-ng.rb

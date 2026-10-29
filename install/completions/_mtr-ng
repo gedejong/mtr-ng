@@ -1,0 +1,99 @@
+#compdef mtr-ng
+
+autoload -U is-at-least
+
+_mtr-ng() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'-c+[Number of rounds to run (default\: until quit; 10 in report mode)]:COUNT:_default' \
+'--count=[Number of rounds to run (default\: until quit; 10 in report mode)]:COUNT:_default' \
+'-i+[Time between rounds in milliseconds (at least 100, except with --simulate)]:INTERVAL:_default' \
+'--interval=[Time between rounds in milliseconds (at least 100, except with --simulate)]:INTERVAL:_default' \
+'-M+[Maximum number of hops (1-255)]:MAX_HOPS:_default' \
+'--max-hops=[Maximum number of hops (1-255)]:MAX_HOPS:_default' \
+'--geoip-mmdb=[Geolocation database in MaxMind'\''s format\: DB-IP City Lite or GeoLite2 City. Default\: the newest .mmdb in ~/.local/share/mtr-ng, then the usual system places]:PATH:_files' \
+'--privacy-hops=[Hide the first N hops\: their addresses, names, ASes and locations are neither shown, in the TUI or any report, nor looked up. For screenshots and reports that shouldn'\''t give away the network they were taken from]:N:_default' \
+'--origin=[Where you are, in degrees, for distances and the plausibility check. Default\: the first hop the database places in a city, with its uncertainty]:LAT,LON:_default' \
+'--flows=[Probe this many flows in turn, one per round. All probes of a flow look alike to load balancers (Paris traceroute), so a flow follows one path; several flows reveal the paths a load balancer spreads traffic over. With auto, new flows until every branch is found with 95% confidence (MDA-Lite), then the fewest flows that pass every branch]:N|auto:_default' \
+'--sparkline-scale=[Sparkline scaling mode\: linear or logarithmic (default\: logarithmic)]:SPARKLINE_SCALE:(linear logarithmic)' \
+'--ema-alpha=[Smoothing factor for the EMA column, above 0 and at most 1. Higher follows recent RTTs faster]:EMA_ALPHA:_default' \
+'*--fields=[Select which columns to display (default\: hop,host,loss,sent,last,avg,ema,best,worst,graph)]:FIELDS:((hop\:"Hop number"
+host\:"Hostname/IP address"
+asn\:"Origin AS number (looked up with --aslookup)"
+as-name\:"The AS'\''s name, its handle as the registry has it (looked up with the ASN)"
+prefix\:"The announced prefix the address is in (looked up with the ASN)"
+geo\:"Where the hop is, from the geolocation database (see --geo)"
+dist\:"Distance from the origin in km (see --origin)"
+stretch\:"The best RTT past the origin'\''s over light in fibre'\''s for the distance\: 1 is a straight fibre"
+reach\:"Farthest from here a reply can come in the best RTT, in km"
+back\:"Routers the reply crossed, from its TTL; +N or -N when the way there was shorter or longer"
+loss\:"Packet loss percentage"
+sent\:"Number of packets sent"
+last\:"Last RTT measurement"
+avg\:"Average RTT"
+ema\:"Exponential moving average RTT"
+jitter\:"Last jitter value"
+jitter-avg\:"Average jitter"
+best\:"Best (minimum) RTT"
+worst\:"Worst (maximum) RTT"
+stdev\:"Standard deviation of the RTT"
+graph\:"RTT sparkline graph"))' \
+'-P+[Probe protocol (tcp is not implemented yet)]:PROTOCOL:((icmp\:"ICMP Echo (ping) - default and most common"
+udp\:"UDP datagrams to port 33434 and up, one port per flow"
+tcp\:"TCP SYN probes (not implemented yet)"))' \
+'--protocol=[Probe protocol (tcp is not implemented yet)]:PROTOCOL:((icmp\:"ICMP Echo (ping) - default and most common"
+udp\:"UDP datagrams to port 33434 and up, one port per flow"
+tcp\:"TCP SYN probes (not implemented yet)"))' \
+'--log-file=[Append debug logs to this file (level can be overridden with RUST_LOG)]:PATH:_files' \
+'(-6)-4[Use IPv4 only]' \
+'-6[Use IPv6 only]' \
+'-r[Enable report mode (non-interactive)]' \
+'--report[Enable report mode (non-interactive)]' \
+'(-C --csv)-j[Report as JSON, with mtr'\''s field names (implies --report)]' \
+'(-C --csv)--json[Report as JSON, with mtr'\''s field names (implies --report)]' \
+'-C[Report as CSV, one row per hop (implies --report)]' \
+'--csv[Report as CSV, one row per hop (implies --report)]' \
+'(-j --json -C --csv)--dot[Print the routes as a Graphviz graph instead of a table (implies --report). Most useful with --flows]' \
+'(-j --json -C --csv --dot)--geojson[Print the located hops and the path between them as GeoJSON, for map tools (implies --report; needs a geolocation database, see --geo)]' \
+'-n[Show IP addresses instead of hostnames]' \
+'--numeric[Show IP addresses instead of hostnames]' \
+'-z[Show the AS number of each hop. Asks Team Cymru'\''s DNS about every public address]' \
+'--aslookup[Show the AS number of each hop. Asks Team Cymru'\''s DNS about every public address]' \
+'-g[Show where each hop is (Location and Dist columns), from a local geolocation database\: nothing is sent anywhere. A location farther away than light in fibre gets in the hop'\''s best RTT is marked with !]' \
+'--geo[Show where each hop is (Location and Dist columns), from a local geolocation database\: nothing is sent anywhere. A location farther away than light in fibre gets in the hop'\''s best RTT is marked with !]' \
+'-e[Show the MPLS labels routers report (RFC 4950) under their hop]' \
+'--mpls[Show the MPLS labels routers report (RFC 4950) under their hop]' \
+'--pmtu[Find the path MTU and where it narrows\: each round one more probe, as large as the path seems to allow, with Don'\''t Fragment set]' \
+'--show-all[Display all available columns]' \
+'--simulate[Show fake data instead of probing (for demos and testing); marked SIMULATED]' \
+'-q[Report mode\: print errors only, no warnings]' \
+'--quiet[Report mode\: print errors only, no warnings]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':target -- Target hostname or IP address:_default' \
+&& ret=0
+}
+
+(( $+functions[_mtr-ng_commands] )) ||
+_mtr-ng_commands() {
+    local commands; commands=()
+    _describe -t commands 'mtr-ng commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_mtr-ng" ]; then
+    _mtr-ng "$@"
+else
+    compdef _mtr-ng mtr-ng
+fi

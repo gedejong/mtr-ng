@@ -8,6 +8,7 @@ Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/
 - `--privacy-hops N` hides the first N hops, usually your own network and your provider's first routers, so a screenshot or a pasted report doesn't give them away: their addresses, names, ASes and locations, and the local host name, are left out of the TUI and every report format, and they are never looked up. Load-balanced branches among them stay apart.
 - The `stretch` column (`--fields ...,stretch`) shows how much longer a hop's best RTT is than light in fibre would take for its distance, counting from the origin hop so your own line doesn't count: 1.0 is a straight fibre, and a hop well above its neighbours sits behind a detour. The report and the map's key also say how much longer the path through the located hops is than the great circle. JSON, CSV and GeoJSON carry both.
 - On the map, an arc that passes over hops not on the map says how many, as `+2` halfway along.
+- Shell completions for bash, zsh and fish, installed by Homebrew and the `.deb`, and in the release archives.
 - `a` opens an About pane: what the running trace sends where (DNS to your resolver, AS lookups to Team Cymru, nothing for locations), and the data sources with their licences.
 
 ## 0.5.0 - 2026-10-29

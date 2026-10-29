@@ -20,6 +20,7 @@ include = [
     "/LICENSE-MIT",
     "/LICENSE-APACHE",
     "/install/mtr-ng.1",
+    "/install/completions",
 ]
 
 # Read by `cargo deb` in .github/workflows/build-deb.yml.
@@ -45,6 +46,9 @@ assets = [
     ["LICENSE-MIT", "usr/share/doc/mtr-ng/", "644"],
     ["LICENSE-APACHE", "usr/share/doc/mtr-ng/", "644"],
     ["install/mtr-ng.1", "usr/share/man/man1/", "644"],
+    ["install/completions/mtr-ng.bash", "usr/share/bash-completion/completions/mtr-ng", "644"],
+    ["install/completions/_mtr-ng", "usr/share/zsh/vendor-completions/", "644"],
+    ["install/completions/mtr-ng.fish", "usr/share/fish/vendor_completions.d/", "644"],
 ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -86,6 +90,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 clap_mangen = "0.3"
+clap_complete = "4.5"
 
 # The profile that 'dist' will build with
 [profile.dist]

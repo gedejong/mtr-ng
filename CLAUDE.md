@@ -16,7 +16,7 @@ Rust reimplementation of `mtr` (traceroute + ping) with a ratatui TUI and a `--r
 - `src/ui/`: TUI. `main.rs` event loop (input thread, coalesced redraws from a session snapshot), `render.rs` all drawing (table, flow matrix, detail pane, overlays, column layout), `map.rs` the world map view (coastlines in `coastline.bin`, written by `examples/coastline.rs` from Natural Earth), `events.rs` keymap tables (also generate help and man page), `state.rs` modes, views, selection and column chooser, `visualization.rs` RTT scale, sparkline and histogram cells, colours.
 - `src/main.rs` opens the raw sockets (`probe::open_raw_sockets`), then `src/privileges.rs` gives up setuid root and Linux capabilities, and only then does the tokio runtime start. Capabilities belong to each thread, so nothing may start a thread before that.
 - `src/args.rs`: clap CLI plus `validate()` for cross-flag rules. `src/utils.rs`: small formatting helpers.
-- `examples/man.rs` generates `install/mtr-ng.1`; `tests/man_page.rs` fails when it is stale. After changing flags, keys or columns: `cargo run --example man > install/mtr-ng.1`.
+- `examples/man.rs` generates `install/mtr-ng.1`, `examples/completions.rs` the bash, zsh and fish completions in `install/completions/`; `tests/man_page.rs` and `tests/completions.rs` fail when they are stale. After changing flags, keys or columns: `cargo run --example man > install/mtr-ng.1` (and after flags or column names, `cargo run --example completions`).
 
 ## Commands
 - CI gate, run before every commit: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
@@ -26,6 +26,7 @@ Rust reimplementation of `mtr` (traceroute + ping) with a ratatui TUI and a `--r
 - Linux needs root or CAP_NET_RAW (`scripts/setup-capabilities.sh`) for raw sockets and `-P udp`; ICMP without them uses a ping socket. Claude cannot sudo; ask the user to run `! sudo ...`, or use `just netlab`.
 - Linux probing from the Mac, no sudo: `just netlab [--user probe] -- CMD` builds mtr-ng in Docker and runs CMD on a namespace lab (NAT, ECMP diamond, IPv6, MTU 1400; `target`/`target6`). See TESTING.md.
 - `just --list` shows convenience recipes.
+- Dependencies: `cargo deny check` against `deny.toml` (licences, advisories, sources); CI runs it.
 
 ## Gotchas
 - Never fall back to simulated data. If probing is impossible, return an error; simulation only with `--simulate`.

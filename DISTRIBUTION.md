@@ -17,7 +17,7 @@ Releases are built by [dist](https://github.com/axodotdev/cargo-dist) from `dist
 
 | Asset | Contents |
 |---|---|
-| `mtr-ng-<target>.tar.xz` | binary, `mtr-ng.1`, README, both licences |
+| `mtr-ng-<target>.tar.xz` | binary, `mtr-ng.1`, completions for bash (`mtr-ng.bash`), zsh (`_mtr-ng`) and fish (`mtr-ng.fish`), README, both licences |
 | `mtr-ng-<target>.tar.xz.sha256`, `sha256.sum` | checksums |
 | `mtr-ng-installer.sh` | downloads the right archive into `~/.cargo/bin` |
 | `mtr-ng_<version>-1_{amd64,arm64}.deb` (+ `.sha256`) | Debian package from `[package.metadata.deb]` |
@@ -70,7 +70,11 @@ Repository secrets the release needs:
 - `HOMEBREW_TAP_TOKEN_PAT`: a token of gedejong's with write access to `gedejong/homebrew-tap` (fine-grained: *Contents: read and write* on that repository).
 - `CARGO_REGISTRY_TOKEN`, once crates.io publishing is back (C10): a crates.io token with the *publish-update* scope for `mtr-ng`.
 
-`release.yml` is generated: after changing `dist-workspace.toml`, run `dist generate` (dist 0.32, `cargo install cargo-dist --locked`) rather than editing it. `build-deb.yml` and `publish-homebrew.yml` are ours; dist calls them. `publish-crates.yml` is ours too, but left out of `publish-jobs` until C10. `publish-homebrew.yml` replaces dist's own Homebrew job so the formula also installs the man page; it fails rather than publish without it if dist's formula template changes. On pull requests the workflow only runs `dist plan`.
+The man page and the completions are generated from the CLI definition and checked in: `cargo run --example man > install/mtr-ng.1` and `cargo run --example completions` (tests fail when either is stale). The `.deb` installs the completions in `/usr/share/bash-completion/completions`, `/usr/share/zsh/vendor-completions` and `/usr/share/fish/vendor_completions.d`; other packages can do the same.
+
+`deny.toml` lists the licences dependencies may carry; CI runs `cargo deny check`.
+
+`release.yml` is generated: after changing `dist-workspace.toml`, run `dist generate` (dist 0.32, `cargo install cargo-dist --locked`) rather than editing it. `build-deb.yml` and `publish-homebrew.yml` are ours; dist calls them. `publish-crates.yml` is ours too, but left out of `publish-jobs` until C10. `publish-homebrew.yml` replaces dist's own Homebrew job so the formula also installs the man page and the completions; it fails rather than publish without them if dist's formula template changes. On pull requests the workflow only runs `dist plan`.
 
 To check a release locally: `dist plan`, or `dist build --artifacts=local --target aarch64-apple-darwin` and look in `target/distrib/`.
 

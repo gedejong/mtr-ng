@@ -34,6 +34,23 @@ jobs:
       - name: clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+  # deny.toml: licences, duplicate crates and sources must pass. A new advisory
+  # shows as a failed job but doesn't fail the run, so it can't block an
+  # unrelated change; it still wants a look.
+  deny:
+    name: cargo-deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans licenses sources]
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
