@@ -4,7 +4,7 @@ Rust reimplementation of `mtr` (traceroute + ping) with a ratatui TUI and a `--r
 
 ## Layout
 - `src/tracer.rs`: the one probing loop (report and TUI). Sends a round per interval, each round in one flow (round mod `--flows`), matches replies by seq, expires probes after 2 s, runs reverse DNS off the probe path. Tested against a `FakeProber`.
-- `src/probe.rs`: `Prober` trait and `ProbeEngine`. ICMP sockets (unprivileged datagram on macOS, raw elsewhere), one receive thread per address family that timestamps replies on arrival, packet building and parsing. Paris flows: per flow a fixed checksum and identifier, two payload bytes absorb the seq. `src/icmp_ext.rs`: RFC 4884 extensions, MPLS label stacks.
+- `src/probe.rs`: `Prober` trait and `ProbeEngine`. ICMP echo requests, or with `-P udp` datagrams to port 33434 + flow. One ICMP or ICMPv6 socket for the target's family reads every answer (unprivileged datagram on macOS, raw elsewhere); a receive thread timestamps replies on arrival. Packet building and parsing. Paris flows: ICMP per flow a fixed checksum and identifier, two payload bytes absorb the seq; UDP fixed ports, the seq is the UDP checksum; IPv6 adds a flow label per flow. `routable()` asks the routing table. `src/probe/ping_socket.rs`: Linux without privilege, a ping socket whose errors come from `MSG_ERRQUEUE` (no UDP, no MPLS). `src/icmp_ext.rs`: RFC 4884 extensions (both families), MPLS label stacks.
 - `src/simulate.rs`: `SimProber`, the `--simulate` path behind the `Prober` trait, so simulation runs through the real tracer.
 - `src/session.rs`: `MtrSession`. Target resolution, `open_probe_engine` (real or simulated), the hop table, applying replies and timeouts to hops, the reverse DNS cache.
 - `src/hop_stats.rs`: per-hop statistics (loss excluding probes in flight, RTT, Welford stddev, jitter, EMA), a ring of the last 600 `ProbeRecord`s, per-flow `FlowStats`, per-address `ResponderStats` (reply TTL, MPLS).
@@ -21,7 +21,8 @@ Rust reimplementation of `mtr` (traceroute + ping) with a ratatui TUI and a `--r
 - Smoke test without privileges: `cargo run -- --simulate --count 3 --report example.com`
 - Real network on macOS needs no root (unprivileged ICMP): `./target/debug/mtr-ng -r -c 3 -n 1.1.1.1`. Use it to verify probing changes.
 - TUI changes: verify with the `tui-check` skill (headless tmux capture; `MTR_REAL=1` for real probes).
-- Linux needs root or CAP_NET_RAW (`scripts/setup-capabilities.sh`). Claude cannot sudo; ask the user to run `! sudo ...`.
+- Linux needs root or CAP_NET_RAW (`scripts/setup-capabilities.sh`) for raw sockets and `-P udp`; ICMP without them uses a ping socket. Claude cannot sudo; ask the user to run `! sudo ...`, or use `just netlab`.
+- Linux probing from the Mac, no sudo: `just netlab [--user probe] -- CMD` builds mtr-ng in Docker and runs CMD on a namespace lab (NAT, ECMP diamond, IPv6, MTU 1400; `target`/`target6`). See TESTING.md.
 - `just --list` shows convenience recipes.
 
 ## Gotchas

@@ -8,7 +8,7 @@ mtr\-ng \- A modern implementation of mtr (My Traceroute) with unicode and termi
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .SH SYNOPSIS
-\fBmtr\-ng\fR [\fB\-c\fR|\fB\-\-count\fR] [\fB\-i\fR|\fB\-\-interval\fR] [\fB\-M\fR|\fB\-\-max\-hops\fR] [\fB\-r\fR|\fB\-\-report\fR] [\fB\-j\fR|\fB\-\-json\fR] [\fB\-C\fR|\fB\-\-csv\fR] [\fB\-\-dot\fR] [\fB\-\-geojson\fR] [\fB\-n\fR|\fB\-\-numeric\fR] [\fB\-z\fR|\fB\-\-aslookup\fR] [\fB\-g\fR|\fB\-\-geo\fR] [\fB\-\-geoip\-mmdb\fR] [\fB\-\-origin\fR] [\fB\-e\fR|\fB\-\-mpls\fR] [\fB\-\-flows\fR] [\fB\-\-sparkline\-scale\fR] [\fB\-\-ema\-alpha\fR] [\fB\-\-fields\fR] [\fB\-\-show\-all\fR] [\fB\-\-simulate\fR] [\fB\-P\fR|\fB\-\-protocol\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-log\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fITARGET\fR> 
+\fBmtr\-ng\fR [\fB\-c\fR|\fB\-\-count\fR] [\fB\-i\fR|\fB\-\-interval\fR] [\fB\-M\fR|\fB\-\-max\-hops\fR] [\fB\-4 \fR] [\fB\-6 \fR] [\fB\-r\fR|\fB\-\-report\fR] [\fB\-j\fR|\fB\-\-json\fR] [\fB\-C\fR|\fB\-\-csv\fR] [\fB\-\-dot\fR] [\fB\-\-geojson\fR] [\fB\-n\fR|\fB\-\-numeric\fR] [\fB\-z\fR|\fB\-\-aslookup\fR] [\fB\-g\fR|\fB\-\-geo\fR] [\fB\-\-geoip\-mmdb\fR] [\fB\-\-origin\fR] [\fB\-e\fR|\fB\-\-mpls\fR] [\fB\-\-flows\fR] [\fB\-\-sparkline\-scale\fR] [\fB\-\-ema\-alpha\fR] [\fB\-\-fields\fR] [\fB\-\-show\-all\fR] [\fB\-\-simulate\fR] [\fB\-P\fR|\fB\-\-protocol\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-log\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fITARGET\fR> 
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .SH DESCRIPTION
@@ -25,6 +25,12 @@ Time between rounds in milliseconds (at least 100, except with \-\-simulate)
 .TP
 \fB\-M\fR, \fB\-\-max\-hops\fR \fI<MAX_HOPS>\fR [default: 30]
 Maximum number of hops (1\-255)
+.TP
+\fB\-4\fR
+Use IPv4 only
+.TP
+\fB\-6\fR
+Use IPv6 only
 .TP
 \fB\-r\fR, \fB\-\-report\fR
 Enable report mode (non\-interactive)
@@ -128,7 +134,7 @@ Display all available columns
 Show fake data instead of probing (for demos and testing); marked SIMULATED
 .TP
 \fB\-P\fR, \fB\-\-protocol\fR \fI<PROTOCOL>\fR [default: icmp]
-Probe protocol (only icmp is implemented so far)
+Probe protocol (tcp is not implemented yet)
 .br
 
 .br
@@ -137,7 +143,7 @@ Probe protocol (only icmp is implemented so far)
 .IP \(bu 2
 icmp: ICMP Echo (ping) \- default and most common
 .IP \(bu 2
-udp: UDP probes (not implemented yet)
+udp: UDP datagrams to port 33434 and up, one port per flow
 .IP \(bu 2
 tcp: TCP SYN probes (not implemented yet)
 .RE

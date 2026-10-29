@@ -17,7 +17,7 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Scalable Display**: Auto-scaling sparklines with manual override options
 
 ### Load Balancers and MPLS
-- **Stable flows**: `--flows N` probes N flows in turn. All probes of one flow carry the same ICMP checksum and identifier (Paris traceroute), so a per-flow load balancer keeps each on one path, and the flows together show the paths it spreads traffic over
+- **Stable flows**: `--flows N` probes N flows in turn. All probes of one flow carry the same ICMP checksum and identifier (Paris traceroute), so a per-flow load balancer keeps each on one path, and the flows together show the paths it spreads traffic over. `-P udp` keeps the ports fixed per flow instead, and IPv6 probes carry a flow label per flow. Load balancers hash on ports far more often than on ICMP fields, so UDP flows show more diamonds
 - **Flow matrix**: `f` shows, per hop, a letter for the address each flow met; `--report` prints the same matrix after the table
 - **Route graph**: `--dot` prints the routes as Graphviz, with silent hops as dashed edges
 - **MPLS labels**: `-e` (or `e` while running) shows the label stacks routers report in ICMP extensions (RFC 4950)
@@ -46,8 +46,8 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 
 ### Performance & Compatibility
 - **Efficient Async**: Built with Tokio for high-performance networking
-- **Platforms**: macOS (no sudo needed) and Linux (root or `CAP_NET_RAW`). Windows builds but can't probe yet; FreeBSD is only type-checked.
-- **IPv4 only**: IPv6 targets and `-P udp`/`-P tcp` exit with an error for now. Reverse DNS for hop names (`-n` turns it off).
+- **Platforms**: macOS and Linux, both without sudo for ICMP (see Privileges). Windows builds but can't probe yet; FreeBSD is only type-checked.
+- **IPv4 and IPv6**: a name with both kinds of address is traced over IPv6 when this machine has an IPv6 route, as a connection would be, else over IPv4; `-4` and `-6` choose. ICMP echo by default, UDP to port 33434 and up with `-P udp`; `-P tcp` exits with an error for now. Reverse DNS for hop names (`-n` turns it off).
 
 ## Installation
 
@@ -87,7 +87,7 @@ sudo cp install/mtr-ng.1 /usr/local/share/man/man1/
 
 ### Privileges
 - **macOS**: runs as a normal user (unprivileged ICMP sockets). No sudo.
-- **Linux**: needs raw sockets, so root or `CAP_NET_RAW`. Either run it with `sudo`, or grant the capability to the installed binary once:
+- **Linux**: ICMP works as a normal user through a ping socket when the user's group is in `net.ipv4.ping_group_range`, which systemd 243 and newer open to everyone. Check with `sysctl net.ipv4.ping_group_range`: `0 2147483647` allows all groups, `1 0` none. Ping sockets don't pass on MPLS labels. Otherwise, and for `-P udp`, mtr-ng needs raw sockets, so root or `CAP_NET_RAW`. Either run it with `sudo`, or grant the capability to the installed binary once:
   ```bash
   sudo setcap cap_net_raw+ep "$(readlink -f "$(which mtr-ng)")"
   # or, with checks and a test run:
@@ -235,7 +235,6 @@ MTR-NG is actively developed with focus on:
 - **Rich Visualization**: Unicode sparklines and color coding  
 - **Column Flexibility**: Complete customization system
 - **Interactive UI**: Real-time monitoring with controls
-- **IPv6 Support**: Next-generation protocol support (planned)
 
 ## Development & Testing
 
@@ -253,7 +252,7 @@ cargo test
 ./scripts/test-dev.sh test-all     # Shell script
 just ci                            # The CI gate: fmt, clippy, tests
 
-# Real probes over loopback (macOS: no sudo; Linux: sudo)
+# Real probes over loopback (no sudo on macOS, nor on Linux where ping sockets are allowed)
 cargo build && ./target/debug/mtr-ng -r -c 2 -n 127.0.0.1
 ```
 
@@ -270,7 +269,7 @@ The project includes several convenience tools:
 
 Contributions welcome! Areas of interest:
 - Terminal graphics and visualization improvements
-- IPv6 protocol support
+- TCP probes
 - Additional statistical metrics
 - Platform-specific optimizations
 

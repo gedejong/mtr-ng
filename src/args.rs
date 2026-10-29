@@ -11,7 +11,7 @@ pub enum SparklineScale {
 pub enum ProbeProtocol {
     /// ICMP Echo (ping) - default and most common
     Icmp,
-    /// UDP probes (not implemented yet)
+    /// UDP datagrams to port 33434 and up, one port per flow
     Udp,
     /// TCP SYN probes (not implemented yet)
     Tcp,
@@ -118,6 +118,14 @@ pub struct Args {
     #[arg(short = 'M', long, default_value = "30", value_parser = clap::value_parser!(u8).range(1..))]
     pub max_hops: u8,
 
+    /// Use IPv4 only
+    #[arg(short = '4', conflicts_with = "ipv6")]
+    pub ipv4: bool,
+
+    /// Use IPv6 only
+    #[arg(short = '6')]
+    pub ipv6: bool,
+
     /// Enable report mode (non-interactive)
     #[arg(short, long)]
     pub report: bool,
@@ -194,7 +202,7 @@ pub struct Args {
     #[arg(long, alias = "force-simulate")]
     pub simulate: bool,
 
-    /// Probe protocol (only icmp is implemented so far)
+    /// Probe protocol (tcp is not implemented yet)
     #[arg(short = 'P', long, value_enum, default_value = "icmp")]
     pub protocol: ProbeProtocol,
 

@@ -36,16 +36,27 @@ const COMPAT_OFFSET: usize = 128;
 
 /// MPLS labels in an ICMPv4 error. `icmp` starts at the ICMP type byte.
 pub fn mpls_labels(icmp: &[u8]) -> Vec<MplsLabel> {
-    extension_objects(icmp).map(labels).unwrap_or_default()
+    // ICMPv4 puts the length of the quoted datagram, in 32-bit words, in byte 5.
+    extension_objects(icmp, 5, 4)
+        .map(labels)
+        .unwrap_or_default()
+}
+
+/// MPLS labels in an ICMPv6 error. `icmp` starts at the ICMPv6 type byte.
+pub fn mpls_labels_v6(icmp: &[u8]) -> Vec<MplsLabel> {
+    // ICMPv6 puts it in byte 4, in 64-bit words.
+    extension_objects(icmp, 4, 8)
+        .map(labels)
+        .unwrap_or_default()
 }
 
 /// The objects of the extension structure, if the message carries a valid one.
-fn extension_objects(icmp: &[u8]) -> Option<&[u8]> {
+/// The quoted datagram's length is in byte `length_at`, counted in `unit` bytes.
+fn extension_objects(icmp: &[u8], length_at: usize, unit: usize) -> Option<&[u8]> {
     let body = icmp.get(8..)?;
-    // ICMPv4 puts the length of the quoted datagram, in 32-bit words, in byte 5.
-    let start = match usize::from(*icmp.get(5)?) {
+    let start = match usize::from(*icmp.get(length_at)?) {
         0 => COMPAT_OFFSET,
-        words => words * 4,
+        words => words * unit,
     };
     let ext = body.get(start..)?;
     // Version 2 in the top nibble, then a checksum over the whole structure; zero
@@ -162,6 +173,19 @@ mod tests {
         let mut ext = extension(&[(1, 1, two_labels())], false);
         ext[4..6].copy_from_slice(&200u16.to_be_bytes());
         assert!(mpls_labels(&time_exceeded(32, &ext)).is_empty(), "length");
+    }
+
+    #[test]
+    fn icmpv6_counts_the_quoted_length_in_64_bit_words() {
+        let ext = extension(&[(1, 1, two_labels())], true);
+        let mut icmp = vec![3, 0, 0, 0, 16, 0, 0, 0]; // 16 words: 128 bytes quoted
+        icmp.extend(vec![0x60; 128]);
+        icmp.extend_from_slice(&ext);
+        assert_eq!(mpls_labels_v6(&icmp).len(), 2, "RFC 4884");
+        icmp[4] = 0;
+        assert_eq!(mpls_labels_v6(&icmp).len(), 2, "pre-RFC");
+        icmp[4] = 15;
+        assert!(mpls_labels_v6(&icmp).is_empty(), "wrong length");
     }
 
     #[test]

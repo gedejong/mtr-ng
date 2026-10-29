@@ -64,6 +64,10 @@ rand = "0.10"
 hickory-resolver = "0.26"
 maxminddb = { version = "0.32", features = ["mmap"] }
 
+# Ping sockets: the error queue, its control messages and sock_extended_err
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "mtr-ng"
 path = "src/main.rs"

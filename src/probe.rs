@@ -1,13 +1,14 @@
 //! Probe engine for MTR-NG
 //!
-//! Sends ICMP echo requests with a chosen TTL and delivers the replies, each
-//! timestamped by a dedicated receive thread the moment it arrives. Matching
-//! replies to probes and deciding when a probe is lost happen in `tracer`.
+//! Sends ICMP or ICMPv6 echo requests, or UDP datagrams, with a chosen TTL or hop
+//! limit and delivers the replies, each timestamped by a dedicated receive thread
+//! the moment it arrives. Matching replies to probes and deciding when a probe is
+//! lost happen in `tracer`.
 
 use std::{
     io,
     mem::MaybeUninit,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -16,7 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::icmp_ext::{mpls_labels, MplsLabel};
+use crate::args::ProbeProtocol;
+use crate::icmp_ext::{mpls_labels, mpls_labels_v6, MplsLabel};
+
+#[cfg(target_os = "linux")]
+mod ping_socket;
 use anyhow::{anyhow, Result};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc;
@@ -41,11 +46,23 @@ pub const MAX_FLOWS: u16 = 64;
 /// value works if the range avoids 0x0000 and 0xffff, the two one's-complement zeros.
 const FLOW_CHECKSUM: u16 = 0x2c00;
 
+const ECHO_REQUEST: u8 = 8;
+const ECHO_REQUEST_V6: u8 = 128;
+
+/// Destination port of UDP probes in flow 0; flow `f` uses `UDP_PORT + f`.
+/// traceroute's base port, unlikely to have a listener.
+pub const UDP_PORT: u16 = 33434;
+
+/// UDP probe payload after the two bytes that set the checksum
+const UDP_PAYLOAD: &[u8] = b"mtr-ng";
+
 /// Types of ICMP responses we care about
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IcmpResponseType {
     EchoReply,
     TimeExceeded,
+    /// The target's port is closed: a UDP probe arrived
+    PortUnreachable,
     DestinationUnreachable,
     Timeout,
 }
@@ -94,82 +111,139 @@ pub trait Prober: Send {
     fn take_replies(&mut self) -> Option<mpsc::UnboundedReceiver<Reply>>;
 }
 
-/// Fields of an ICMP message that may answer one of our echo requests.
+/// Fields of an ICMP message that may answer one of our probes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IcmpReply {
     kind: IcmpResponseType,
     source: IpAddr,
-    id: u16,
-    seq: u16,
+    probe: Quoted,
     ttl: Option<u8>,
     mpls: Vec<MplsLabel>,
 }
 
-/// ICMP echo prober over raw or (on macOS) unprivileged datagram sockets
+/// The probe an ICMP message answers, as far as it shows it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Quoted {
+    /// An echo request, quoted in an error or answered by an echo reply
+    Echo { id: u16, seq: u16 },
+    /// The UDP header of a datagram, quoted in an error
+    Udp {
+        src_port: u16,
+        dst_port: u16,
+        checksum: u16,
+    },
+}
+
+/// Which quoted probes are ours, and their sequence numbers
+#[derive(Debug, Clone, Copy)]
+struct Ours {
+    /// Identifier of flow 0's echo requests
+    packet_id: u16,
+    /// Source port of our UDP probes, when probing with UDP
+    udp_port: Option<u16>,
+}
+
+impl Ours {
+    fn seq(&self, probe: Quoted) -> Option<u16> {
+        match (probe, self.udp_port) {
+            (Quoted::Echo { id, seq }, None) => {
+                (id.wrapping_sub(self.packet_id) < MAX_FLOWS).then_some(seq)
+            }
+            (
+                Quoted::Udp {
+                    src_port,
+                    dst_port,
+                    checksum,
+                },
+                Some(port),
+            ) => (src_port == port && dst_port.wrapping_sub(UDP_PORT) < MAX_FLOWS)
+                .then_some(checksum),
+            _ => None,
+        }
+    }
+}
+
+/// What kind of ICMP socket the engine probes through
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SocketKind {
+    /// Needs root or CAP_NET_RAW; sees every ICMP packet, IP header included
+    Raw,
+    /// macOS without privileges; behaves like a raw socket for traceroute
+    Datagram,
+    /// Linux without privileges: the kernel sets the identifier, and errors arrive
+    /// on the error queue (see `ping_socket`)
+    #[cfg(target_os = "linux")]
+    Ping,
+}
+
+/// Prober for one address family. Sends ICMP echo requests or UDP datagrams and
+/// reads the answers from an ICMP socket: raw, or without privileges an
+/// unprivileged datagram socket (macOS) or a ping socket (Linux, ICMP only).
 pub struct ProbeEngine {
     next_seq: u16,
-    icmp_socket: Arc<Socket>,
-    icmp6_socket: Option<Arc<Socket>>,
+    socket: Arc<Socket>,
+    ipv6: bool,
     packet_id: u16,
-    unprivileged: bool,
+    kind: SocketKind,
+    udp: Option<UdpSender>,
     replies: Option<mpsc::UnboundedReceiver<Reply>>,
     stop: Arc<AtomicBool>,
 }
 
+/// The socket UDP probes leave from, bound to the address and port their
+/// checksums are computed for
+struct UdpSender {
+    socket: Socket,
+    source: IpAddr,
+    port: u16,
+}
+
 impl ProbeEngine {
-    pub fn new() -> Result<Self> {
-        let (icmp_socket, unprivileged) = open_icmpv4_socket()?;
+    /// Open the sockets for probing `target` with `protocol` and start receiving.
+    pub fn new(target: IpAddr, protocol: ProbeProtocol) -> Result<Self> {
+        let ipv6 = target.is_ipv6();
+        let (socket, kind, kernel_ident) = open_icmp_socket(ipv6)?;
         tracing::info!(
-            "Using {} ICMP socket",
-            if unprivileged {
-                "unprivileged datagram"
-            } else {
-                "raw"
-            }
+            "Using a {kind:?} ICMP{} socket",
+            if ipv6 { "v6" } else { "" }
         );
-
-        // Try to create IPv6 ICMP socket (optional)
-        let icmp6_socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6)).ok();
-        if icmp6_socket.is_none() {
-            tracing::debug!("IPv6 ICMP socket creation failed - IPv6 support disabled");
+        if ipv6 {
+            // Routers balance IPv6 on the flow label too, so each flow sets its own.
+            set_flow_label_sending(&socket);
         }
+        let udp = match protocol {
+            ProbeProtocol::Icmp => None,
+            ProbeProtocol::Udp => Some(open_udp_sender(target, kind)?),
+            ProbeProtocol::Tcp => return Err(anyhow!("TCP probes are not implemented yet")),
+        };
 
-        let packet_id = std::process::id() as u16;
+        // A ping socket's probes all carry the identifier the kernel gave it.
+        let packet_id = kernel_ident.unwrap_or(std::process::id() as u16);
+        let ours = Ours {
+            packet_id,
+            udp_port: udp.as_ref().map(|udp| udp.port),
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::unbounded_channel();
-
-        let icmp_socket = Arc::new(icmp_socket);
-        spawn_receiver(
-            Arc::clone(&icmp_socket),
-            false,
-            packet_id,
-            tx.clone(),
-            &stop,
-        )?;
-        let icmp6_socket = match icmp6_socket {
-            Some(socket) => {
-                let socket = Arc::new(socket);
-                spawn_receiver(Arc::clone(&socket), true, packet_id, tx, &stop)?;
-                Some(socket)
-            }
-            None => None,
-        };
+        let socket = Arc::new(socket);
+        spawn_receiver(Arc::clone(&socket), kind, ipv6, ours, tx, &stop)?;
 
         Ok(Self {
             // Random start so concurrent instances don't walk the same sequence numbers.
             next_seq: rand::random_range(INITIAL_SEQUENCE..=MAX_SEQUENCE),
-            icmp_socket,
-            icmp6_socket,
+            socket,
+            ipv6,
             packet_id,
-            unprivileged,
+            kind,
+            udp,
             replies: Some(rx),
             stop,
         })
     }
 
-    /// True when probing through an unprivileged datagram socket instead of a raw one.
+    /// True when probing without privileges, through a datagram or ping socket.
     pub fn is_unprivileged(&self) -> bool {
-        self.unprivileged
+        self.kind != SocketKind::Raw
     }
 
     fn alloc_seq(&mut self) -> u16 {
@@ -185,28 +259,47 @@ impl ProbeEngine {
 impl Prober for ProbeEngine {
     fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16) -> io::Result<(u16, Instant)> {
         debug_assert!(flow < MAX_FLOWS);
+        debug_assert_eq!(dst.is_ipv6(), self.ipv6, "one engine probes one family");
         let seq = self.alloc_seq();
-        let id = self.packet_id.wrapping_add(flow);
-        let (socket, packet) = match dst {
-            IpAddr::V4(_) => {
-                self.icmp_socket.set_ttl_v4(ttl.into())?;
-                let packet = echo_request(id, seq, FLOW_CHECKSUM + flow);
-                (&self.icmp_socket, packet.to_vec())
+        if let Some(udp) = &self.udp {
+            let port = UDP_PORT + flow;
+            if self.ipv6 {
+                udp.socket.set_unicast_hops_v6(ttl.into())?;
+            } else {
+                udp.socket.set_ttl_v4(ttl.into())?;
             }
-            IpAddr::V6(_) => {
-                let Some(ref icmp6_sock) = self.icmp6_socket else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "IPv6 not supported - no ICMPv6 socket available",
-                    ));
-                };
-                icmp6_sock.set_unicast_hops_v6(ttl.into())?;
-                (icmp6_sock, construct_icmp6_packet(seq, id))
-            }
+            let payload = udp_payload(udp.source, dst, udp.port, port, seq);
+            let sent_at = Instant::now();
+            udp.socket
+                .send_to(&payload, &SocketAddr::new(dst, port).into())?;
+            tracing::debug!("Sent UDP probe to {dst}:{port}: ttl={ttl}, flow={flow}, seq={seq}");
+            return Ok((seq, sent_at));
+        }
+        // Flows differ in identifier and checksum, or on a ping socket, whose
+        // identifier the kernel sets, in checksum alone.
+        #[cfg(target_os = "linux")]
+        let flow_id = if self.kind == SocketKind::Ping {
+            0
+        } else {
+            flow
+        };
+        #[cfg(not(target_os = "linux"))]
+        let flow_id = flow;
+        let id = self.packet_id.wrapping_add(flow_id);
+        let packet = if self.ipv6 {
+            self.socket.set_unicast_hops_v6(ttl.into())?;
+            echo_request(ECHO_REQUEST_V6, id, seq, FLOW_CHECKSUM + flow)
+        } else {
+            self.socket.set_ttl_v4(ttl.into())?;
+            echo_request(ECHO_REQUEST, id, seq, FLOW_CHECKSUM + flow)
         };
 
+        let to = match dst {
+            IpAddr::V4(_) => SocketAddr::new(dst, 0),
+            IpAddr::V6(v6) => labelled(v6, flow_label(self.packet_id, flow)).into(),
+        };
         let sent_at = Instant::now();
-        socket.send_to(&packet, &SocketAddr::new(dst, 0).into())?;
+        self.socket.send_to(&packet, &to.into())?;
         tracing::debug!("Sent ICMP probe to {dst}: ttl={ttl}, flow={flow}, seq={seq}");
         Ok((seq, sent_at))
     }
@@ -226,8 +319,9 @@ impl Drop for ProbeEngine {
 /// forwards the ones that answer our probes.
 fn spawn_receiver(
     socket: Arc<Socket>,
+    kind: SocketKind,
     ipv6: bool,
-    packet_id: u16,
+    ours: Ours,
     tx: mpsc::UnboundedSender<Reply>,
     stop: &Arc<AtomicBool>,
 ) -> Result<()> {
@@ -236,6 +330,18 @@ fn spawn_receiver(
     thread::Builder::new()
         .name(format!("mtr-ng-recv-v{}", if ipv6 { 6 } else { 4 }))
         .spawn(move || {
+            #[cfg(target_os = "linux")]
+            if kind == SocketKind::Ping {
+                ping_socket::receive(&socket, ipv6, RECEIVE_POLL, &stop, |reply, at| {
+                    match ours.reply(reply, at) {
+                        Some(reply) => tx.send(reply).is_ok(),
+                        None => true,
+                    }
+                });
+                return;
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = kind; // every other kind reads whole packets
             let mut buf = [MaybeUninit::<u8>::uninit(); MAX_MTU];
             while !stop.load(Ordering::Relaxed) {
                 match socket.recv_from(&mut buf) {
@@ -245,7 +351,7 @@ fn spawn_receiver(
                         let bytes =
                             unsafe { &*(&buf[..len] as *const [MaybeUninit<u8>] as *const [u8]) };
                         let from = from.as_socket().map(|a| a.ip());
-                        if let Some(reply) = decode(bytes, from, ipv6, packet_id, received_at) {
+                        if let Some(reply) = decode(bytes, from, ipv6, ours, received_at) {
                             if tx.send(reply).is_err() {
                                 break; // nobody listens any more
                             }
@@ -268,13 +374,12 @@ fn spawn_receiver(
     Ok(())
 }
 
-/// Parse a received packet and keep it only if it answers one of our probes, whose
-/// identifiers run from `packet_id` to `packet_id + MAX_FLOWS - 1`.
+/// Parse a received packet and keep it only if it answers one of our probes.
 fn decode(
     bytes: &[u8],
     from: Option<IpAddr>,
     ipv6: bool,
-    packet_id: u16,
+    ours: Ours,
     received_at: Instant,
 ) -> Option<Reply> {
     let reply = if ipv6 {
@@ -282,28 +387,145 @@ fn decode(
     } else {
         parse_icmpv4(bytes)?
     };
-    (reply.id.wrapping_sub(packet_id) < MAX_FLOWS).then_some(Reply {
-        kind: reply.kind,
-        source: reply.source,
-        seq: reply.seq,
-        received_at,
-        ttl: reply.ttl,
-        mpls: reply.mpls,
+    ours.reply(reply, received_at)
+}
+
+impl Ours {
+    /// `reply` as a `Reply` if it answers one of our probes.
+    fn reply(&self, reply: IcmpReply, received_at: Instant) -> Option<Reply> {
+        Some(Reply {
+            kind: reply.kind,
+            source: reply.source,
+            seq: self.seq(reply.probe)?,
+            received_at,
+            ttl: reply.ttl,
+            mpls: reply.mpls,
+        })
+    }
+}
+
+/// Open the ICMP or ICMPv6 socket, and say what kind it is and, for a Linux ping
+/// socket, which identifier the kernel gave it.
+///
+/// On macOS an unprivileged datagram socket works for traceroute (it receives
+/// Time Exceeded too, for IPv4 with the IP header included), so it comes first.
+/// On Linux a raw socket comes first because it keeps the MPLS labels routers
+/// quote, and a ping socket is the fallback without privileges.
+fn open_icmp_socket(ipv6: bool) -> Result<(Socket, SocketKind, Option<u16>)> {
+    let (domain, protocol, name) = match ipv6 {
+        false => (Domain::IPV4, Protocol::ICMPV4, "ICMP"),
+        true => (Domain::IPV6, Protocol::ICMPV6, "ICMPv6"),
+    };
+    if cfg!(target_os = "macos") {
+        if let Ok(socket) = Socket::new(domain, Type::DGRAM, Some(protocol)) {
+            return Ok((socket, SocketKind::Datagram, None));
+        }
+    }
+    let raw_error = match Socket::new(domain, Type::RAW, Some(protocol)) {
+        Ok(socket) => return Ok((socket, SocketKind::Raw, None)),
+        Err(e) => e,
+    };
+    #[cfg(target_os = "linux")]
+    if raw_error.kind() == io::ErrorKind::PermissionDenied {
+        match ping_socket::open(ipv6) {
+            Ok((socket, ident)) => return Ok((socket, SocketKind::Ping, Some(ident))),
+            Err(e) => tracing::debug!("no ping socket either: {e}"),
+        }
+    }
+    Err(anyhow!(
+        "cannot open an {name} socket: {raw_error}. {}",
+        privilege_hint(&raw_error)
+    ))
+}
+
+/// Whether this machine has a route to `addr`.
+pub fn routable(addr: IpAddr) -> bool {
+    source_address(addr).is_ok()
+}
+
+/// The address packets to `addr` leave from. Connecting a UDP socket consults the
+/// routing table without sending anything.
+fn source_address(addr: IpAddr) -> io::Result<IpAddr> {
+    let any = match addr {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    let socket = UdpSocket::bind((any, 0))?;
+    socket.connect((addr, UDP_PORT))?;
+    Ok(socket.local_addr()?.ip())
+}
+
+/// Open the socket UDP probes to `target` leave from. Their answers come to the
+/// ICMP socket, which must see errors about other sockets' packets: a ping
+/// socket only sees its own pings.
+fn open_udp_sender(target: IpAddr, kind: SocketKind) -> Result<UdpSender> {
+    #[cfg(target_os = "linux")]
+    if kind == SocketKind::Ping {
+        return Err(anyhow!(
+            "UDP probes need a raw ICMP socket on Linux to read the routers' answers. \
+             Run with sudo, or grant the capability once: sudo setcap cap_net_raw+ep $(which mtr-ng)"
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = kind;
+    let source = source_address(target)?;
+    let domain = if target.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.bind(&SocketAddr::new(source, 0).into())?;
+    let port = socket
+        .local_addr()?
+        .as_socket()
+        .map_or(0, |addr| addr.port());
+    Ok(UdpSender {
+        socket,
+        source,
+        port,
     })
 }
 
-/// Open the IPv4 ICMP socket. On macOS an unprivileged datagram socket works for
-/// traceroute (it receives Time Exceeded with the IP header included), so prefer it
-/// and fall back to a raw socket. Returns the socket and whether it is unprivileged.
-fn open_icmpv4_socket() -> Result<(Socket, bool)> {
-    if cfg!(target_os = "macos") {
-        if let Ok(socket) = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)) {
-            return Ok((socket, true));
+/// Have the kernel use the flow label in each destination address (Linux ignores
+/// it otherwise). Elsewhere the flow label stays the kernel's choice.
+fn set_flow_label_sending(socket: &Socket) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let on: libc::c_int = 1;
+        // SAFETY: a valid descriptor and a c_int option value of the size passed.
+        let ret = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_IPV6,
+                libc::IPV6_FLOWINFO_SEND,
+                std::ptr::from_ref(&on).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            tracing::debug!(
+                "cannot set IPv6 flow labels: {}",
+                io::Error::last_os_error()
+            );
         }
     }
-    Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
-        .map(|socket| (socket, false))
-        .map_err(|e| anyhow!("cannot open an ICMP socket: {e}. {}", privilege_hint(&e)))
+    #[cfg(not(target_os = "linux"))]
+    let _ = socket;
+}
+
+/// `addr` with flow label `label`. sin6_flowinfo is in network byte order, and
+/// std passes the value on as it is.
+fn labelled(addr: Ipv6Addr, label: u32) -> SocketAddrV6 {
+    SocketAddrV6::new(addr, 0, label.to_be(), 0)
+}
+
+/// The IPv6 flow label of `flow`: fixed per flow, different between flows, never
+/// zero (no label), and in the range Linux keeps for stateless labels (RFC 6437),
+/// which needs no registration.
+fn flow_label(packet_id: u16, flow: u16) -> u32 {
+    0x80000 | (u32::from(packet_id) << 6 | u32::from(flow)) & 0x7ffff
 }
 
 fn privilege_hint(e: &io::Error) -> &'static str {
@@ -311,7 +533,8 @@ fn privilege_hint(e: &io::Error) -> &'static str {
         return "";
     }
     if cfg!(target_os = "linux") {
-        "Run with sudo, or grant the capability once: sudo setcap cap_net_raw+ep $(which mtr-ng)"
+        "Run with sudo, grant the capability once (sudo setcap cap_net_raw+ep $(which mtr-ng)), \
+         or let your group send pings: sudo sysctl -w net.ipv4.ping_group_range=\"0 2147483647\""
     } else if cfg!(windows) {
         "Run from an Administrator terminal"
     } else {
@@ -320,7 +543,8 @@ fn privilege_hint(e: &io::Error) -> &'static str {
 }
 
 /// Parse an IPv4 ICMP packet including its IP header (raw sockets, and datagram
-/// sockets on macOS, deliver it). Errors only count if they quote an echo request.
+/// sockets on macOS, deliver it). Errors only count if they quote an echo request
+/// or a UDP datagram.
 fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
     let ihl = usize::from(buf.first()? & 0x0f) * 4;
     if ihl < 20 || buf.len() < ihl + 8 {
@@ -328,32 +552,28 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
     }
     let source = Ipv4Addr::new(buf[12], buf[13], buf[14], buf[15]);
     let icmp = &buf[ihl..];
-    let kind = match icmp[0] {
-        0 => IcmpResponseType::EchoReply,
-        11 => IcmpResponseType::TimeExceeded,
-        3 => IcmpResponseType::DestinationUnreachable,
+    let kind = match (icmp[0], icmp[1]) {
+        (0, _) => IcmpResponseType::EchoReply,
+        (11, _) => IcmpResponseType::TimeExceeded,
+        (3, 3) => IcmpResponseType::PortUnreachable,
+        (3, _) => IcmpResponseType::DestinationUnreachable,
         _ => return None,
     };
-    let echo = if kind == IcmpResponseType::EchoReply {
-        icmp
+    let probe = if kind == IcmpResponseType::EchoReply {
+        echo_fields(icmp)
     } else {
         // 8-byte ICMP header, then the quoted IP header and the first 8 bytes of our probe
         let inner = &icmp[8..];
         let inner_ihl = usize::from(inner.first()? & 0x0f) * 4;
-        if inner_ihl < 20 || inner.len() < inner_ihl + 8 || inner[9] != 1 {
+        if inner_ihl < 20 || inner.len() < inner_ihl + 8 {
             return None;
         }
-        let quoted = &inner[inner_ihl..];
-        if quoted[0] != 8 {
-            return None;
-        }
-        quoted
+        quoted_probe(inner[9], &inner[inner_ihl..], ECHO_REQUEST)?
     };
     Some(IcmpReply {
         kind,
         source: IpAddr::V4(source),
-        id: u16::from_be_bytes([echo[4], echo[5]]),
-        seq: u16::from_be_bytes([echo[6], echo[7]]),
+        probe,
         ttl: Some(buf[8]),
         mpls: match kind {
             IcmpResponseType::EchoReply => Vec::new(),
@@ -362,44 +582,126 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
     })
 }
 
-/// Parse an ICMPv6 packet (raw ICMPv6 sockets deliver no IPv6 header).
+/// Parse an ICMPv6 packet (ICMPv6 sockets deliver no IPv6 header). Errors only
+/// count if they quote an echo request or a UDP datagram.
 fn parse_icmpv6(buf: &[u8], source: IpAddr) -> Option<IcmpReply> {
     if buf.len() < 8 {
         return None;
     }
-    let kind = match buf[0] {
-        129 => IcmpResponseType::EchoReply,
-        3 => IcmpResponseType::TimeExceeded,
-        1 => IcmpResponseType::DestinationUnreachable,
+    let kind = match (buf[0], buf[1]) {
+        (129, _) => IcmpResponseType::EchoReply,
+        (3, _) => IcmpResponseType::TimeExceeded,
+        (1, 4) => IcmpResponseType::PortUnreachable,
+        (1, _) => IcmpResponseType::DestinationUnreachable,
         _ => return None,
     };
-    let echo = if kind == IcmpResponseType::EchoReply {
-        buf
+    let probe = if kind == IcmpResponseType::EchoReply {
+        echo_fields(buf)
     } else {
-        // 8-byte ICMPv6 header, 40-byte quoted IPv6 header (next header ICMPv6), then our probe
+        // 8-byte ICMPv6 header, then the 40-byte quoted IPv6 header and our probe
         let inner = buf.get(8..8 + 40 + 8)?;
-        if inner[6] != 58 || inner[40] != 128 {
-            return None;
-        }
-        &inner[40..]
+        quoted_probe(inner[6], &inner[40..], ECHO_REQUEST_V6)?
     };
     Some(IcmpReply {
         kind,
         source,
-        id: u16::from_be_bytes([echo[4], echo[5]]),
-        seq: u16::from_be_bytes([echo[6], echo[7]]),
+        probe,
         ttl: None,
-        mpls: Vec::new(),
+        mpls: match kind {
+            IcmpResponseType::EchoReply => Vec::new(),
+            _ => mpls_labels_v6(buf),
+        },
     })
 }
 
-/// An ICMP echo request whose checksum is `checksum` whatever `seq` is: two
-/// payload bytes absorb the change (Paris traceroute, as scamper does it for
+/// Identifier and sequence number of an echo request or reply
+fn echo_fields(echo: &[u8]) -> Quoted {
+    Quoted::Echo {
+        id: u16::from_be_bytes([echo[4], echo[5]]),
+        seq: u16::from_be_bytes([echo[6], echo[7]]),
+    }
+}
+
+/// The probe in the first 8 quoted bytes of a datagram of IP protocol `protocol`:
+/// an echo request (`echo_request` is its ICMP type) or a UDP header.
+fn quoted_probe(protocol: u8, quoted: &[u8], echo_request: u8) -> Option<Quoted> {
+    let word = |at: usize| u16::from_be_bytes([quoted[at], quoted[at + 1]]);
+    match protocol {
+        1 | 58 if quoted[0] == echo_request => Some(echo_fields(quoted)),
+        17 => Some(Quoted::Udp {
+            src_port: word(0),
+            dst_port: word(2),
+            checksum: word(6),
+        }),
+        _ => None,
+    }
+}
+
+/// The payload of a UDP probe whose checksum, as the kernel will compute it, is
+/// `seq`: two payload bytes absorb the rest (Paris traceroute's UDP). Addresses,
+/// ports and length then stay fixed within a flow, so load balancers route every
+/// probe of it alike, and routers that quote only the UDP header still say which
+/// probe they answer.
+fn udp_payload(src: IpAddr, dst: IpAddr, src_port: u16, dst_port: u16, seq: u16) -> Vec<u8> {
+    let mut payload = vec![0, 0];
+    payload.extend_from_slice(UDP_PAYLOAD);
+    let datagram = udp_datagram(src_port, dst_port, 0, &payload);
+    let sum =
+        !calculate_icmp_checksum(&[pseudo_header(src, dst, datagram.len()), datagram].concat());
+    // The checksum is the complement of the sum, so the sum must come to !seq.
+    let adjust = ones_complement_add(!seq, !sum);
+    payload[..2].copy_from_slice(&adjust.to_be_bytes());
+    payload
+}
+
+/// A UDP header with `checksum`, followed by `payload`
+fn udp_datagram(src_port: u16, dst_port: u16, checksum: u16, payload: &[u8]) -> Vec<u8> {
+    let len = (8 + payload.len()) as u16;
+    [src_port, dst_port, len, checksum]
+        .iter()
+        .flat_map(|word| word.to_be_bytes())
+        .chain(payload.iter().copied())
+        .collect()
+}
+
+/// The pseudo-header UDP's checksum covers besides the datagram (RFC 768, RFC 8200)
+fn pseudo_header(src: IpAddr, dst: IpAddr, len: usize) -> Vec<u8> {
+    match (src, dst) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => [
+            &src.octets()[..],
+            &dst.octets(),
+            &[0, 17],
+            &(len as u16).to_be_bytes(),
+        ]
+        .concat(),
+        _ => {
+            let v6 = |addr: IpAddr| match addr {
+                IpAddr::V6(v6) => v6.octets(),
+                IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+            };
+            [
+                &v6(src)[..],
+                &v6(dst),
+                &(len as u32).to_be_bytes(),
+                &[0, 0, 0, 17],
+            ]
+            .concat()
+        }
+    }
+}
+
+/// An echo request of type `kind` whose checksum is `checksum` whatever `seq` is:
+/// two payload bytes absorb the change (Paris traceroute, as scamper does it for
 /// ICMP). Load balancers that hash the ICMP header then see one flow per
 /// identifier and checksum, and route every probe of it the same way.
-fn echo_request(id: u16, seq: u16, checksum: u16) -> [u8; 10] {
+///
+/// For ICMPv6 the kernel replaces the checksum with one that also covers both
+/// addresses. Those don't change during a trace, and the rest of the message adds
+/// up to the same for every probe of a flow, so the kernel's checksum is fixed per
+/// flow as well.
+fn echo_request(kind: u8, id: u16, seq: u16, checksum: u16) -> [u8; 10] {
     let mut packet = [0u8; 10];
-    packet[0] = 8; // Echo Request, code 0
+    packet[0] = kind; // code 0
     packet[4..6].copy_from_slice(&id.to_be_bytes());
     packet[6..8].copy_from_slice(&seq.to_be_bytes());
     // With the checksum field zero the words must add up to !checksum, so the
@@ -437,32 +739,15 @@ pub(crate) fn calculate_icmp_checksum(packet: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-// Helper function to construct ICMPv6 packet
-fn construct_icmp6_packet(seq: u16, id: u16) -> Vec<u8> {
-    let mut packet = vec![0u8; 8];
-
-    // ICMPv6 Type (128 = Echo Request)
-    packet[0] = 128;
-    // ICMPv6 Code (0)
-    packet[1] = 0;
-    // Checksum (0 initially, kernel will calculate for ICMPv6)
-    packet[2] = 0;
-    packet[3] = 0;
-    // Identifier
-    packet[4..6].copy_from_slice(&id.to_be_bytes());
-    // Sequence Number
-    packet[6..8].copy_from_slice(&seq.to_be_bytes());
-
-    // Note: For ICMPv6, the kernel typically calculates the checksum
-    // so we don't need to manually calculate it like we do for ICMP
-
-    packet
-}
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const ROUTER: [u8; 4] = [10, 0, 0, 1];
+
+    fn echo_of(id: u16, seq: u16) -> Quoted {
+        Quoted::Echo { id, seq }
+    }
 
     /// IPv4 header with the given header length (in bytes), protocol and source.
     fn ipv4_header(ihl: usize, proto: u8, src: [u8; 4]) -> Vec<u8> {
@@ -496,7 +781,7 @@ mod tests {
         let r = parse_icmpv4(&p).unwrap();
         assert_eq!(r.kind, IcmpResponseType::EchoReply);
         assert_eq!(r.source, IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
-        assert_eq!((r.id, r.seq, r.ttl), (0x1234, 40000, Some(57)));
+        assert_eq!((r.probe, r.ttl), (echo_of(0x1234, 40000), Some(57)));
         assert!(r.mpls.is_empty());
     }
 
@@ -507,7 +792,7 @@ mod tests {
         let r = parse_icmpv4(&time_exceeded(&inner)).unwrap();
         assert_eq!(r.kind, IcmpResponseType::TimeExceeded);
         assert_eq!(r.source, IpAddr::V4(Ipv4Addr::from(ROUTER)));
-        assert_eq!((r.id, r.seq), (0x1234, 40001));
+        assert_eq!(r.probe, echo_of(0x1234, 40001));
     }
 
     #[test]
@@ -515,15 +800,122 @@ mod tests {
         let mut inner = ipv4_header(24, 1, [192, 168, 1, 2]);
         inner.extend(echo(8, 0x1234, 40002));
         let r = parse_icmpv4(&time_exceeded(&inner)).unwrap();
-        assert_eq!((r.id, r.seq), (0x1234, 40002));
+        assert_eq!(r.probe, echo_of(0x1234, 40002));
     }
 
     #[test]
     fn ignores_errors_about_other_protocols() {
-        // Someone else's UDP traceroute: ports and checksum where id/seq would be.
-        let mut inner = ipv4_header(20, 17, [192, 168, 1, 2]);
-        inner.extend_from_slice(&[0x82, 0x9a, 0x82, 0x9b, 0, 8, 0x9c, 0x41]);
+        // A TCP SYN: ports and sequence number where id/seq would be.
+        let mut inner = ipv4_header(20, 6, [192, 168, 1, 2]);
+        inner.extend_from_slice(&[0x82, 0x9a, 0x00, 0x50, 0, 0, 0x9c, 0x41]);
         assert_eq!(parse_icmpv4(&time_exceeded(&inner)), None);
+    }
+
+    #[test]
+    fn reads_the_udp_header_an_error_quotes() {
+        let mut inner = ipv4_header(20, 17, [192, 168, 1, 2]);
+        inner.extend_from_slice(&[0xec, 0x6f, 0x82, 0x9a, 0, 16, 0x9c, 0x41]);
+        let r = parse_icmpv4(&time_exceeded(&inner)).unwrap();
+        assert_eq!(r.kind, IcmpResponseType::TimeExceeded);
+        let udp = Quoted::Udp {
+            src_port: 0xec6f,
+            dst_port: UDP_PORT,
+            checksum: 0x9c41,
+        };
+        assert_eq!(r.probe, udp);
+
+        let mut unreachable = time_exceeded(&inner);
+        unreachable[20..22].copy_from_slice(&[3, 3]);
+        let r = parse_icmpv4(&unreachable).unwrap();
+        assert_eq!(r.kind, IcmpResponseType::PortUnreachable, "the target");
+        unreachable[21] = 13;
+        let r = parse_icmpv4(&unreachable).unwrap();
+        assert_eq!(r.kind, IcmpResponseType::DestinationUnreachable, "filtered");
+    }
+
+    #[test]
+    fn udp_probes_are_ours_by_source_port_and_flow_ports() {
+        let udp = |src_port, dst_port| Quoted::Udp {
+            src_port,
+            dst_port,
+            checksum: 40000,
+        };
+        let ours = Ours {
+            packet_id: 0x1234,
+            udp_port: Some(0xec6f),
+        };
+        assert_eq!(ours.seq(udp(0xec6f, UDP_PORT)), Some(40000));
+        assert_eq!(ours.seq(udp(0xec6f, UDP_PORT + MAX_FLOWS - 1)), Some(40000));
+        assert_eq!(
+            ours.seq(udp(0xec6f, UDP_PORT + MAX_FLOWS)),
+            None,
+            "no such flow"
+        );
+        assert_eq!(ours.seq(udp(0xec70, UDP_PORT)), None, "another socket");
+        assert_eq!(
+            ours.seq(echo_of(0x1234, 40000)),
+            None,
+            "not probing with ICMP"
+        );
+        let icmp = Ours {
+            udp_port: None,
+            ..ours
+        };
+        assert_eq!(
+            icmp.seq(udp(0xec6f, UDP_PORT)),
+            None,
+            "not probing with UDP"
+        );
+        assert_eq!(icmp.seq(echo_of(0x1234, 40000)), Some(40000));
+    }
+
+    #[test]
+    fn a_udp_probe_checksums_to_its_sequence_number() {
+        let pairs: [(IpAddr, IpAddr); 2] = [
+            ([192, 168, 1, 2].into(), [1, 1, 1, 1].into()),
+            (
+                "2001:db8::2".parse().unwrap(),
+                "2606:4700:4700::1111".parse().unwrap(),
+            ),
+        ];
+        for (src, dst) in pairs {
+            for flow in [0, MAX_FLOWS - 1] {
+                for seq in [INITIAL_SEQUENCE, 40000, MAX_SEQUENCE] {
+                    let payload = udp_payload(src, dst, 0xec6f, UDP_PORT + flow, seq);
+                    assert_eq!(payload[2..], *UDP_PAYLOAD, "same length every time");
+                    // As sent: the checksum field holds seq, and the whole adds up.
+                    let datagram = udp_datagram(0xec6f, UDP_PORT + flow, seq, &payload);
+                    let pseudo = pseudo_header(src, dst, datagram.len());
+                    assert_eq!(
+                        calculate_icmp_checksum(&[pseudo, datagram].concat()),
+                        0,
+                        "{dst} flow {flow} seq {seq}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_flow_has_its_own_stateless_flow_label() {
+        let labels: Vec<u32> = (0..MAX_FLOWS).map(|f| flow_label(0xffff, f)).collect();
+        assert!(labels.iter().all(|&l| (0x80000..=0xfffff).contains(&l)));
+        let mut unique = labels.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), labels.len());
+        assert_eq!(flow_label(0x1234, 3), flow_label(0x1234, 3));
+    }
+
+    #[test]
+    fn the_flow_label_reaches_the_kernel_in_network_byte_order() {
+        let addr = socket2::SockAddr::from(labelled(Ipv6Addr::LOCALHOST, 0x812c3));
+        // SAFETY: as_ptr points at len() bytes of a sockaddr_in6.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(addr.as_ptr().cast::<u8>(), addr.len() as usize) };
+        // sin6_flowinfo follows family and port on Linux, and length, family and
+        // port on the BSDs: bytes 4 to 8 either way.
+        assert_eq!(bytes[4..8], [0x00, 0x08, 0x12, 0xc3]);
     }
 
     #[test]
@@ -547,7 +939,7 @@ mod tests {
         p.extend_from_slice(&[0x20, 0, 0, 0, 0, 8, 1, 1]);
         p.extend_from_slice(&entry.to_be_bytes());
         let r = parse_icmpv4(&p).unwrap();
-        assert_eq!(r.seq, 40005);
+        assert_eq!(r.probe, echo_of(0x1234, 40005));
         let labels: Vec<_> = r.mpls.iter().map(|l| (l.label, l.bottom, l.ttl)).collect();
         assert_eq!(labels, [(24005, true, 1)]);
     }
@@ -558,7 +950,11 @@ mod tests {
         let reply_with_id = |id| {
             let mut p = ipv4_header(20, 1, [1, 1, 1, 1]);
             p.extend(echo(0, id, 40000));
-            decode(&p, None, false, 0x1234, now)
+            let ours = Ours {
+                packet_id: 0x1234,
+                udp_port: None,
+            };
+            decode(&p, None, false, ours, now)
         };
         assert_eq!(reply_with_id(0x9999), None, "another process's ping");
         assert_eq!(
@@ -581,7 +977,7 @@ mod tests {
             for flow in [0, 1, MAX_FLOWS - 1] {
                 let checksum = FLOW_CHECKSUM + flow;
                 for seq in 0..=u16::MAX {
-                    let packet = echo_request(id, seq, checksum);
+                    let packet = echo_request(ECHO_REQUEST, id, seq, checksum);
                     assert_eq!(packet[2..4], checksum.to_be_bytes());
                     assert_eq!(packet[6..8], seq.to_be_bytes());
                     assert_eq!(
@@ -595,6 +991,20 @@ mod tests {
     }
 
     #[test]
+    fn an_icmpv6_flow_adds_up_alike_whatever_the_sequence_number() {
+        // The kernel's checksum depends on everything but the checksum field.
+        let sum_without_checksum = |flow, seq| {
+            let mut packet = echo_request(ECHO_REQUEST_V6, 0x1234, seq, FLOW_CHECKSUM + flow);
+            assert_eq!((packet[0], packet[1]), (128, 0));
+            packet[2..4].fill(0);
+            calculate_icmp_checksum(&packet)
+        };
+        let flow_3 = sum_without_checksum(3, 0);
+        assert!((1..=u16::MAX).all(|seq| sum_without_checksum(3, seq) == flow_3));
+        assert_ne!(sum_without_checksum(4, 0), flow_3, "flows differ");
+    }
+
+    #[test]
     fn parses_icmpv6_time_exceeded() {
         let mut p = vec![3, 0, 0, 0, 0, 0, 0, 0];
         let mut inner = vec![0u8; 40];
@@ -604,6 +1014,6 @@ mod tests {
         let src: IpAddr = "2001:db8::1".parse().unwrap();
         let r = parse_icmpv6(&p, src).unwrap();
         assert_eq!(r.kind, IcmpResponseType::TimeExceeded);
-        assert_eq!((r.id, r.seq, r.source), (0x1234, 40004, src));
+        assert_eq!((r.probe, r.source), (echo_of(0x1234, 40004), src));
     }
 }

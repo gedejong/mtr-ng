@@ -2,6 +2,13 @@
 
 Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/mtr-ng/releases).
 
+## Unreleased
+
+- IPv6. A name with both kinds of address is traced over IPv6 when this machine has an IPv6 route, else over IPv4; `-4` and `-6` choose. MPLS labels and stable flows work over IPv6 too.
+- `-P udp` sends UDP datagrams to port 33434 and up, one port per flow. Load balancers spread UDP by port far more often than they spread ICMP, so `--flows` over UDP shows paths that ICMP doesn't. It needs no sudo on macOS, and root or `CAP_NET_RAW` on Linux.
+- On Linux, ICMP no longer needs root or `CAP_NET_RAW` where `net.ipv4.ping_group_range` allows ping sockets, as it does by default on systemd 243 and newer. Ping sockets don't pass on MPLS labels.
+- IPv6 probes carry a flow label per flow, which is what Linux and many routers hash IPv6 on.
+
 ## 0.4.0 - 2026-10-28
 
 mtr-ng now lives at [gedejong/mtr-ng](https://github.com/gedejong/mtr-ng), and its Homebrew tap at `gedejong/tap`. If you installed from the old tap, switch with `brew uninstall mtr-ng && brew untap edejong-dbc/tap && brew install gedejong/tap/mtr-ng`. The crate on crates.io stays at 0.3.0 for now; `cargo install --locked --git https://github.com/gedejong/mtr-ng` installs this version.

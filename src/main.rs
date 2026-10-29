@@ -1,5 +1,5 @@
 use anyhow::{bail, Context};
-use clap::{CommandFactory, Parser, ValueEnum};
+use clap::{CommandFactory, Parser};
 use mtr_ng::{
     args::ProbeProtocol, report::run_report, ui::run_interactive, Args, MtrSession, Result,
 };
@@ -24,12 +24,8 @@ async fn main() -> Result<()> {
     );
     info!("Target: {}", args.target);
 
-    if args.protocol != ProbeProtocol::Icmp {
-        let name = args.protocol.to_possible_value().expect("not skipped");
-        bail!(
-            "--protocol {} is not implemented yet; only icmp is supported",
-            name.get_name()
-        );
+    if args.protocol == ProbeProtocol::Tcp {
+        bail!("--protocol tcp is not implemented yet; use icmp or udp");
     }
 
     let session = MtrSession::new(args).await?;

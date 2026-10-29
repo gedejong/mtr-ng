@@ -63,7 +63,6 @@ cargo run -- --simulate --count 3 --report google.com
 # Test different protocols
 cargo run -- --simulate --protocol icmp --count 1 --report google.com
 cargo run -- --simulate --protocol udp --count 1 --report google.com
-cargo run -- --simulate --protocol tcp --count 1 --report google.com
 
 # Test output formats
 cargo run -- --simulate --fields hop,host,loss,avg --count 2 --report google.com
@@ -128,7 +127,6 @@ cargo run -- --simulate --numeric -c 2 -r google.com
 ```bash
 cargo run -- --simulate -P icmp -c 1 -r google.com
 cargo run -- --simulate -P udp -c 1 -r google.com
-cargo run -- --simulate -P tcp -c 1 -r google.com
 ```
 
 ### 4. **Error Conditions**
@@ -199,6 +197,37 @@ cargo run -- --simulate -c 3 -r google.com
 # Force simulation even with sudo available
 sudo cargo run -- --force-simulate -c 3 -r google.com
 ```
+
+## Linux Network Lab (Docker)
+
+`scripts/netlab/run.sh`, or `just netlab`, tests Linux probing from a Mac. It builds mtr-ng for Linux inside Docker (colima or Docker Desktop, no sudo on the host) and runs a command on a small routed network of namespaces in one privileged container. The first run pulls `rust:1.89-bookworm` and compiles for a few minutes. The cargo registry and target dir are Docker volumes (`mtr-ng-netlab-cargo`, `mtr-ng-netlab-target`), so later runs rebuild incrementally and nothing lands in `./target`. Every run starts a fresh lab, and the command's exit status is passed through.
+
+```
+client ── gw ── r1 ──┬── r2a ──┬── r3 ══ target   (target6 for IPv6)
+          NAT        └── r2b ──┘   MTU 1400
+```
+
+- Link N is `10.0.N.0/24` and `fd00:N::/64`. The hop reached over link N answers from `10.0.N.1` (`fd00:N::1`); r3 always answers from `10.0.5.1`. Hops sit at 2, 12, 16 (r2a) or 20 (r2b), 20/24 and 40/44 ms. On colima an idle VM fires timers late, so spaced probes read 10–20% higher; `--spin` keeps the VM's CPUs busy while the command runs and brings them back to within half a millisecond.
+- gw masquerades IPv4 like a home router; IPv6 is routed.
+- r1 has a multipath route over r2a and r2b with hash policy 1 (the 5-tuple). UDP probes with different ports split there. ICMP echo never does, because no Linux hash policy looks at the ICMP identifier or checksum.
+- UDP checksums are computed in software on every link. veth leaves them to an offload that never happens, routers would quote the unfinished sum, and mtr-ng, which carries the sequence number in the checksum, couldn't match the error. The same happens on loopback, so UDP probes to the machine itself go unanswered.
+- The r3–target link has MTU 1400, so `tracepath` shows `pmtu 1400` and DF probes get Frag Needed or Packet Too Big.
+- ICMP error rate limits are off. Names (`target`, `target6`, `gw`, `r1`, ...) come from the client's `/etc/hosts` and a local dnsmasq, so reverse lookups answer at once.
+
+```bash
+just netlab -- mtr-ng -r -c 3 -n target                  # as root
+just netlab --user probe -- ping -c 1 target              # works through a ping socket
+just netlab --user probe -- mtr-ng -r -c 3 -n target6    # so does mtr-ng, IPv6 too
+just netlab --user probe --no-ping-group -- ping -c 1 target   # ping sockets disallowed: fails
+just netlab --silent r3 -- traceroute -n target           # hop 4 shows * * *
+just netlab --spin -- mtr-ng -r -c 10 -n target           # accurate RTTs
+just netlab --icmp-ecmp -- mtr-ng -r -c 8 -n --flows 4 target  # ICMP flows split at hop 3
+just netlab -- mtr-ng -P udp -r -c 8 -n --flows 8 target  # so do UDP flows, by port
+just netlab --hash-policy 0 -- mtr-ng -r -c 8 -n --flows 8 target6  # and IPv6, by flow label
+just netlab --shell                                       # shell in the client namespace
+```
+
+`--user probe` runs the command as a user without capabilities. `--no-ping-group` sets `net.ipv4.ping_group_range` to `1 0` instead of `0 2147483647`. `--silent ROUTER` drops that router's Time Exceeded messages (IPv4 and IPv6), and `--loss PCT` loses packets from gw to r1. `--hash-policy N` sets r1's multipath hash policy; the IPv6 flow label counts in policies 0, 2 and 3, not in 1. `--icmp-ecmp` makes r1 send echo requests with an even ICMP checksum to r2a and odd ones to r2b, as routers that hash the first transport word do. `scripts/netlab/run.sh --help` lists the options, and `scripts/netlab/lab.sh` explains each sysctl and route.
 
 ## Continuous Integration
 

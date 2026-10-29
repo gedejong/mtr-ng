@@ -1300,6 +1300,7 @@ dependencies = [
  "clap_mangen",
  "gethostname",
  "hickory-resolver",
+ "libc",
  "maxminddb",
  "rand 0.10.3",
  "ratatui",

@@ -35,7 +35,7 @@ This guide covers development workflows, how probing works, CI, and releases for
   ```bash
   ./target/debug/mtr-ng -r -c 3 -n 1.1.1.1
   ```
-- **Linux** needs root or `CAP_NET_RAW`. Build as yourself and run only the binary as root:
+- **Linux** probes ICMP without privilege through a ping socket where `net.ipv4.ping_group_range` includes your group (systemd 243 and newer include every group). Raw sockets, for MPLS labels and `-P udp`, need root or `CAP_NET_RAW`. Build as yourself and run only the binary as root:
   ```bash
   cargo build
   sudo ./target/debug/mtr-ng -r -c 3 -n 1.1.1.1
@@ -43,16 +43,16 @@ This guide covers development workflows, how probing works, CI, and releases for
   Never `sudo cargo run`: it leaves root-owned files in `target/` and `~/.cargo`. To skip sudo, install a copy and give it the capability with `scripts/setup-capabilities.sh`. A capability on `target/debug/mtr-ng` is wiped by the next build.
 - **Simulation** (`--simulate`) produces fake data for UI work and demos. mtr-ng never falls back to it on its own: if it can't probe, it exits with an error.
 
-Only IPv4 ICMP is implemented. IPv6 targets and `-P udp|tcp` exit with an error.
+ICMP and UDP over IPv4 and IPv6 are implemented; `-P tcp` exits with an error. `just netlab` traces Linux paths from a Mac, with ECMP, NAT and IPv6 (TESTING.md).
 
 ## How a Trace Works
 
 mtr-ng follows the original mtr algorithm.
 
-- **Probing.** Every interval (`-i`, in milliseconds) it sends one ICMP echo request per TTL, from 1 up to the end of the path. Routers along the way answer with Time Exceeded, the target with Echo Reply, and some hops with Destination Unreachable.
-- **Matching.** An ICMP error quotes the IP header and first 8 bytes of the probe that caused it, so the quoted echo id and sequence number identify our probe. The id filters out other processes' pings; the sequence number maps the reply to its hop and probe. A probe with no reply after the probe timeout (2 s) counts as lost.
+- **Probing.** Every interval (`-i`, in milliseconds) it sends one ICMP echo request per TTL (with `-P udp` a UDP datagram to port 33434 + flow), from 1 up to the end of the path. Routers along the way answer with Time Exceeded, the target with Echo Reply (or Port Unreachable for UDP), and some hops with Destination Unreachable.
+- **Matching.** An ICMP error quotes the IP header and first 8 bytes of the probe that caused it, so the quoted echo id and sequence number identify our probe; for UDP the quoted ports and checksum do, since two payload bytes make the checksum equal the sequence number. The id or source port filters out other processes' probes; the sequence number maps the reply to its hop and probe. A probe with no reply after the probe timeout (2 s) counts as lost.
 - **RTT.** Each probe records its own send time, and a dedicated receive thread timestamps each reply the moment it arrives, so RTT = arrival − send for that probe. Never derive RTT from loop or batch timing: an early version measured from the start of a batch and reported RTTs about 8x too high.
-- **Parsing.** Raw sockets, and datagram ICMP sockets on macOS, deliver the IP header too, so one parser serves both. It reads the header length from the IHL field and validates every length before indexing.
+- **Parsing.** Raw sockets, and datagram ICMP sockets on macOS, deliver the IP header too, so one parser serves both. It reads the header length from the IHL field and validates every length before indexing. A Linux ping socket delivers no headers: the kernel matches errors to the socket itself and queues them on its error queue with the router's address (`src/probe/ping_socket.rs`).
 - **Reverse DNS** runs off the probing path, so slow lookups never delay probes. `-n` turns it off.
 - **Report and TUI** share the same probing loop; report mode stops after `--count` rounds (10 by default).
 

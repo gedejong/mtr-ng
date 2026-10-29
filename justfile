@@ -83,6 +83,11 @@ compare target="google.com":
     @command -v mtr >/dev/null || { echo "mtr is not installed"; exit 1; }
     sudo mtr -c 3 -r {{target}}
 
+# Linux network lab in Docker (NAT, ECMP diamond, IPv6, PMTU): just netlab -- mtr-ng -r -n target
+[positional-arguments]
+netlab *args:
+    @scripts/netlab/run.sh "$@"
+
 # Show help for all CLI options
 help:
     cargo run -- --help

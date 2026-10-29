@@ -1,5 +1,5 @@
 use crate::geo::{self, GeoFix, GeoSource, Origin};
-use crate::probe::{IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
+use crate::probe::{self, IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
 use crate::simulate::{self, SimProber};
 use crate::{tracer, Args, HopStats, Result};
 use anyhow::{anyhow, bail};
@@ -50,12 +50,21 @@ impl MtrSession {
                 TokioRuntimeProvider::default(),
             )
         });
-        // Only IPv4 can be probed so far, and hickory 0.26 puts AAAA first by default
-        builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+        builder.options_mut().ip_strategy = match (args.ipv4, args.ipv6) {
+            (true, _) => LookupIpStrategy::Ipv4Only,
+            (_, true) => LookupIpStrategy::Ipv6Only,
+            _ => LookupIpStrategy::Ipv4AndIpv6,
+        };
         let resolver = builder.build()?;
 
         // Resolve target hostname to IP
         let target_addr = if let Ok(ip) = args.target.parse::<IpAddr>() {
+            if args.ipv4 && ip.is_ipv6() || args.ipv6 && ip.is_ipv4() {
+                bail!(
+                    "{ip} is not an IPv{} address",
+                    if args.ipv4 { 4 } else { 6 }
+                );
+            }
             ip
         } else {
             let target = &args.target;
@@ -66,9 +75,7 @@ impl MtrSession {
                     anyhow!("cannot resolve {target}: {e}")
                 }
             })?;
-            response
-                .iter()
-                .next()
+            choose_address(response.iter(), probe::routable)
                 .ok_or_else(|| anyhow!("{target}: no such host"))?
         };
 
@@ -112,15 +119,18 @@ impl MtrSession {
                 .extend(simulate::names().map(|(addr, name)| (addr, Some(name))));
             return Ok(Box::new(SimProber::new()));
         }
-        if self.target_addr.is_ipv6() {
-            bail!(
-                "IPv6 targets are not supported yet ({} resolved to {}). \
-                 Use an IPv4 address, or --simulate for demo data.",
-                self.target,
-                self.target_addr
-            );
+        if !probe::routable(self.target_addr) {
+            let family = if self.target_addr.is_ipv6() {
+                "IPv6 "
+            } else {
+                ""
+            };
+            bail!("no {family}route to {}", self.target_addr);
         }
-        Ok(Box::new(ProbeEngine::new()?))
+        Ok(Box::new(ProbeEngine::new(
+            self.target_addr,
+            self.args.protocol,
+        )?))
     }
 
     /// The made-up locations with `--simulate`, else `--geoip-mmdb` or the first
@@ -210,8 +220,9 @@ impl MtrSession {
         }
     }
 
-    /// Record a probe response in the hop table. An echo reply or Destination
-    /// Unreachable marks the end of the path; higher TTLs are no longer probed.
+    /// Record a probe response in the hop table. An echo reply, Port Unreachable
+    /// (UDP's arrival) or Destination Unreachable marks the end of the path; higher
+    /// TTLs are no longer probed.
     /// Returns false if the response refers to a hop outside the table.
     pub fn apply_response(&mut self, response: &ProbeResponse) -> bool {
         let index = response.hop;
@@ -223,7 +234,9 @@ impl MtrSession {
             IcmpResponseType::TimeExceeded => {
                 hop.record_reply(response.ordinal, Some(addr), response.rtt);
             }
-            IcmpResponseType::EchoReply | IcmpResponseType::DestinationUnreachable => {
+            IcmpResponseType::EchoReply
+            | IcmpResponseType::PortUnreachable
+            | IcmpResponseType::DestinationUnreachable => {
                 hop.record_reply(response.ordinal, Some(addr), response.rtt);
                 if response.icmp_type == IcmpResponseType::DestinationUnreachable {
                     hop.set_icmp_error();
@@ -338,6 +351,22 @@ impl MtrSession {
     }
 }
 
+/// Which of a name's addresses to trace: its first IPv6 address when this machine
+/// has a route there, as a connection would prefer it (RFC 6724), else its first
+/// IPv4 address.
+fn choose_address(
+    addrs: impl IntoIterator<Item = IpAddr>,
+    routable: impl Fn(IpAddr) -> bool,
+) -> Option<IpAddr> {
+    let addrs: Vec<IpAddr> = addrs.into_iter().collect();
+    let v6 = addrs.iter().copied().find(IpAddr::is_ipv6);
+    let v4 = addrs.iter().copied().find(IpAddr::is_ipv4);
+    match (v6, v4) {
+        (Some(v6), Some(v4)) => Some(if routable(v6) { v6 } else { v4 }),
+        (v6, v4) => v6.or(v4),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +395,8 @@ mod tests {
             csv: false,
             dot: false,
             geojson: false,
+            ipv4: false,
+            ipv6: false,
             geo: false,
             geoip_mmdb: None,
             origin: None,
@@ -406,6 +437,8 @@ mod tests {
             csv: false,
             dot: false,
             geojson: false,
+            ipv4: false,
+            ipv6: false,
             geo: false,
             geoip_mmdb: None,
             origin: None,
@@ -492,13 +525,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ipv6_target_fails_instead_of_simulating() {
-        let mut session = session_for(&["-n", "::1"]).await;
-        let err = session
-            .open_probe_engine()
-            .err()
-            .expect("IPv6 must not fall back to simulation");
-        assert!(err.to_string().contains("IPv6"));
+    async fn real_targets_are_probed_or_refused_never_simulated() {
+        for target in ["127.0.0.1", "::1"] {
+            let mut session = session_for(&["-n", target]).await;
+            match session.open_probe_engine() {
+                // Without privileges or IPv6 the engine can't open; that's fine.
+                Err(e) => assert!(!e.to_string().is_empty()),
+                Ok(_) => assert!(session.dns_names.is_empty(), "{target}: made-up names"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_routable_ipv6_address_goes_first() {
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        let v6b: IpAddr = "2001:db8::2".parse().unwrap();
+        assert_eq!(choose_address([v4, v6, v6b], |_| true), Some(v6));
+        assert_eq!(
+            choose_address([v4, v6], |_| false),
+            Some(v4),
+            "no IPv6 route"
+        );
+        assert_eq!(choose_address([v6], |_| false), Some(v6), "nothing else");
+        assert_eq!(choose_address([v4], |_| true), Some(v4));
+        assert_eq!(choose_address([], |_| true), None);
+    }
+
+    #[tokio::test]
+    async fn an_address_of_the_wrong_family_is_refused() {
+        for (flag, target) in [("-4", "::1"), ("-6", "127.0.0.1")] {
+            let args = Args::try_parse_from(["mtr-ng", flag, target]).unwrap();
+            let err = MtrSession::new(args).await.err().expect(flag);
+            assert!(err.to_string().contains("is not an IPv"), "{err}");
+        }
     }
 
     #[tokio::test]
@@ -620,6 +680,8 @@ mod tests {
             csv: false,
             dot: false,
             geojson: false,
+            ipv4: false,
+            ipv6: false,
             geo: false,
             geoip_mmdb: None,
             origin: None,

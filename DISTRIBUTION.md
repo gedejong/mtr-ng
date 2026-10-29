@@ -9,7 +9,7 @@ For packagers, and for whoever cuts a release.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`; ship both)
 - **Homepage**: https://github.com/gedejong/mtr-ng
 - **Category**: network utilities
-- **Privileges**: none on macOS; root or `CAP_NET_RAW` on Linux (see below)
+- **Privileges**: none on macOS; on Linux none for ICMP where ping sockets are allowed, else root or `CAP_NET_RAW` (see below)
 
 ## What a release contains
 
@@ -52,7 +52,7 @@ cargo install --locked --git https://github.com/gedejong/mtr-ng
 ## Privileges
 
 - **macOS**: unprivileged ICMP datagram sockets; no sudo, no setuid.
-- **Linux**: raw sockets, so root or the `CAP_NET_RAW` file capability: `sudo setcap cap_net_raw+ep /usr/bin/mtr-ng` (or `scripts/setup-capabilities.sh`). A capability is narrower than setuid root. Reinstalling the binary drops it.
+- **Linux**: ICMP through a ping socket when the user's group is in `net.ipv4.ping_group_range` (systemd 243 and newer allow every group), without MPLS labels. Raw sockets, needed otherwise and for `-P udp`, take root or the `CAP_NET_RAW` file capability: `sudo setcap cap_net_raw+ep /usr/bin/mtr-ng` (or `scripts/setup-capabilities.sh`). A capability is narrower than setuid root. Reinstalling the binary drops it.
 - **Windows**: not supported yet.
 
 Packagers on Linux can set the capability in a post-install script, as Debian's `mtr` does. The `.deb` doesn't do this yet (BACKLOG X4).

@@ -73,7 +73,7 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                     continue; // late (already timed out) or not from this run
                 };
                 let rtt = reply.received_at.saturating_duration_since(probe.sent_at);
-                debug!("Reply seq={} ttl={} from {} rtt={rtt:?} mpls={:?}", reply.seq, probe.hop + 1, reply.source, reply.mpls);
+                debug!("Reply seq={} ttl={} from {} rtt={rtt:?} reply_ttl={:?} mpls={:?}", reply.seq, probe.hop + 1, reply.source, reply.ttl, reply.mpls);
                 let response = ProbeResponse {
                     hop: probe.hop,
                     ordinal: Some(probe.ordinal),
