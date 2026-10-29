@@ -3,9 +3,11 @@
 //! Every interval it sends one probe per TTL up to the end of the path, all in one
 //! flow (`--flows` rotates through several, one per round), matches replies to
 //! probes by sequence number, expires probes that stay unanswered, and records
-//! everything in the shared session. Reverse DNS runs off this path.
+//! everything in the shared session. With `--pmtu` a round also sends one large
+//! probe for the path MTU search, whose answers go to that search instead of the
+//! hop statistics. Reverse DNS runs off this path.
 
-use crate::probe::{IcmpResponseType, ProbeResponse, Prober};
+use crate::probe::{self, IcmpResponseType, ProbeResponse, Prober, Reply};
 use crate::session::{MtrSession, DEFAULT_REPORT_CYCLES};
 use crate::Result;
 use hickory_resolver::proto::rr::RData;
@@ -36,6 +38,13 @@ struct InFlight {
     sent_at: Instant,
 }
 
+/// A path MTU probe on the wire
+struct MtuProbe {
+    ttl: u8,
+    size: u16,
+    sent_at: Instant,
+}
+
 /// Run the trace until `--count` rounds are done (10 in report mode, forever in the
 /// TUI without `--count`), then wait for the last replies and reverse lookups.
 pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
@@ -50,6 +59,7 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("prober has no reply stream"))?;
 
     let mut in_flight: HashMap<u16, InFlight> = HashMap::new();
+    let mut mtu_in_flight: HashMap<u16, MtuProbe> = HashMap::new();
     let mut dns = JoinSet::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(args.interval.max(1)));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -58,17 +68,25 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
 
     loop {
         let sending = rounds.is_none_or(|n| round < n);
-        if !sending && in_flight.is_empty() {
+        if !sending && in_flight.is_empty() && mtu_in_flight.is_empty() {
             break;
         }
         tokio::select! {
             _ = ticker.tick(), if sending => {
                 let flow = (round % flows) as u16;
                 send_round(&session, prober.as_mut(), target, flow, &mut in_flight);
+                send_mtu_probe(&session, prober.as_mut(), target, flow, round, &mut mtu_in_flight);
                 round += 1;
                 debug!("Sent round {round}");
             }
             Some(reply) = replies.recv() => {
+                if let Some(probe) = mtu_in_flight.remove(&reply.seq) {
+                    mtu_answered(&session, &probe, &reply);
+                    continue;
+                }
+                if matches!(reply.kind, IcmpResponseType::TooBig { .. }) {
+                    continue; // a small probe can't be too big; let it time out
+                }
                 let Some(probe) = in_flight.remove(&reply.seq) else {
                     continue; // late (already timed out) or not from this run
                 };
@@ -101,7 +119,10 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                     dns.spawn(asn_lookup(Arc::clone(&session), resolver, reply.source));
                 }
             }
-            _ = sweep.tick() => expire(&session, &mut in_flight, timeout),
+            _ = sweep.tick() => {
+                expire(&session, &mut in_flight, timeout);
+                expire_mtu_probes(&session, &mut mtu_in_flight, timeout);
+            }
         }
     }
 
@@ -125,7 +146,7 @@ fn send_round(
     let mut s = session.lock().unwrap();
     for hop in 0..s.num_hosts {
         let ordinal = s.hops[hop].increment_sent(flow);
-        match prober.send(target, (hop + 1) as u8, flow) {
+        match prober.send(target, (hop + 1) as u8, flow, None) {
             Ok((seq, sent_at)) => {
                 let probe = InFlight {
                     hop,
@@ -141,6 +162,85 @@ fn send_round(
                 debug!("Sending to TTL {} failed: {e}", hop + 1);
                 s.hops[hop].record_timeout(Some(ordinal));
             }
+        }
+    }
+    s.notify();
+}
+
+/// Send this round's path MTU probe, if the search wants one.
+fn send_mtu_probe(
+    session: &Shared,
+    prober: &mut dyn Prober,
+    target: IpAddr,
+    flow: u16,
+    round: usize,
+    in_flight: &mut HashMap<u16, MtuProbe>,
+) {
+    let mut s = session.lock().unwrap();
+    let Some((ttl, size)) = s.mtu_probe(round) else {
+        return;
+    };
+    match prober.send(target, ttl, flow, Some(size)) {
+        Ok((seq, sent_at)) => {
+            debug!("Sent a {size}-byte path MTU probe to TTL {ttl}");
+            in_flight.insert(seq, MtuProbe { ttl, size, sent_at });
+        }
+        Err(e) if probe::is_too_big(&e) => {
+            debug!("This machine won't send {size} bytes to the target: {e}");
+            if let Some(pmtu) = s.pmtu.as_mut() {
+                pmtu.refused(size);
+            }
+            s.notify();
+        }
+        Err(e) => debug!("Sending a path MTU probe failed: {e}"),
+    }
+}
+
+/// Hand the answer to a path MTU probe to the search.
+fn mtu_answered(session: &Shared, probe: &MtuProbe, reply: &Reply) {
+    debug!(
+        "Path MTU probe of {} bytes to TTL {}: {:?} from {}",
+        probe.size, probe.ttl, reply.kind, reply.source
+    );
+    let mut s = session.lock().unwrap();
+    let hop = s.hop_of(reply.source);
+    let Some(pmtu) = s.pmtu.as_mut() else {
+        return;
+    };
+    match reply.kind {
+        IcmpResponseType::TooBig { mtu } => pmtu.too_big(probe.size, reply.source, hop, mtu),
+        IcmpResponseType::TimeExceeded
+        | IcmpResponseType::EchoReply
+        | IcmpResponseType::PortUnreachable => pmtu.arrived(probe.size, probe.ttl),
+        IcmpResponseType::DestinationUnreachable | IcmpResponseType::Timeout => {}
+    }
+    s.notify();
+}
+
+/// Path MTU probes that waited longer than `timeout` vanished, if the hop they
+/// went to answers small probes.
+fn expire_mtu_probes(session: &Shared, in_flight: &mut HashMap<u16, MtuProbe>, timeout: Duration) {
+    let now = Instant::now();
+    let expired: Vec<u16> = in_flight
+        .iter()
+        .filter(|(_, p)| now.duration_since(p.sent_at) >= timeout)
+        .map(|(seq, _)| *seq)
+        .collect();
+    if expired.is_empty() {
+        return;
+    }
+    let mut s = session.lock().unwrap();
+    for seq in expired {
+        let Some(probe) = in_flight.remove(&seq) else {
+            continue;
+        };
+        let answers = s
+            .hops
+            .get(usize::from(probe.ttl) - 1)
+            .is_some_and(|hop| hop.received > 0);
+        debug!("Path MTU probe of {} bytes vanished", probe.size);
+        if let (true, Some(pmtu)) = (answers, s.pmtu.as_mut()) {
+            pmtu.lost(probe.size);
         }
     }
     s.notify();
@@ -227,6 +327,11 @@ mod tests {
         /// TTL whose router reports this MPLS label
         mpls: Option<(u8, MplsLabel)>,
         fail_ttl: Option<u8>,
+        /// Past this TTL's router links take this many bytes, and larger probes get
+        /// Fragmentation Needed from it
+        narrow: Option<(u8, u16)>,
+        /// Past this TTL's router larger probes vanish without a word
+        black_hole: Option<(u8, u16)>,
         next_seq: u16,
         tx: mpsc::UnboundedSender<Reply>,
         rx: Option<mpsc::UnboundedReceiver<Reply>>,
@@ -240,6 +345,8 @@ mod tests {
                 branches: HashMap::new(),
                 mpls: None,
                 fail_ttl: None,
+                narrow: None,
+                black_hole: None,
                 next_seq: 1,
                 tx,
                 rx: Some(rx),
@@ -248,7 +355,13 @@ mod tests {
     }
 
     impl Prober for FakeProber {
-        fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16) -> io::Result<(u16, Instant)> {
+        fn send(
+            &mut self,
+            dst: IpAddr,
+            ttl: u8,
+            flow: u16,
+            size: Option<u16>,
+        ) -> io::Result<(u16, Instant)> {
             if Some(ttl) == self.fail_ttl {
                 return Err(io::Error::other("network is unreachable"));
             }
@@ -256,15 +369,25 @@ mod tests {
             self.next_seq += 1;
             let sent_at = Instant::now();
             let index = usize::from(ttl) - 1;
-            let answer = match (self.branches.get(&ttl), self.path.get(index)) {
-                (Some(routers), _) => Some(routers[usize::from(flow) % routers.len()]),
-                (None, Some(router)) => *router,
-                (None, None) => Some(dst),
+            let beyond = |limit: Option<(u8, u16)>| {
+                limit.filter(|&(at, mtu)| ttl > at && size.is_some_and(|size| size > mtu))
+            };
+            if beyond(self.black_hole).is_some() {
+                return Ok((seq, sent_at));
             }
-            .map(|source| match self.path.get(index) {
-                Some(_) => (IcmpResponseType::TimeExceeded, source),
-                None => (IcmpResponseType::EchoReply, source),
-            });
+            let answer = match (self.branches.get(&ttl), self.path.get(index)) {
+                _ if beyond(self.narrow).is_some() => {
+                    let (at, mtu) = self.narrow.unwrap();
+                    self.path[usize::from(at) - 1]
+                        .map(|router| (IcmpResponseType::TooBig { mtu }, router))
+                }
+                (Some(routers), _) => Some(routers[usize::from(flow) % routers.len()])
+                    .map(|source| (IcmpResponseType::TimeExceeded, source)),
+                (None, Some(router)) => {
+                    router.map(|source| (IcmpResponseType::TimeExceeded, source))
+                }
+                (None, None) => Some((IcmpResponseType::EchoReply, dst)),
+            };
             if let Some((kind, source)) = answer {
                 let hops = ttl.min(self.path.len() as u8 + 1);
                 let mpls = self
@@ -390,5 +513,55 @@ mod tests {
         assert_eq!(hop3.mpls, [label]);
         assert_eq!(hop3.reply_ttl, Some(61));
         assert!(s.hops[1].responders[&router(2).unwrap()].mpls.is_empty());
+    }
+
+    /// A trace with `--pmtu` and the search starting at 1500 bytes
+    async fn pmtu_trace(prober: FakeProber, rounds: &str) -> MtrSession {
+        let cli = ["mtr-ng", "-n", "--pmtu", "-c", rounds, "192.0.2.1"];
+        let mut args = Args::parse_from(cli);
+        args.interval = 5;
+        let mut session = MtrSession::new(args).await.unwrap();
+        session.probe_timeout = Duration::from_millis(20);
+        session.pmtu = Some(crate::pmtu::PathMtu::new(1500, false));
+        let shared = Arc::new(Mutex::new(session));
+        run(Arc::clone(&shared), Box::new(prober)).await.unwrap();
+        let session = shared.lock().unwrap().clone();
+        session
+    }
+
+    #[tokio::test]
+    async fn the_path_mtu_is_where_a_router_says_it_narrows() {
+        let mut prober = FakeProber::new(twelve_hop_path());
+        prober.narrow = Some((3, 1400));
+        let s = pmtu_trace(prober, "5").await;
+
+        let pmtu = s.pmtu.as_ref().unwrap();
+        assert_eq!(pmtu.mtu(), Some(1400));
+        assert_eq!(pmtu.drops.len(), 1);
+        assert_eq!(
+            (pmtu.drops[0].hop, pmtu.drops[0].router),
+            (Some(3), router(3))
+        );
+        for hop in &s.hops[..12] {
+            assert_eq!(
+                hop.sent, 5,
+                "MTU probes don't count as probes to hop {}",
+                hop.hop
+            );
+            assert_eq!(hop.loss_percent, if hop.hop == 4 { 100.0 } else { 0.0 });
+        }
+    }
+
+    #[tokio::test]
+    async fn a_black_hole_is_found_by_halving() {
+        let mut prober = FakeProber::new(twelve_hop_path());
+        prober.black_hole = Some((5, 1300));
+        // A size counts as vanished after two timeouts, so this takes a while.
+        let s = pmtu_trace(prober, "200").await;
+
+        let pmtu = s.pmtu.as_ref().unwrap();
+        assert_eq!((pmtu.mtu(), pmtu.black_hole()), (Some(1300), Some(1301)));
+        assert!(pmtu.drops.is_empty(), "no router said a word");
+        assert_eq!(s.hops[11].loss_percent, 0.0, "small probes unaffected");
     }
 }

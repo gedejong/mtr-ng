@@ -99,6 +99,10 @@ const PATH: [SimHop; 8] = [
 /// RTT of the target, which answers every TTL past the end of `PATH`.
 const TARGET_RTT_MS: f64 = 25.0;
 
+/// The gateway's uplink is PPPoE, whose 8-byte header leaves 1492 bytes of an
+/// Ethernet frame: larger probes past it get Fragmentation Needed from the gateway.
+const UPLINK_MTU: u16 = 1492;
+
 /// Where the made-up routers are: (address, city, country, latitude, longitude).
 /// edge-4 claims Ashburn although it answers within 25 ms of Amsterdam, the kind
 /// of registrant-address mistake the plausibility check exists for.
@@ -185,13 +189,27 @@ impl Default for SimProber {
 
 impl Prober for SimProber {
     /// Must run inside a Tokio runtime: each reply is delivered by a timer task.
-    fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16) -> io::Result<(u16, Instant)> {
+    fn send(
+        &mut self,
+        dst: IpAddr,
+        ttl: u8,
+        flow: u16,
+        size: Option<u16>,
+    ) -> io::Result<(u16, Instant)> {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         let sent_at = Instant::now();
 
         let index = usize::from(ttl) - 1;
+        let too_big = ttl > 1 && size.is_some_and(|size| size > UPLINK_MTU);
         let reply = match PATH.get(index) {
+            _ if too_big => Some((
+                IcmpResponseType::TooBig { mtu: UPLINK_MTU },
+                IpAddr::from(PATH[0].routers[0].0),
+                PATH[0].rtt_ms,
+                255,
+                None,
+            )),
             Some(hop) if hop.routers.is_empty() || rand::random::<f64>() < hop.loss => None,
             Some(hop) => {
                 let (addr, _) = hop.routers[usize::from(flow) % hop.routers.len()];

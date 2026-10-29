@@ -185,6 +185,11 @@ pub struct Args {
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=crate::probe::MAX_FLOWS as i64))]
     pub flows: u16,
 
+    /// Find the path MTU and where it narrows: each round one more probe, as large
+    /// as the path seems to allow, with Don't Fragment set
+    #[arg(long)]
+    pub pmtu: bool,
+
     /// Sparkline scaling mode: linear or logarithmic (default: logarithmic)
     #[arg(long, value_enum, default_value = "logarithmic")]
     pub sparkline_scale: SparklineScale,

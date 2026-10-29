@@ -65,6 +65,11 @@ pub enum IcmpResponseType {
     /// The target's port is closed: a UDP probe arrived
     PortUnreachable,
     DestinationUnreachable,
+    /// A router could not forward the probe without fragmenting it (Fragmentation
+    /// Needed, Packet Too Big); its next link takes `mtu` bytes, 0 if it didn't say
+    TooBig {
+        mtu: u16,
+    },
     Timeout,
 }
 
@@ -104,9 +109,16 @@ pub struct Reply {
 /// matching replies to probes and timeouts are the tracer's job.
 pub trait Prober: Send {
     /// Send one probe with the given TTL (IPv4) or hop limit (IPv6) in `flow`
-    /// (below `MAX_FLOWS`). Probes in one flow look alike to load balancers, so
-    /// they follow one path. Returns its sequence number and the time it was sent.
-    fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16) -> io::Result<(u16, Instant)>;
+    /// (below `MAX_FLOWS`), padded to `size` bytes with the IP header if given.
+    /// Probes in one flow look alike to load balancers, so they follow one path.
+    /// Returns its sequence number and the time it was sent.
+    fn send(
+        &mut self,
+        dst: IpAddr,
+        ttl: u8,
+        flow: u16,
+        size: Option<u16>,
+    ) -> io::Result<(u16, Instant)>;
 
     /// The stream of replies. Can be taken once.
     fn take_replies(&mut self) -> Option<mpsc::UnboundedReceiver<Reply>>;
@@ -246,6 +258,26 @@ impl ProbeEngine {
         self.kind != SocketKind::Raw
     }
 
+    /// Set Don't Fragment on every probe, so that a router whose next link is too
+    /// narrow answers instead of fragmenting. Linux is told to ignore the path MTU
+    /// it has cached, which would refuse larger probes before they leave.
+    pub fn set_dont_fragment(&self) -> Result<()> {
+        let sockets =
+            std::iter::once(&*self.socket).chain(self.udp.as_ref().map(|udp| &udp.socket));
+        for socket in sockets {
+            if let Err(e) = dont_fragment(socket, self.ipv6) {
+                if self.ipv6 && self.udp.is_none() {
+                    // Routers never fragment IPv6, and probes are never larger than the
+                    // interface's MTU, so only a path MTU cached here would interfere.
+                    tracing::debug!("cannot set IPV6_DONTFRAG: {e}");
+                } else {
+                    return Err(anyhow!("cannot set Don't Fragment: {e}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn alloc_seq(&mut self) -> u16 {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
@@ -257,10 +289,24 @@ impl ProbeEngine {
 }
 
 impl Prober for ProbeEngine {
-    fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16) -> io::Result<(u16, Instant)> {
+    fn send(
+        &mut self,
+        dst: IpAddr,
+        ttl: u8,
+        flow: u16,
+        size: Option<u16>,
+    ) -> io::Result<(u16, Instant)> {
         debug_assert!(flow < MAX_FLOWS);
         debug_assert_eq!(dst.is_ipv6(), self.ipv6, "one engine probes one family");
         let seq = self.alloc_seq();
+        // Bytes after the IP header and the ICMP or UDP header
+        let ip_header = if self.ipv6 { 40 } else { 20 };
+        let padded = |minimum: usize| {
+            size.map_or(minimum, |size| {
+                usize::from(size).saturating_sub(ip_header + 8)
+            })
+            .max(minimum)
+        };
         if let Some(udp) = &self.udp {
             let port = UDP_PORT + flow;
             if self.ipv6 {
@@ -268,7 +314,8 @@ impl Prober for ProbeEngine {
             } else {
                 udp.socket.set_ttl_v4(ttl.into())?;
             }
-            let payload = udp_payload(udp.source, dst, udp.port, port, seq);
+            let len = padded(2 + UDP_PAYLOAD.len());
+            let payload = udp_payload(udp.source, dst, udp.port, port, seq, len);
             let sent_at = Instant::now();
             udp.socket
                 .send_to(&payload, &SocketAddr::new(dst, port).into())?;
@@ -286,13 +333,15 @@ impl Prober for ProbeEngine {
         #[cfg(not(target_os = "linux"))]
         let flow_id = flow;
         let id = self.packet_id.wrapping_add(flow_id);
-        let packet = if self.ipv6 {
+        let mut packet = if self.ipv6 {
             self.socket.set_unicast_hops_v6(ttl.into())?;
-            echo_request(ECHO_REQUEST_V6, id, seq, FLOW_CHECKSUM + flow)
+            echo_request(ECHO_REQUEST_V6, id, seq, FLOW_CHECKSUM + flow).to_vec()
         } else {
             self.socket.set_ttl_v4(ttl.into())?;
-            echo_request(ECHO_REQUEST, id, seq, FLOW_CHECKSUM + flow)
+            echo_request(ECHO_REQUEST, id, seq, FLOW_CHECKSUM + flow).to_vec()
         };
+        // Zeros add nothing to the checksum.
+        packet.resize(8 + padded(packet.len() - 8), 0);
 
         let to = match dst {
             IpAddr::V4(_) => SocketAddr::new(dst, 0),
@@ -480,6 +529,63 @@ pub fn routable(addr: IpAddr) -> bool {
     source_address(addr).is_ok()
 }
 
+/// Set Don't Fragment on `socket`.
+#[cfg(target_os = "linux")]
+fn dont_fragment(socket: &Socket, ipv6: bool) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let (level, name, value) = match ipv6 {
+        false => (
+            libc::IPPROTO_IP,
+            libc::IP_MTU_DISCOVER,
+            libc::IP_PMTUDISC_PROBE,
+        ),
+        true => (
+            libc::IPPROTO_IPV6,
+            libc::IPV6_MTU_DISCOVER,
+            libc::IPV6_PMTUDISC_PROBE,
+        ),
+    };
+    recvmsg::set_int_option(socket.as_raw_fd(), level, name, value)
+}
+
+/// Set Don't Fragment on `socket`.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn dont_fragment(socket: &Socket, ipv6: bool) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let (level, name) = match ipv6 {
+        false => (libc::IPPROTO_IP, libc::IP_DONTFRAG),
+        true => (libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG),
+    };
+    recvmsg::set_option(socket.as_raw_fd(), level, name)
+}
+
+/// Set Don't Fragment on `socket`.
+#[cfg(not(unix))]
+fn dont_fragment(_socket: &Socket, _ipv6: bool) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+/// Whether sending failed because the packet is larger than this machine will
+/// send to the target.
+pub fn is_too_big(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    return e.raw_os_error() == Some(libc::EMSGSIZE);
+    #[cfg(not(unix))]
+    return e.raw_os_error() == Some(10040); // WSAEMSGSIZE
+}
+
+/// MTU of the interface packets to `target` leave from.
+pub fn interface_mtu(target: IpAddr) -> Option<u16> {
+    let source = source_address(target).ok()?;
+    #[cfg(unix)]
+    return recvmsg::interface_mtu(source);
+    #[cfg(not(unix))]
+    {
+        let _ = source;
+        None
+    }
+}
+
 /// Whether `addr` is this machine: packets to it never leave.
 pub fn is_local(addr: IpAddr) -> bool {
     addr.is_loopback() || source_address(addr).is_ok_and(|source| source == addr)
@@ -591,6 +697,10 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
         (0, _) => IcmpResponseType::EchoReply,
         (11, _) => IcmpResponseType::TimeExceeded,
         (3, 3) => IcmpResponseType::PortUnreachable,
+        // RFC 1191: the next link's MTU in the second half of the unused word
+        (3, 4) => IcmpResponseType::TooBig {
+            mtu: u16::from_be_bytes([icmp[6], icmp[7]]),
+        },
         (3, _) => IcmpResponseType::DestinationUnreachable,
         _ => return None,
     };
@@ -629,6 +739,11 @@ fn parse_icmpv6(buf: &[u8], source: IpAddr, hop_limit: Option<u8>) -> Option<Icm
         (3, _) => IcmpResponseType::TimeExceeded,
         (1, 4) => IcmpResponseType::PortUnreachable,
         (1, _) => IcmpResponseType::DestinationUnreachable,
+        (2, _) => IcmpResponseType::TooBig {
+            mtu: u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]])
+                .try_into()
+                .unwrap_or(u16::MAX),
+        },
         _ => return None,
     };
     let probe = if kind == IcmpResponseType::EchoReply {
@@ -673,14 +788,22 @@ fn quoted_probe(protocol: u8, quoted: &[u8], echo_request: u8) -> Option<Quoted>
     }
 }
 
-/// The payload of a UDP probe whose checksum, as the kernel will compute it, is
-/// `seq`: two payload bytes absorb the rest (Paris traceroute's UDP). Addresses,
-/// ports and length then stay fixed within a flow, so load balancers route every
-/// probe of it alike, and routers that quote only the UDP header still say which
-/// probe they answer.
-fn udp_payload(src: IpAddr, dst: IpAddr, src_port: u16, dst_port: u16, seq: u16) -> Vec<u8> {
+/// The `len`-byte payload of a UDP probe whose checksum, as the kernel will compute
+/// it, is `seq`: two payload bytes absorb the rest (Paris traceroute's UDP).
+/// Addresses, ports and length then stay fixed within a flow, so load balancers
+/// route every probe of it alike, and routers that quote only the UDP header still
+/// say which probe they answer.
+fn udp_payload(
+    src: IpAddr,
+    dst: IpAddr,
+    src_port: u16,
+    dst_port: u16,
+    seq: u16,
+    len: usize,
+) -> Vec<u8> {
     let mut payload = vec![0, 0];
     payload.extend_from_slice(UDP_PAYLOAD);
+    payload.resize(len.max(payload.len()), 0);
     let datagram = udp_datagram(src_port, dst_port, 0, &payload);
     let sum =
         !calculate_icmp_checksum(&[pseudo_header(src, dst, datagram.len()), datagram].concat());
@@ -915,10 +1038,11 @@ mod tests {
             ),
         ];
         for (src, dst) in pairs {
-            for flow in [0, MAX_FLOWS - 1] {
+            for (flow, len) in [(0, 0), (MAX_FLOWS - 1, 0), (1, 1001), (2, 1452)] {
                 for seq in [INITIAL_SEQUENCE, 40000, MAX_SEQUENCE] {
-                    let payload = udp_payload(src, dst, 0xec6f, UDP_PORT + flow, seq);
-                    assert_eq!(payload[2..], *UDP_PAYLOAD, "same length every time");
+                    let payload = udp_payload(src, dst, 0xec6f, UDP_PORT + flow, seq, len);
+                    assert_eq!(payload[2..8], *UDP_PAYLOAD);
+                    assert_eq!(payload.len(), len.max(8), "same length every time");
                     // As sent: the checksum field holds seq, and the whole adds up.
                     let datagram = udp_datagram(0xec6f, UDP_PORT + flow, seq, &payload);
                     let pseudo = pseudo_header(src, dst, datagram.len());

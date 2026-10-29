@@ -28,6 +28,8 @@ Options:
                      ping sockets (default: "0 2147483647", as systemd does)
   --silent ROUTER    ROUTER (gw, r1, r2a, r2b, r3) sends no Time Exceeded;
                      repeat it or give a comma-separated list
+  --black-hole       r3 sends no Fragmentation Needed or Packet Too Big, so
+                     packets over 1400 bytes vanish there (a PMTU black hole)
   --loss PCT         Lose PCT percent of packets from gw to r1 (hops 2 and on)
   --hash-policy N    r1's multipath hash policy (default 1, the 5-tuple; 3 is
                      every outer field, IPv6 flow label included)

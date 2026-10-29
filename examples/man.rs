@@ -44,6 +44,10 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Show MPLS labels under their hop.",
     ),
     (
+        "mtr-ng -r -c 30 --pmtu example.com",
+        "Find the path MTU and the hop where it narrows.",
+    ),
+    (
         "mtr-ng -g example.com",
         "Show where each hop is; m draws the path on a map. See GEOLOCATION.",
     ),

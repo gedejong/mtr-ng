@@ -41,6 +41,7 @@ die() {
 RUN_AS=root
 PING_GROUP="0 2147483647" # what systemd sets on most distributions
 SILENT=""
+BLACK_HOLE=0
 LOSS=""
 HASH_POLICY=1
 ICMP_ECMP=0
@@ -70,6 +71,9 @@ while [ $# -gt 0 ]; do
                 esac
             done
             shift
+            ;;
+        --black-hole)
+            BLACK_HOLE=1
             ;;
         --loss)
             [ $# -ge 2 ] || die "--loss needs a percentage"
@@ -313,6 +317,13 @@ silence_routers() {
         ip netns exec "$router" iptables -A OUTPUT -p icmp --icmp-type time-exceeded -j DROP
         ip netns exec "$router" ip6tables -A OUTPUT -p ipv6-icmp --icmpv6-type time-exceeded -j DROP
     done
+    if [ "$BLACK_HOLE" -eq 1 ]; then
+        # r3 can't forward more than 1400 bytes to the target and drops larger
+        # packets with Don't Fragment set, but keeps quiet about it, as a router
+        # behind a filter that eats ICMP does: a path MTU black hole.
+        ip netns exec r3 iptables -A OUTPUT -p icmp --icmp-type fragmentation-needed -j DROP
+        ip netns exec r3 ip6tables -A OUTPUT -p ipv6-icmp --icmpv6-type packet-too-big -j DROP
+    fi
 }
 
 # Names for every lab address, served to the client from /etc/hosts. glibc reads
@@ -362,6 +373,7 @@ print_map() {
     local loss_note="" silent_note="" ecmp_note=""
     [ -n "$LOSS" ] && loss_note=", ${LOSS}% loss gw->r1"
     [ -n "$SILENT" ] && silent_note="; silent (no Time Exceeded):$SILENT"
+    [ "$BLACK_HOLE" -eq 1 ] && silent_note="$silent_note; r3 sends no Fragmentation Needed or Packet Too Big"
     [ "$ICMP_ECMP" -eq 1 ] && ecmp_note="; echo requests by checksum bit: even r2a, odd r2b"
     [ "$SPIN" -eq 1 ] && silent_note="$silent_note; CPUs kept busy (--spin)"
     cat >&2 <<EOF

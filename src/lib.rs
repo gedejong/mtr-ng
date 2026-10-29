@@ -4,6 +4,7 @@ pub mod columns;
 pub mod geo;
 pub mod hop_stats;
 pub mod icmp_ext;
+pub mod pmtu;
 pub mod probe;
 pub mod report;
 pub mod session;

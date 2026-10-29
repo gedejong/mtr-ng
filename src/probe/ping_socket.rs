@@ -127,9 +127,12 @@ impl Message<'_> {
                 if error.origin != icmp_origin || echo[0] != echo_request {
                     return None;
                 }
-                let kind = match (ipv6, error.icmp_type) {
-                    (false, 11) | (true, 3) => IcmpResponseType::TimeExceeded,
-                    (false, 3) | (true, 1) => IcmpResponseType::DestinationUnreachable,
+                let kind = match (ipv6, error.icmp_type, error.code) {
+                    (false, 11, _) | (true, 3, _) => IcmpResponseType::TimeExceeded,
+                    (false, 3, 4) | (true, 2, _) => IcmpResponseType::TooBig {
+                        mtu: error.info.try_into().unwrap_or(u16::MAX),
+                    },
+                    (false, 3, _) | (true, 1, _) => IcmpResponseType::DestinationUnreachable,
                     _ => return None,
                 };
                 (kind, error.offender?)
@@ -190,6 +193,8 @@ mod tests {
         let error = |icmp_type| QueuedError {
             origin: libc::SO_EE_ORIGIN_ICMP,
             icmp_type,
+            code: 0,
+            info: 0,
             offender: Some(router),
         };
         let data = probe(8, 40001);
@@ -203,6 +208,13 @@ mod tests {
         let reply = message(&data, Some(error(3))).reply(false).unwrap();
         assert_eq!(reply.kind, IcmpResponseType::DestinationUnreachable);
         assert!(message(&data, Some(error(12))).reply(false).is_none());
+        let frag_needed = QueuedError {
+            code: 4,
+            info: 1400,
+            ..error(3)
+        };
+        let reply = message(&data, Some(frag_needed)).reply(false).unwrap();
+        assert_eq!(reply.kind, IcmpResponseType::TooBig { mtu: 1400 });
 
         let local = QueuedError {
             origin: libc::SO_EE_ORIGIN_LOCAL,
@@ -218,6 +230,8 @@ mod tests {
         let time_exceeded = QueuedError {
             origin: libc::SO_EE_ORIGIN_ICMP6,
             icmp_type: 3,
+            code: 0,
+            info: 0,
             offender: Some(router),
         };
         let reply = message(&data, Some(time_exceeded)).reply(true).unwrap();

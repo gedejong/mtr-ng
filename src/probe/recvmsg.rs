@@ -1,7 +1,10 @@
-//! Reading a datagram with its control messages (`recvmsg`): the TTL or hop
-//! limit it arrived with and, on Linux, an ICMP error from the error queue.
+//! The socket calls std and socket2 don't cover: reading a datagram with its
+//! control messages (`recvmsg`), which carry the TTL or hop limit it arrived with
+//! and, on Linux, an ICMP error from the error queue; plain integer socket
+//! options; and interface MTUs.
 
 use std::{
+    ffi::CStr,
     io, mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     os::fd::RawFd,
@@ -10,14 +13,24 @@ use std::{
 
 /// Turn on the boolean socket option `name` at `level`.
 pub(super) fn set_option(fd: RawFd, level: libc::c_int, name: libc::c_int) -> io::Result<()> {
-    let on: libc::c_int = 1;
+    set_int_option(fd, level, name, 1)
+}
+
+/// Set the integer socket option `name` at `level` to `value`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn set_int_option(
+    fd: RawFd,
+    level: libc::c_int,
+    name: libc::c_int,
+    value: libc::c_int,
+) -> io::Result<()> {
     // SAFETY: a valid descriptor and a c_int option value of the size passed.
     let ret = unsafe {
         libc::setsockopt(
             fd,
             level,
             name,
-            ptr::from_ref(&on).cast(),
+            ptr::from_ref(&value).cast(),
             mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
@@ -43,6 +56,9 @@ pub(super) struct Message<'a> {
 pub(super) struct QueuedError {
     pub(super) origin: u8,
     pub(super) icmp_type: u8,
+    pub(super) code: u8,
+    /// The MTU a Fragmentation Needed or Packet Too Big reports
+    pub(super) info: u32,
     /// The router that sent it
     pub(super) offender: Option<IpAddr>,
 }
@@ -119,6 +135,8 @@ pub(super) fn read<'a>(
                     message.error = Some(QueuedError {
                         origin: err.ee_origin,
                         icmp_type: err.ee_type,
+                        code: err.ee_code,
+                        info: err.ee_info,
                         offender,
                     });
                 }
@@ -128,6 +146,65 @@ pub(super) fn read<'a>(
         }
     }
     Ok(Some(message))
+}
+
+/// MTU of the interface that has address `addr`.
+pub(super) fn interface_mtu(addr: IpAddr) -> Option<u16> {
+    let mut list: *mut libc::ifaddrs = ptr::null_mut();
+    // SAFETY: getifaddrs fills in a list, freed below.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return None;
+    }
+    // SAFETY: the list stays valid until freeifaddrs, and each entry's pointers
+    // are null or point at what their types say.
+    let mtu = unsafe {
+        let entries = || {
+            std::iter::successors((!list.is_null()).then_some(list), |&entry| {
+                let next = (*entry).ifa_next;
+                (!next.is_null()).then_some(next)
+            })
+            .map(|entry| &*entry)
+        };
+        let has_addr = |ifa: &libc::ifaddrs| {
+            if ifa.ifa_addr.is_null() {
+                return false;
+            }
+            let len = match libc::c_int::from((*ifa.ifa_addr).sa_family) {
+                libc::AF_INET => mem::size_of::<libc::sockaddr_in>(),
+                libc::AF_INET6 => mem::size_of::<libc::sockaddr_in6>(),
+                _ => return false,
+            };
+            socket_addr(ifa.ifa_addr.cast(), len) == Some(addr)
+        };
+        entries()
+            .find(|ifa| has_addr(ifa))
+            .and_then(|ifa| link_mtu(entries(), CStr::from_ptr(ifa.ifa_name)))
+    };
+    // SAFETY: the list from getifaddrs, freed once.
+    unsafe { libc::freeifaddrs(list) };
+    mtu.map(|mtu| u16::try_from(mtu).unwrap_or(u16::MAX))
+}
+
+/// MTU of interface `name`, from sysfs.
+#[cfg(target_os = "linux")]
+fn link_mtu<'a>(_entries: impl Iterator<Item = &'a libc::ifaddrs>, name: &CStr) -> Option<u32> {
+    let path = format!("/sys/class/net/{}/mtu", name.to_str().ok()?);
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// MTU of interface `name`, from its link-level entry's `if_data`.
+#[cfg(not(target_os = "linux"))]
+fn link_mtu<'a>(mut entries: impl Iterator<Item = &'a libc::ifaddrs>, name: &CStr) -> Option<u32> {
+    // SAFETY: names are C strings, and a link-level entry's data is an if_data.
+    unsafe {
+        let link = entries.find(|ifa| {
+            !ifa.ifa_addr.is_null()
+                && libc::c_int::from((*ifa.ifa_addr).sa_family) == libc::AF_LINK
+                && !ifa.ifa_data.is_null()
+                && CStr::from_ptr(ifa.ifa_name) == name
+        })?;
+        Some((*link.ifa_data.cast::<libc::if_data>()).ifi_mtu)
+    }
 }
 
 /// The address in a sockaddr_in or sockaddr_in6 of at most `len` bytes at `addr`.
@@ -164,6 +241,17 @@ mod tests {
     use super::*;
     use socket2::{Domain, Protocol, Socket, Type};
     use std::os::fd::AsRawFd;
+
+    #[test]
+    fn loopback_has_an_mtu() {
+        let mtu = interface_mtu(IpAddr::V4(Ipv4Addr::LOCALHOST)).expect("lo's MTU");
+        assert!(mtu >= 1280, "{mtu}");
+        assert_eq!(
+            interface_mtu(IpAddr::from([192, 0, 2, 77])),
+            None,
+            "no such address here"
+        );
+    }
 
     #[test]
     fn reads_the_sender_and_the_hop_limit() {

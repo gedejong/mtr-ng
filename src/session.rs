@@ -1,5 +1,6 @@
 use crate::args::ProbeProtocol;
 use crate::geo::{self, GeoFix, GeoSource, Origin};
+use crate::pmtu::PathMtu;
 use crate::probe::{self, IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
 use crate::simulate::{self, SimProber};
 use crate::{tracer, Args, HopStats, Result};
@@ -38,6 +39,8 @@ pub struct MtrSession {
     geo_source: Option<Arc<dyn GeoSource>>,
     /// Locations per address; `None` when the database doesn't know it
     locations: HashMap<IpAddr, Option<GeoFix>>,
+    /// The path MTU search, with `--pmtu`
+    pub pmtu: Option<PathMtu>,
 }
 
 impl MtrSession {
@@ -101,6 +104,7 @@ impl MtrSession {
             asns: HashMap::new(),
             geo_source: None,
             locations: HashMap::new(),
+            pmtu: None,
         })
     }
 
@@ -118,6 +122,9 @@ impl MtrSession {
             self.dns_names.insert(self.target_addr, target);
             self.dns_names
                 .extend(simulate::names().map(|(addr, name)| (addr, Some(name))));
+            if self.args.pmtu {
+                self.pmtu = Some(PathMtu::new(1500, self.target_addr.is_ipv6()));
+            }
             return Ok(Box::new(SimProber::new()));
         }
         if !probe::routable(self.target_addr) {
@@ -128,10 +135,34 @@ impl MtrSession {
             };
             bail!("no {family}route to {}", self.target_addr);
         }
-        Ok(Box::new(ProbeEngine::new(
-            self.target_addr,
-            self.args.protocol,
-        )?))
+        let engine = ProbeEngine::new(self.target_addr, self.args.protocol)?;
+        if self.args.pmtu {
+            engine.set_dont_fragment()?;
+            let start = probe::interface_mtu(self.target_addr).unwrap_or(1500);
+            info!("Path MTU search starts at {start}, the interface's MTU");
+            self.pmtu = Some(PathMtu::new(start, self.target_addr.is_ipv6()));
+        }
+        Ok(Box::new(engine))
+    }
+
+    /// TTL and size of this round's path MTU probe, if one is due: to the end of
+    /// the path, once the target answered or after a few rounds without it.
+    pub fn mtu_probe(&self, round: usize) -> Option<(u8, u16)> {
+        let size = self.pmtu.as_ref()?.probe_size()?;
+        let end_known = self.hops.iter().any(|hop| hop.is_target);
+        if !end_known && round < 3 {
+            return None;
+        }
+        let ttl = u8::try_from(self.display_hop_count()).ok()?;
+        (ttl > 0).then_some((ttl, size))
+    }
+
+    /// The hop `addr` answered at, if it answered any.
+    pub fn hop_of(&self, addr: IpAddr) -> Option<u8> {
+        self.hops
+            .iter()
+            .find(|hop| hop.responders.contains_key(&addr))
+            .map(|hop| hop.hop)
     }
 
     /// The made-up locations with `--simulate`, else `--geoip-mmdb` or the first
@@ -269,6 +300,8 @@ impl MtrSession {
                 hop.record_timeout(response.ordinal);
                 return true;
             }
+            // Only path MTU probes are large enough; the tracer hands these on.
+            IcmpResponseType::TooBig { .. } => return true,
         }
         self.hops[index].record_reply_details(addr, response.reply_ttl, &response.mpls);
         if let Some(Some(name)) = self.dns_names.get(&addr) {
@@ -415,6 +448,7 @@ mod tests {
             geojson: false,
             ipv4: false,
             ipv6: false,
+            pmtu: false,
             geo: false,
             geoip_mmdb: None,
             origin: None,
@@ -457,6 +491,7 @@ mod tests {
             geojson: false,
             ipv4: false,
             ipv6: false,
+            pmtu: false,
             geo: false,
             geoip_mmdb: None,
             origin: None,
@@ -719,6 +754,7 @@ mod tests {
             geojson: false,
             ipv4: false,
             ipv6: false,
+            pmtu: false,
             geo: false,
             geoip_mmdb: None,
             origin: None,

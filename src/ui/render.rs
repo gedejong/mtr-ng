@@ -139,6 +139,9 @@ fn status_line(session: &MtrSession, hops: &[HopStats], ui: &UiState) -> Line<'s
     if let Some(end) = hops.last().filter(|hop| hop.is_target) {
         facts.push(format!("{:.1}% loss at target", end.loss_percent));
     }
+    if let Some(pmtu) = &session.pmtu {
+        facts.push(pmtu.status());
+    }
     let scale = match ui.scale {
         SparklineScale::Linear => "linear",
         SparklineScale::Logarithmic => "log",
@@ -175,8 +178,9 @@ enum RowKind<'a> {
     Hop,
     /// One more address that answered for the hop
     Alternate(&'a ResponderStats),
-    /// An MPLS label under the hop or alternate above it (`-e`)
-    Mpls,
+    /// A line about the hop or alternate above it: an MPLS label (`-e`), or where
+    /// the path MTU drops (`--pmtu`)
+    Note,
 }
 
 struct HostRow<'a> {
@@ -216,6 +220,13 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
                 rows.extend(mpls_rows(hop, &alt.mpls));
             }
         }
+        if let Some(pmtu) = &session.pmtu {
+            rows.extend(pmtu.notes_after(hop.hop).into_iter().map(|note| HostRow {
+                hop,
+                host: format!("  {note}"),
+                kind: RowKind::Note,
+            }));
+        }
     }
     rows
 }
@@ -227,7 +238,7 @@ fn mpls_rows<'a>(hop: &'a HopStats, labels: &[MplsLabel]) -> Vec<HostRow<'a>> {
         .map(|label| HostRow {
             hop,
             host: format!("  {label}"),
-            kind: RowKind::Mpls,
+            kind: RowKind::Note,
         })
         .collect()
 }
@@ -385,7 +396,7 @@ fn render_table(
             });
         let style = match row.kind {
             RowKind::Hop => Style::default(),
-            RowKind::Alternate(_) | RowKind::Mpls => Style::default().add_modifier(Modifier::DIM),
+            RowKind::Alternate(_) | RowKind::Note => Style::default().add_modifier(Modifier::DIM),
         };
         Row::new(cells).style(style)
     });
