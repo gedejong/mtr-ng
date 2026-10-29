@@ -28,6 +28,14 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Follow 8 flows and show which router each met: load balancers split them.",
     ),
     (
+        "mtr-ng -r -c 40 -P udp --flows 8 example.com",
+        "The same with UDP probes, whose ports load balancers hash more often than ICMP fields.",
+    ),
+    (
+        "mtr-ng -r --fields hop,host,back,loss,avg example.com",
+        "Compare each reply's way back with the probe's way there.",
+    ),
+    (
         "mtr-ng -c 40 --flows 8 --dot example.com | dot -Tsvg > routes.svg",
         "Draw the routes with Graphviz.",
     ),
@@ -53,11 +61,19 @@ const EXAMPLES: &[(&str, &str)] = &[
     ),
 ];
 
-const PRIVILEGES: &str = "On macOS mtr-ng needs no privileges: it uses unprivileged ICMP sockets. \
-On Linux it needs root or the CAP_NET_RAW capability \
-(setcap cap_net_raw+ep \"$(command -v mtr-ng)\"). \
-Windows is not supported yet. Only ICMP over IPv4 is implemented; \
-IPv6 targets and other protocols exit with an error.";
+const PRIVILEGES: &str = "On macOS mtr-ng needs no privileges: it reads the routers' answers \
+with an unprivileged ICMP socket, for ICMP and UDP probes alike. On Linux, ICMP works without \
+privileges through a ping socket when the user's group is in net.ipv4.ping_group_range, as \
+every group is on systemd 243 and newer, but a ping socket shows no MPLS labels. UDP probes and \
+MPLS labels need root or the CAP_NET_RAW capability \
+(setcap cap_net_raw+ep \"$(command -v mtr-ng)\"). Windows is not supported yet, and TCP \
+probes are not implemented yet.";
+
+const BACK: &str = "The back column counts the routers a reply crossed from the TTL it arrived \
+with, assuming it left with the next common initial TTL up (32, 64, 128 or 255). When that differs \
+from the routers the probe crossed on the way there, the difference follows: 9 +2 is nine \
+routers back, two more than there, so the reply came back another way. Routers that send \
+replies with an unusual TTL, and MPLS tunnels that hide their routers, skew the count.";
 
 const GEOLOCATION: [&str; 3] = [
     "With -g, the geo or dist columns, or the map (m), mtr-ng places hops with a local \
@@ -118,6 +134,7 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
         let name = column.to_possible_value().expect("no skipped columns");
         tagged(out, name.get_name(), column.label())?;
     }
+    writeln!(out, ".PP\n{}", roff(BACK))?;
 
     writeln!(out, ".SH EXAMPLES")?;
     for (command, what) in EXAMPLES {
@@ -133,7 +150,7 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, ".SH PRIVILEGES\n{}", roff(PRIVILEGES))?;
     writeln!(
         out,
-        ".SH REPORTING BUGS\nhttps://github.com/edejong\\-dbc/mtr\\-ng/issues"
+        ".SH REPORTING BUGS\nhttps://github.com/gedejong/mtr\\-ng/issues"
     )?;
     writeln!(out, ".SH SEE ALSO\n.BR mtr (8),\n.BR traceroute (8)")
 }

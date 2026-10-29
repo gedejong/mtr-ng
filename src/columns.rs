@@ -14,6 +14,19 @@ pub fn format_ms(rtt: Option<Duration>) -> String {
     )
 }
 
+/// Routers a reply from hop `hop` crossed on the way back, and how many more
+/// (`+N`) or fewer (`-N`) than the probe crossed on the way there: a return path
+/// of another length is another path. `???` while the reply TTL is unknown.
+pub fn routers_back(back: Option<u8>, hop: u8) -> String {
+    let Some(back) = back else {
+        return "???".to_string();
+    };
+    match i16::from(back) - i16::from(hop.saturating_sub(1)) {
+        0 => back.to_string(),
+        longer => format!("{back} {longer:+}"),
+    }
+}
+
 impl Column {
     /// Short header, as mtr prints it.
     pub fn header(self) -> &'static str {
@@ -24,6 +37,7 @@ impl Column {
             Column::Geo => "Location",
             Column::Dist => "Dist",
             Column::Reach => "Reach",
+            Column::Back => "Back",
             Column::Loss => "Loss%",
             Column::Sent => "Snt",
             Column::Last => "Last",
@@ -47,6 +61,7 @@ impl Column {
             Column::Geo => "Location (city, country)",
             Column::Dist => "Distance from the origin, km",
             Column::Reach => "Farthest the best RTT reaches, km",
+            Column::Back => "Routers on the way back",
             Column::Loss => "Packet loss",
             Column::Sent => "Probes sent",
             Column::Last => "Last RTT",
@@ -122,6 +137,11 @@ impl Column {
             Column::Reach => hop.best_rtt.map_or("???".to_string(), |rtt| {
                 format!("{:.0}", geo::reach_km(rtt))
             }),
+            Column::Back => routers_back(
+                hop.addr
+                    .and_then(|addr| hop.responders.get(&addr)?.routers_back()),
+                hop.hop,
+            ),
             Column::Hop | Column::Host | Column::Graph => String::new(),
         }
     }
@@ -162,6 +182,27 @@ mod tests {
                 "{column:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_way_back_is_compared_with_the_way_there() {
+        assert_eq!(routers_back(None, 4), "???");
+        assert_eq!(routers_back(Some(3), 4), "3", "3 routers each way");
+        assert_eq!(routers_back(Some(6), 4), "6 +3");
+        assert_eq!(routers_back(Some(2), 4), "2 -1");
+        assert_eq!(routers_back(Some(0), 1), "0", "the gateway");
+
+        let mut hop = HopStats::new(7);
+        let addr = "192.0.2.1".parse().unwrap();
+        hop.increment_sent(0);
+        hop.add_rtt_from_addr(addr, Duration::from_millis(20));
+        assert_eq!(Column::Back.value(&hop, None), "???");
+        hop.record_reply_details(addr, Some(247), &[]);
+        assert_eq!(
+            Column::Back.value(&hop, None),
+            "8 +2",
+            "255 - 247 routers back"
+        );
     }
 
     #[test]

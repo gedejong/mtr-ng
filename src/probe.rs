@@ -7,7 +7,6 @@
 
 use std::{
     io,
-    mem::MaybeUninit,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -22,6 +21,8 @@ use crate::icmp_ext::{mpls_labels, mpls_labels_v6, MplsLabel};
 
 #[cfg(target_os = "linux")]
 mod ping_socket;
+#[cfg(unix)]
+mod recvmsg;
 use anyhow::{anyhow, Result};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc;
@@ -80,7 +81,7 @@ pub struct ProbeResponse {
     pub send_time: Instant,
     pub receive_time: Instant, // High-precision receive timestamp
     pub precise_rtt_ns: u128,  // Nanosecond precision RTT
-    /// TTL of the reply as it arrived (IPv4 only)
+    /// TTL or hop limit of the reply as it arrived
     pub reply_ttl: Option<u8>,
     /// MPLS labels the router quoted (RFC 4950)
     pub mpls: Vec<MplsLabel>,
@@ -93,7 +94,7 @@ pub struct Reply {
     pub source: IpAddr,
     pub seq: u16,
     pub received_at: Instant,
-    /// TTL of the reply as it arrived (IPv4 only)
+    /// TTL or hop limit of the reply as it arrived
     pub ttl: Option<u8>,
     /// MPLS labels quoted in a Time Exceeded or Destination Unreachable
     pub mpls: Vec<MplsLabel>,
@@ -208,8 +209,7 @@ impl ProbeEngine {
             if ipv6 { "v6" } else { "" }
         );
         if ipv6 {
-            // Routers balance IPv6 on the flow label too, so each flow sets its own.
-            set_flow_label_sending(&socket);
+            set_ipv6_options(&socket);
         }
         let udp = match protocol {
             ProbeProtocol::Icmp => None,
@@ -342,28 +342,19 @@ fn spawn_receiver(
             }
             #[cfg(not(target_os = "linux"))]
             let _ = kind; // every other kind reads whole packets
-            let mut buf = [MaybeUninit::<u8>::uninit(); MAX_MTU];
+            let mut buf = [0u8; MAX_MTU];
+            let mut control = [0u64; 16];
             while !stop.load(Ordering::Relaxed) {
-                match socket.recv_from(&mut buf) {
-                    Ok((len, from)) => {
+                match read_packet(&socket, &mut buf, &mut control) {
+                    Ok(Some(packet)) => {
                         let received_at = Instant::now();
-                        // SAFETY: recv_from initialised the first `len` bytes.
-                        let bytes =
-                            unsafe { &*(&buf[..len] as *const [MaybeUninit<u8>] as *const [u8]) };
-                        let from = from.as_socket().map(|a| a.ip());
-                        if let Some(reply) = decode(bytes, from, ipv6, ours, received_at) {
+                        if let Some(reply) = decode(packet, ipv6, ours, received_at) {
                             if tx.send(reply).is_err() {
                                 break; // nobody listens any more
                             }
                         }
                     }
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock
-                                | io::ErrorKind::TimedOut
-                                | io::ErrorKind::Interrupted
-                        ) => {}
+                    Ok(None) => {}
                     Err(e) => {
                         tracing::warn!("ICMP receive failed: {e}");
                         thread::sleep(RECEIVE_POLL);
@@ -374,18 +365,64 @@ fn spawn_receiver(
     Ok(())
 }
 
-/// Parse a received packet and keep it only if it answers one of our probes.
-fn decode(
-    bytes: &[u8],
+/// A packet from the ICMP socket
+struct Packet<'a> {
+    bytes: &'a [u8],
     from: Option<IpAddr>,
-    ipv6: bool,
-    ours: Ours,
-    received_at: Instant,
-) -> Option<Reply> {
+    /// The hop limit an IPv6 packet arrived with; IPv4 has its TTL in the header
+    hop_limit: Option<u8>,
+}
+
+/// The next packet on `socket`, or None if none came within its read timeout.
+#[cfg(unix)]
+fn read_packet<'a>(
+    socket: &Socket,
+    buf: &'a mut [u8],
+    control: &mut [u64],
+) -> io::Result<Option<Packet<'a>>> {
+    use std::os::fd::AsRawFd;
+    let message = recvmsg::read(socket.as_raw_fd(), buf, control, 0)?;
+    Ok(message.map(|message| Packet {
+        bytes: message.data,
+        from: message.from,
+        hop_limit: message.ttl,
+    }))
+}
+
+/// The next packet on `socket`, or None if none came within its read timeout.
+#[cfg(not(unix))]
+fn read_packet<'a>(
+    socket: &Socket,
+    buf: &'a mut [u8],
+    _control: &mut [u64],
+) -> io::Result<Option<Packet<'a>>> {
+    use std::mem::MaybeUninit;
+    // SAFETY: MaybeUninit<u8> has the layout of u8, and recv_from only writes to it.
+    let uninit = unsafe { &mut *(std::ptr::from_mut(buf) as *mut [MaybeUninit<u8>]) };
+    match socket.recv_from(uninit) {
+        Ok((len, from)) => Ok(Some(Packet {
+            bytes: &buf[..len],
+            from: from.as_socket().map(|a| a.ip()),
+            hop_limit: None,
+        })),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Parse a received packet and keep it only if it answers one of our probes.
+fn decode(packet: Packet, ipv6: bool, ours: Ours, received_at: Instant) -> Option<Reply> {
     let reply = if ipv6 {
-        parse_icmpv6(bytes, from?)?
+        parse_icmpv6(packet.bytes, packet.from?, packet.hop_limit)?
     } else {
-        parse_icmpv4(bytes)?
+        parse_icmpv4(packet.bytes)?
     };
     ours.reply(reply, received_at)
 }
@@ -443,6 +480,11 @@ pub fn routable(addr: IpAddr) -> bool {
     source_address(addr).is_ok()
 }
 
+/// Whether `addr` is this machine: packets to it never leave.
+pub fn is_local(addr: IpAddr) -> bool {
+    addr.is_loopback() || source_address(addr).is_ok_and(|source| source == addr)
+}
+
 /// The address packets to `addr` leave from. Connecting a UDP socket consults the
 /// routing table without sending anything.
 fn source_address(addr: IpAddr) -> io::Result<IpAddr> {
@@ -487,31 +529,24 @@ fn open_udp_sender(target: IpAddr, kind: SocketKind) -> Result<UdpSender> {
     })
 }
 
-/// Have the kernel use the flow label in each destination address (Linux ignores
-/// it otherwise). Elsewhere the flow label stays the kernel's choice.
-fn set_flow_label_sending(socket: &Socket) {
-    #[cfg(target_os = "linux")]
+/// Ask the kernel for each reply's hop limit, which an ICMPv6 socket doesn't show
+/// in the packet, and on Linux to send the flow label in each destination address
+/// (it ignores it otherwise; elsewhere the label is always sent). Routers balance
+/// IPv6 on the flow label, so each flow sets its own.
+fn set_ipv6_options(socket: &Socket) {
+    #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        let on: libc::c_int = 1;
-        // SAFETY: a valid descriptor and a c_int option value of the size passed.
-        let ret = unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_IPV6,
-                libc::IPV6_FLOWINFO_SEND,
-                std::ptr::from_ref(&on).cast(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            tracing::debug!(
-                "cannot set IPv6 flow labels: {}",
-                io::Error::last_os_error()
-            );
+        let fd = socket.as_raw_fd();
+        if let Err(e) = recvmsg::set_option(fd, libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT) {
+            tracing::debug!("cannot read IPv6 hop limits: {e}");
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(e) = recvmsg::set_option(fd, libc::IPPROTO_IPV6, libc::IPV6_FLOWINFO_SEND) {
+            tracing::debug!("cannot set IPv6 flow labels: {e}");
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let _ = socket;
 }
 
@@ -582,9 +617,10 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
     })
 }
 
-/// Parse an ICMPv6 packet (ICMPv6 sockets deliver no IPv6 header). Errors only
-/// count if they quote an echo request or a UDP datagram.
-fn parse_icmpv6(buf: &[u8], source: IpAddr) -> Option<IcmpReply> {
+/// Parse an ICMPv6 packet that came from `source` with `hop_limit` (ICMPv6
+/// sockets deliver no IPv6 header). Errors only count if they quote an echo
+/// request or a UDP datagram.
+fn parse_icmpv6(buf: &[u8], source: IpAddr, hop_limit: Option<u8>) -> Option<IcmpReply> {
     if buf.len() < 8 {
         return None;
     }
@@ -606,7 +642,7 @@ fn parse_icmpv6(buf: &[u8], source: IpAddr) -> Option<IcmpReply> {
         kind,
         source,
         probe,
-        ttl: None,
+        ttl: hop_limit,
         mpls: match kind {
             IcmpResponseType::EchoReply => Vec::new(),
             _ => mpls_labels_v6(buf),
@@ -954,7 +990,12 @@ mod tests {
                 packet_id: 0x1234,
                 udp_port: None,
             };
-            decode(&p, None, false, ours, now)
+            let packet = Packet {
+                bytes: &p,
+                from: None,
+                hop_limit: None,
+            };
+            decode(packet, false, ours, now)
         };
         assert_eq!(reply_with_id(0x9999), None, "another process's ping");
         assert_eq!(
@@ -1012,8 +1053,9 @@ mod tests {
         p.extend(inner);
         p.extend(echo(128, 0x1234, 40004));
         let src: IpAddr = "2001:db8::1".parse().unwrap();
-        let r = parse_icmpv6(&p, src).unwrap();
+        let r = parse_icmpv6(&p, src, Some(62)).unwrap();
         assert_eq!(r.kind, IcmpResponseType::TimeExceeded);
         assert_eq!((r.probe, r.source), (echo_of(0x1234, 40004), src));
+        assert_eq!(r.ttl, Some(62), "the hop limit from the control message");
     }
 }

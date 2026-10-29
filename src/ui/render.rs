@@ -9,7 +9,7 @@ use super::visualization::{
     ColorSupport, RttScale,
 };
 use crate::args::Column;
-use crate::columns::format_ms;
+use crate::columns::{self, format_ms};
 use crate::geo::{self, Origin};
 use crate::hop_stats::ResponderStats;
 use crate::icmp_ext::MplsLabel;
@@ -69,6 +69,16 @@ pub fn render(f: &mut Frame, session: &MtrSession, ui: &mut UiState) {
             let scale = RttScale::from_hops(hops, ui.scale);
             render_table(f, table, session, hops, scale.as_ref(), ui);
             render_scale(f, scale_area, scale.as_ref(), ui);
+            if let Some(why) = session.silence() {
+                let below_header = Rect {
+                    y: table.y + 1,
+                    height: table.height.saturating_sub(1),
+                    ..table
+                };
+                let dim = Style::default().add_modifier(Modifier::DIM);
+                let text = Paragraph::new(Line::styled(why, dim)).wrap(Wrap { trim: true });
+                f.render_widget(text, below_header);
+            }
         }
         View::Flows => {
             render_flows(f, table, session, hops, ui);
@@ -240,6 +250,9 @@ fn cell_text(column: Column, row: &HostRow, origin: Option<&Origin>) -> String {
         (Column::Last, RowKind::Alternate(alt)) => format_ms(alt.last_rtt),
         (Column::Avg, RowKind::Alternate(alt)) => format_ms(alt.avg_rtt()),
         (Column::Best, RowKind::Alternate(alt)) => format_ms(alt.best_rtt),
+        (Column::Back, RowKind::Alternate(alt)) => {
+            columns::routers_back(alt.routers_back(), row.hop.hop)
+        }
         (Column::Asn, RowKind::Alternate(alt)) => {
             alt.asn.map_or("AS???".to_string(), |n| format!("AS{n}"))
         }
@@ -665,6 +678,10 @@ fn detail_lines(
             ),
             dim,
         ));
+        lines.push(Line::styled(
+            "+N or -N: that many more or fewer, so the reply came back another way.",
+            dim,
+        ));
     }
     lines
 }
@@ -786,7 +803,7 @@ fn responder_lines(
         ("Last", Box::new(|r| format_ms(r.last_rtt))),
         (
             "Back",
-            Box::new(|r| r.routers_back().map_or("?".into(), |n| n.to_string())),
+            Box::new(|r| columns::routers_back(r.routers_back(), hop.hop)),
         ),
     ];
     if width < 72 {
@@ -798,7 +815,7 @@ fn responder_lines(
         .map(|text| text.width() + 1)
         .max()
         .unwrap_or(0);
-    let fixed = 3 + numbers.len() * 7 + as_width + if flows { 6 } else { 0 };
+    let fixed = 3 + numbers.len() * 7 + as_width + if flows { 7 } else { 0 };
     let longest = responders
         .iter()
         .map(|(_, r)| host(r).width())
@@ -815,7 +832,8 @@ fn responder_lines(
             text.push_str(&format!(" {asn:<w$}", w = as_width - 1));
         }
         if flows {
-            text.push_str(&format!(" {flows_text}"));
+            // Two spaces, so Back's "3 +2" doesn't run into the flow numbers
+            text.push_str(&format!("  {flows_text}"));
         }
         text
     };
@@ -1282,8 +1300,8 @@ mod tests {
             .find(|l| l.contains("B  203.0.113.253"))
             .unwrap();
         assert!(
-            row_b.trim_end_matches([' ', '│']).ends_with("3 1"),
-            "3 back, flow 1: {row_b}"
+            row_b.trim_end_matches([' ', '│']).ends_with("3 +2  1"),
+            "3 back, 2 more than there, flow 1: {row_b}"
         );
 
         ui.step_detail(1);

@@ -415,6 +415,9 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
     let shared = Arc::new(Mutex::new(session));
     tracer::run(Arc::clone(&shared), prober).await?;
     session = shared.lock().unwrap().clone();
+    if let Some(why) = session.silence() {
+        tracing::warn!("{why}");
+    }
 
     let args = &session.args;
     let hops = &session.hops[..session.display_hop_count()];

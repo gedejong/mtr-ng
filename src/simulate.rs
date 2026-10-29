@@ -23,6 +23,8 @@ struct SimHop {
     loss: f64,
     /// MPLS label the router reports, inside a tunnel
     mpls: Option<u32>,
+    /// Routers more on the way back than on the way there
+    detour: u8,
 }
 
 /// TTLs past the end reach the target. Addresses come from the documentation
@@ -33,18 +35,21 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 1.8,
         loss: 0.0,
         mpls: None,
+        detour: 0,
     },
     SimHop {
         routers: &[([198, 51, 100, 1], "bng-1.isp.example")],
         rtt_ms: 8.5,
         loss: 0.0,
         mpls: None,
+        detour: 0,
     },
     SimHop {
         routers: &[([198, 51, 100, 9], "core-1.isp.example")],
         rtt_ms: 10.2,
         loss: 0.05,
         mpls: None,
+        detour: 0,
     },
     SimHop {
         routers: &[
@@ -54,6 +59,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 12.0,
         loss: 0.0,
         mpls: Some(24005),
+        detour: 0,
     },
     SimHop {
         routers: &[
@@ -63,6 +69,7 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 13.5,
         loss: 0.0,
         mpls: Some(24017),
+        detour: 0,
     },
     // Rate-limits ICMP to zero, as many backbone routers do
     SimHop {
@@ -70,18 +77,22 @@ const PATH: [SimHop; 8] = [
         rtt_ms: 0.0,
         loss: 1.0,
         mpls: None,
+        detour: 0,
     },
+    // Answers come back through another transit network, two routers longer.
     SimHop {
         routers: &[([203, 0, 113, 7], "ix-1.transit.example")],
         rtt_ms: 21.0,
         loss: 0.01,
         mpls: None,
+        detour: 2,
     },
     SimHop {
         routers: &[([203, 0, 113, 30], "edge-4.cdn.example")],
         rtt_ms: 23.5,
         loss: 0.0,
         mpls: None,
+        detour: 2,
     },
 ];
 
@@ -194,7 +205,7 @@ impl Prober for SimProber {
                     IcmpResponseType::TimeExceeded,
                     IpAddr::from(addr),
                     hop.rtt_ms,
-                    255 - (ttl - 1),
+                    255 - (ttl - 1) - hop.detour,
                     mpls,
                 ))
             }
@@ -202,7 +213,7 @@ impl Prober for SimProber {
                 IcmpResponseType::EchoReply,
                 dst,
                 TARGET_RTT_MS,
-                64 - PATH.len() as u8,
+                64 - PATH.len() as u8 - PATH[PATH.len() - 1].detour,
                 None,
             )),
         };

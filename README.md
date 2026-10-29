@@ -22,6 +22,7 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Route graph**: `--dot` prints the routes as Graphviz, with silent hops as dashed edges
 - **MPLS labels**: `-e` (or `e` while running) shows the label stacks routers report in ICMP extensions (RFC 4950)
 - **Hop details**: `Enter` opens every responder of a hop with its share, RTTs, routers on the way back and flows, plus RTT percentiles and a histogram
+- **Return path**: the Back column (`--fields hop,host,back,loss,avg`) counts the routers a reply crossed, from the TTL it arrived with. `9 +2` means two more than the probe crossed on the way there: the reply came back another way
 
 ### Where Is It
 - **Locations**: `-g` adds a Location and a Dist column, from a local geolocation database (DB-IP City Lite or MaxMind GeoLite2 City). Lookups never leave the machine; private addresses are never looked up
@@ -32,9 +33,9 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Origin**: distances are measured from `--origin LAT,LON`, or else from the first hop placed in a city
 
 ### Column Selection System
-- **Flexible Fields**: Choose from 14 columns
-  - `hop`, `host`, `asn`, `loss`, `sent`, `last`, `avg`, `ema`
-  - `jitter`, `jitter-avg`, `best`, `worst`, `stdev`, `graph`
+- **Flexible Fields**: Choose from 18 columns
+  - `hop`, `host`, `asn`, `geo`, `dist`, `reach`, `back`
+  - `loss`, `sent`, `last`, `avg`, `ema`, `jitter`, `jitter-avg`, `best`, `worst`, `stdev`, `graph`
 - **Quick Presets**: `--show-all` for complete metrics, custom combinations via `--fields`
 - **Interactive Chooser**: `o` opens a column chooser to show, hide and reorder columns
 - **Report Mode**: Same column selection works for both interactive and report output

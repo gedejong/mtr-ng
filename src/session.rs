@@ -1,3 +1,4 @@
+use crate::args::ProbeProtocol;
 use crate::geo::{self, GeoFix, GeoSource, Origin};
 use crate::probe::{self, IcmpResponseType, ProbeEngine, ProbeResponse, Prober};
 use crate::simulate::{self, SimProber};
@@ -218,6 +219,23 @@ impl MtrSession {
                 .rposition(|hop| hop.addr.is_some())
                 .map_or(0, |i| i + 1),
         }
+    }
+
+    /// Why no hop shows, once probes have timed out and none was answered.
+    pub fn silence(&self) -> Option<String> {
+        let timed_out = self.hops.iter().any(|hop| hop.loss_percent > 0.0);
+        if self.display_hop_count() > 0 || !timed_out || self.is_simulated() {
+            return None;
+        }
+        Some(
+            if self.args.protocol == ProbeProtocol::Udp && probe::is_local(self.target_addr) {
+                "No answer: UDP probes to this machine go unanswered, because its \
+                 checksum offload leaves their checksums unfinished. ICMP works."
+            } else {
+                "No hop has answered: something drops the probes or the answers."
+            }
+            .to_string(),
+        )
     }
 
     /// Record a probe response in the hop table. An echo reply, Port Unreachable
@@ -475,6 +493,25 @@ mod tests {
     async fn session_for(cli: &[&str]) -> MtrSession {
         let args = Args::parse_from(std::iter::once("mtr-ng").chain(cli.iter().copied()));
         MtrSession::new(args).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn silence_is_explained_once_probes_time_out() {
+        for (cli, local) in [
+            (&["-n", "192.0.2.1"][..], false),
+            (&["-n", "-P", "udp", "192.0.2.1"], false),
+            (&["-n", "-P", "udp", "127.0.0.1"], true),
+        ] {
+            let mut session = session_for(cli).await;
+            session.hops[0].increment_sent(0);
+            assert_eq!(session.silence(), None, "{cli:?}: still in flight");
+            session.hops[0].add_timeout();
+            let why = session.silence().expect("explained");
+            assert_eq!(why.contains("UDP probes to this machine"), local, "{cli:?}");
+
+            session.apply_response(&response(1, IcmpResponseType::TimeExceeded, [10, 0, 0, 1]));
+            assert_eq!(session.silence(), None, "{cli:?}: a hop answered");
+        }
     }
 
     #[tokio::test]

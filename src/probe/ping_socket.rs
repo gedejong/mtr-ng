@@ -8,19 +8,21 @@
 //! `IP_RECVERR` is on, with the router as the offender and our own probe as the
 //! data. A router's MPLS labels don't survive that, so they need a raw socket.
 
+use super::recvmsg::{read, set_option, Message};
 use super::{echo_fields, IcmpReply, IcmpResponseType};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
-    io, mem,
+    io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     os::fd::{AsRawFd, RawFd},
-    ptr,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
 /// Open a ping socket and bind it, so the kernel picks the identifier that every
-/// probe will carry. Returns the socket and that identifier.
+/// probe will carry. Returns the socket and that identifier. The engine asks for
+/// IPv6 hop limits on every socket; IPv4 TTLs are asked for here, since a ping
+/// socket's replies come without their IP header.
 pub(super) fn open(ipv6: bool) -> io::Result<(Socket, u16)> {
     let (domain, protocol) = match ipv6 {
         false => (Domain::IPV4, Protocol::ICMPV4),
@@ -29,11 +31,10 @@ pub(super) fn open(ipv6: bool) -> io::Result<(Socket, u16)> {
     let socket = Socket::new(domain, Type::DGRAM, Some(protocol))?;
     let fd = socket.as_raw_fd();
     if ipv6 {
-        set_option(fd, libc::SOL_IPV6, libc::IPV6_RECVERR)?;
-        set_option(fd, libc::SOL_IPV6, libc::IPV6_RECVHOPLIMIT)?;
+        set_option(fd, libc::IPPROTO_IPV6, libc::IPV6_RECVERR)?;
     } else {
-        set_option(fd, libc::SOL_IP, libc::IP_RECVERR)?;
-        set_option(fd, libc::SOL_IP, libc::IP_RECVTTL)?;
+        set_option(fd, libc::IPPROTO_IP, libc::IP_RECVERR)?;
+        set_option(fd, libc::IPPROTO_IP, libc::IP_RECVTTL)?;
     }
     let any = match ipv6 {
         false => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -45,24 +46,6 @@ pub(super) fn open(ipv6: bool) -> io::Result<(Socket, u16)> {
         .as_socket()
         .map_or(0, |addr| addr.port());
     Ok((socket, ident))
-}
-
-fn set_option(fd: RawFd, level: libc::c_int, name: libc::c_int) -> io::Result<()> {
-    let on: libc::c_int = 1;
-    // SAFETY: a valid descriptor and a c_int option value of the size passed.
-    let ret = unsafe {
-        libc::setsockopt(
-            fd,
-            level,
-            name,
-            ptr::from_ref(&on).cast(),
-            mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    match ret {
-        0 => Ok(()),
-        _ => Err(io::Error::last_os_error()),
-    }
 }
 
 /// Deliver every echo reply and ICMP error that reaches `socket`, each with the
@@ -87,7 +70,7 @@ pub(super) fn receive(
         // Errors first: while one is queued, a plain read fails with its errno.
         for flags in [libc::MSG_ERRQUEUE, 0] {
             loop {
-                let message = match read(fd, &mut buf, &mut control, flags) {
+                let message = match read(fd, &mut buf, &mut control, flags | libc::MSG_DONTWAIT) {
                     Ok(Some(message)) => message,
                     Ok(None) => break,
                     Err(e) => {
@@ -121,24 +104,6 @@ fn wait(fd: RawFd, timeout: Duration) -> io::Result<()> {
         }
         _ => Ok(()),
     }
-}
-
-/// One datagram or queued error, with what its control messages said.
-struct Message<'a> {
-    data: &'a [u8],
-    /// The sender of a datagram; for a queued error, the destination of our probe
-    from: Option<IpAddr>,
-    /// TTL or hop limit the reply arrived with
-    ttl: Option<u8>,
-    error: Option<QueuedError>,
-}
-
-/// An ICMP error from the error queue
-struct QueuedError {
-    origin: u8,
-    icmp_type: u8,
-    /// The router that sent it
-    offender: Option<IpAddr>,
 }
 
 impl Message<'_> {
@@ -180,110 +145,10 @@ impl Message<'_> {
     }
 }
 
-/// Read one datagram, or with `MSG_ERRQUEUE` one queued error, without blocking.
-fn read<'a>(
-    fd: RawFd,
-    buf: &'a mut [u8],
-    control: &mut [u64],
-    flags: libc::c_int,
-) -> io::Result<Option<Message<'a>>> {
-    // SAFETY: all-zero is a valid sockaddr_storage and msghdr.
-    let mut name: libc::sockaddr_storage = unsafe { mem::zeroed() };
-    let mut iov = libc::iovec {
-        iov_base: buf.as_mut_ptr().cast(),
-        iov_len: buf.len(),
-    };
-    let mut msg: libc::msghdr = unsafe { mem::zeroed() };
-    msg.msg_name = ptr::from_mut(&mut name).cast();
-    msg.msg_namelen = mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = mem::size_of_val(control) as _;
-
-    // SAFETY: msg points at buffers that outlive the call.
-    let len = unsafe { libc::recvmsg(fd, &mut msg, flags | libc::MSG_DONTWAIT) };
-    if len < 0 {
-        let e = io::Error::last_os_error();
-        return match e.kind() {
-            io::ErrorKind::WouldBlock => Ok(None),
-            _ => Err(e),
-        };
-    }
-
-    let mut message = Message {
-        data: &buf[..len as usize],
-        // SAFETY: the kernel wrote msg_namelen bytes of a socket address.
-        from: unsafe { socket_addr(ptr::from_ref(&name).cast(), msg.msg_namelen as usize) },
-        ttl: None,
-        error: None,
-    };
-    // SAFETY: the CMSG macros walk the control buffer the kernel filled in, and
-    // every read stays within the length of its control message.
-    unsafe {
-        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
-        while !cmsg.is_null() {
-            let header = &*cmsg;
-            let data = libc::CMSG_DATA(cmsg);
-            let data_len = header.cmsg_len as usize - (data as usize - cmsg as usize);
-            match (header.cmsg_level, header.cmsg_type) {
-                (libc::SOL_IP, libc::IP_TTL) | (libc::SOL_IPV6, libc::IPV6_HOPLIMIT)
-                    if data_len >= mem::size_of::<libc::c_int>() =>
-                {
-                    let ttl = ptr::read_unaligned(data.cast::<libc::c_int>());
-                    message.ttl = u8::try_from(ttl).ok();
-                }
-                (libc::SOL_IP, libc::IP_RECVERR) | (libc::SOL_IPV6, libc::IPV6_RECVERR)
-                    if data_len >= mem::size_of::<libc::sock_extended_err>() =>
-                {
-                    let err = ptr::read_unaligned(data.cast::<libc::sock_extended_err>());
-                    let size = mem::size_of::<libc::sock_extended_err>();
-                    // SO_EE_OFFENDER: the sender's address follows the struct.
-                    let offender = socket_addr(data.add(size), data_len - size);
-                    message.error = Some(QueuedError {
-                        origin: err.ee_origin,
-                        icmp_type: err.ee_type,
-                        offender,
-                    });
-                }
-                _ => {}
-            }
-            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
-        }
-    }
-    Ok(Some(message))
-}
-
-/// The address in a sockaddr_in or sockaddr_in6 of at most `len` bytes at `addr`.
-///
-/// # Safety
-/// `addr` must point at `len` readable bytes.
-unsafe fn socket_addr(addr: *const u8, len: usize) -> Option<IpAddr> {
-    if len < mem::size_of::<libc::sa_family_t>() {
-        return None;
-    }
-    // SAFETY: the caller vouches for `len` bytes, and each read checks its size.
-    unsafe {
-        match libc::c_int::from(ptr::read_unaligned(addr.cast::<libc::sa_family_t>())) {
-            libc::AF_INET if len >= mem::size_of::<libc::sockaddr_in>() => {
-                let sin = ptr::read_unaligned(addr.cast::<libc::sockaddr_in>());
-                Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(
-                    sin.sin_addr.s_addr,
-                ))))
-            }
-            libc::AF_INET6 if len >= mem::size_of::<libc::sockaddr_in6>() => {
-                let sin6 = ptr::read_unaligned(addr.cast::<libc::sockaddr_in6>());
-                Some(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
-            }
-            _ => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::Quoted;
+    use crate::probe::{recvmsg::QueuedError, Quoted};
 
     fn probe(kind: u8, seq: u16) -> Vec<u8> {
         let mut p = vec![kind, 0, 0, 0, 0x12, 0x34];

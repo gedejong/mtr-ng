@@ -31,6 +31,8 @@ pub enum Column {
     Dist,
     /// Farthest from here a reply can come in the best RTT, in km
     Reach,
+    /// Routers the reply crossed, from its TTL; +N or -N when the way there was shorter or longer
+    Back,
     /// Packet loss percentage
     Loss,
     /// Number of packets sent
@@ -65,6 +67,7 @@ impl Column {
             Column::Geo,
             Column::Dist,
             Column::Reach,
+            Column::Back,
             Column::Loss,
             Column::Sent,
             Column::Last,

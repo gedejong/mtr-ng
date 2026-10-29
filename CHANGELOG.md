@@ -8,6 +8,9 @@ Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/
 - `-P udp` sends UDP datagrams to port 33434 and up, one port per flow. Load balancers spread UDP by port far more often than they spread ICMP, so `--flows` over UDP shows paths that ICMP doesn't. It needs no sudo on macOS, and root or `CAP_NET_RAW` on Linux.
 - On Linux, ICMP no longer needs root or `CAP_NET_RAW` where `net.ipv4.ping_group_range` allows ping sockets, as it does by default on systemd 243 and newer. Ping sockets don't pass on MPLS labels.
 - IPv6 probes carry a flow label per flow, which is what Linux and many routers hash IPv6 on.
+- The Back column (`--fields hop,host,back,loss,avg`) counts the routers a reply crossed on its way back, from the TTL it arrived with, and shows `+2` when that is two more than the probe crossed on the way there: the reply came back another way. It works for IPv6 replies too, whose hop limit is now read on every socket kind.
+- A trace in which no hop answers says so, in the table and as a warning after a report, instead of showing an empty table. UDP probes to the machine itself are the common case: checksum offload leaves their checksums unfinished.
+- The man page's privileges section and bug link were out of date.
 
 ## 0.4.0 - 2026-10-28
 
