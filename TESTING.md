@@ -227,10 +227,11 @@ just netlab --hash-policy 0 -- mtr-ng -r -c 8 -n --flows 8 target6  # and IPv6, 
 just netlab --wide -- mtr-ng -P udp -r -n --flows auto target  # 3 branches at hop 3, 16 flows
 just netlab -- mtr-ng --pmtu -r -c 5 -n target           # MTU 1500 → 1400 past hop 4
 just netlab --black-hole -- mtr-ng --pmtu -i 300 -r -c 150 -n target  # found by halving, past hop 4
+just netlab --stateless-nat -- mtr-ng -P udp -r -c 3 -n target  # NAT before hop 2, from 10.0.2.2
 just netlab --shell                                       # shell in the client namespace
 ```
 
-`--user probe` runs the command as a user without capabilities. `--no-ping-group` sets `net.ipv4.ping_group_range` to `1 0` instead of `0 2147483647`. `--silent ROUTER` drops that router's Time Exceeded messages (IPv4 and IPv6), `--black-hole` its Fragmentation Needed and Packet Too Big at r3, and `--loss PCT` loses packets from gw to r1. `--hash-policy N` sets r1's multipath hash policy; the IPv6 flow label counts in policies 0, 2 and 3, not in 1. `--icmp-ecmp` makes r1 send echo requests with an even ICMP checksum to r2a and odd ones to r2b, as routers that hash the first transport word do. `--wide` adds a third branch, r2c (10.0.8.1), for `--flows auto`. `scripts/netlab/run.sh --help` lists the options, and `scripts/netlab/lab.sh` explains each sysctl and route.
+`--user probe` runs the command as a user without capabilities. `--no-ping-group` sets `net.ipv4.ping_group_range` to `1 0` instead of `0 2147483647`. `--silent ROUTER` drops that router's Time Exceeded messages (IPv4 and IPv6), `--black-hole` its Fragmentation Needed and Packet Too Big at r3, and `--loss PCT` loses packets from gw to r1. `--hash-policy N` sets r1's multipath hash policy; the IPv6 flow label counts in policies 0, 2 and 3, not in 1. `--icmp-ecmp` makes r1 send echo requests with an even ICMP checksum to r2a and odd ones to r2b, as routers that hash the first transport word do. `--wide` adds a third branch, r2c (10.0.8.1), for `--flows auto`. `--stateless-nat` makes gw translate addresses without connection tracking, so routers' ICMP errors keep quoting the probe from 10.0.2.2, as NATs that don't translate the quote back do; gw's usual NAT is Linux's, which translates it back. `scripts/netlab/run.sh --help` lists the options, and `scripts/netlab/lab.sh` explains each sysctl and route.
 
 ## Continuous Integration
 

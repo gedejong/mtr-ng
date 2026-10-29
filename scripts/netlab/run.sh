@@ -37,6 +37,9 @@ Options:
                      odd ones to r2b (Linux itself never splits ICMP)
   --wide             A third branch, r2c, makes the diamond three ways wide
                      (--icmp-ecmp still splits echo requests two ways)
+  --stateless-nat    gw translates addresses without connection tracking, so
+                     ICMP errors quote probes from 10.0.2.2, as some NATs do
+                     (Linux's NAT translates the quote back, which hides it)
   --spin             Keep the VM's CPUs busy while CMD runs, so netem delays are
                      accurate; idle, colima's timers make RTTs read 10-20% high
   --shell            Open a shell in the client namespace instead of CMD

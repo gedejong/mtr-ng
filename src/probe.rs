@@ -6,6 +6,7 @@
 //! lost happen in `tracer`.
 
 use std::{
+    collections::HashMap,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket},
     sync::{
@@ -77,6 +78,18 @@ pub enum IcmpResponseType {
     Timeout,
 }
 
+/// What a NAT on the way did to a probe, as the router that answered quotes it.
+/// Most NATs, Linux's among them, translate the quote back, and are not seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Nat {
+    /// The probe went on from this address, and the quote was left that way
+    Source(IpAddr),
+    /// The quote has this machine's address and identifier back, but the
+    /// checksum the NAT changed with the identifier (IPv4 echo requests)
+    Checksum,
+}
+
 /// Information about a probe response
 #[derive(Debug, Clone)]
 pub struct ProbeResponse {
@@ -96,6 +109,8 @@ pub struct ProbeResponse {
     pub mpls: Vec<MplsLabel>,
     /// Interfaces the router named (RFC 5837)
     pub interfaces: Vec<Interface>,
+    /// What a NAT did to the probe, if the router's quote shows it
+    pub nat: Option<Nat>,
 }
 
 /// A reply to one of our probes, timestamped when it was received.
@@ -111,6 +126,8 @@ pub struct Reply {
     pub mpls: Vec<MplsLabel>,
     /// Interfaces named in one (RFC 5837)
     pub interfaces: Vec<Interface>,
+    /// What a NAT did to the probe, if the quote shows it
+    pub nat: Option<Nat>,
 }
 
 /// Sends probes and delivers replies. Implementations only move packets;
@@ -138,6 +155,8 @@ struct IcmpReply {
     kind: IcmpResponseType,
     source: IpAddr,
     probe: Quoted,
+    /// The rest of the quote, in an error
+    quote: Option<Quote>,
     ttl: Option<u8>,
     mpls: Vec<MplsLabel>,
     interfaces: Vec<Interface>,
@@ -156,20 +175,60 @@ enum Quoted {
     },
 }
 
+/// What an error quotes of a probe besides what identifies it, which shows a
+/// NAT that changed the probe and didn't change the quote back
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Quote {
+    /// Source address in the quoted IP header
+    source: IpAddr,
+    /// Checksum of the quoted echo request or UDP header
+    checksum: u16,
+}
+
 /// Which quoted probes are ours, and their sequence numbers
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Ours {
     /// Identifier of flow 0's echo requests
     packet_id: u16,
     /// Source port of our UDP probes, when probing with UDP
     udp_port: Option<u16>,
+    /// The address probes leave from, if known
+    source: Option<IpAddr>,
+    /// Quoted sources other than `source` that are this machine's all the same
+    /// (an IPv6 temporary address that took over), and those that aren't
+    local: HashMap<IpAddr, bool>,
 }
 
 impl Ours {
-    fn seq(&self, probe: Quoted) -> Option<u16> {
+    fn new(packet_id: u16, udp_port: Option<u16>, source: Option<IpAddr>) -> Self {
+        Self {
+            packet_id,
+            udp_port,
+            source,
+            local: HashMap::new(),
+        }
+    }
+
+    /// The sequence number of `probe` if it is ours, and what a NAT did to it.
+    fn seq(&mut self, probe: Quoted, quote: Option<Quote>) -> Option<(u16, Option<Nat>)> {
         match (probe, self.udp_port) {
             (Quoted::Echo { id, seq }, None) => {
-                (id.wrapping_sub(self.packet_id) < MAX_FLOWS).then_some(seq)
+                let flow = id.wrapping_sub(self.packet_id);
+                if flow >= MAX_FLOWS {
+                    return None;
+                }
+                let nat = match (self.translated(quote), quote) {
+                    (Some(from), _) => Some(Nat::Source(from)),
+                    // An ICMPv6 checksum covers the addresses, so only IPv4's is
+                    // known in advance.
+                    (None, Some(quote))
+                        if quote.source.is_ipv4() && quote.checksum != FLOW_CHECKSUM + flow =>
+                    {
+                        Some(Nat::Checksum)
+                    }
+                    _ => None,
+                };
+                Some((seq, nat))
             }
             (
                 Quoted::Udp {
@@ -178,11 +237,59 @@ impl Ours {
                     checksum,
                 },
                 Some(port),
-            ) => (src_port == port && dst_port.wrapping_sub(UDP_PORT) < MAX_FLOWS)
-                .then_some(checksum),
+            ) => {
+                if dst_port.wrapping_sub(UDP_PORT) >= MAX_FLOWS {
+                    return None;
+                }
+                match self.translated(quote).zip(self.source) {
+                    None => (src_port == port).then_some((checksum, None)),
+                    // The NAT changed the checksum, which is the sequence number,
+                    // with the address and port; change it back.
+                    Some((from, source)) => {
+                        let seq = untranslated_checksum(checksum, (from, src_port), (source, port));
+                        Some((seq, Some(Nat::Source(from))))
+                    }
+                }
+            }
             _ => None,
         }
     }
+
+    /// The address a NAT gave the probe, if the quote kept it.
+    fn translated(&mut self, quote: Option<Quote>) -> Option<IpAddr> {
+        let from = quote?.source;
+        if self.source.is_none_or(|source| source == from) {
+            return None;
+        }
+        let local = *self.local.entry(from).or_insert_with(|| is_local(from));
+        (!local).then_some(from)
+    }
+}
+
+/// The checksum of a UDP datagram before a NAT changed its source address and
+/// port from `original` to `translated`, given the checksum after: the NAT
+/// added the difference of each 16-bit word (RFC 1624), so take it off again.
+fn untranslated_checksum(checksum: u16, translated: (IpAddr, u16), original: (IpAddr, u16)) -> u16 {
+    let words = |(addr, port): (IpAddr, u16)| {
+        let octets = match addr {
+            IpAddr::V4(v4) => v4.octets().to_vec(),
+            IpAddr::V6(v6) => v6.octets().to_vec(),
+        };
+        let mut words: Vec<u16> = octets
+            .chunks(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        words.push(port);
+        words
+    };
+    // ~HC' + Σ(~m' + m) = ~HC, with m the original words and m' the translated
+    let sum = words(translated)
+        .into_iter()
+        .zip(words(original))
+        .fold(!checksum, |sum, (after, before)| {
+            ones_complement_add(ones_complement_add(sum, !after), before)
+        });
+    !sum
 }
 
 /// What kind of ICMP socket the engine probes through
@@ -240,10 +347,11 @@ impl ProbeEngine {
 
         // A ping socket's probes all carry the identifier the kernel gave it.
         let packet_id = kernel_ident.unwrap_or(std::process::id() as u16);
-        let ours = Ours {
-            packet_id,
-            udp_port: udp.as_ref().map(|udp| udp.port),
+        let source = match &udp {
+            Some(udp) => Some(udp.source),
+            None => source_address(target).ok(),
         };
+        let ours = Ours::new(packet_id, udp.as_ref().map(|udp| udp.port), source);
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::unbounded_channel();
         let socket = Arc::new(socket);
@@ -379,7 +487,7 @@ fn spawn_receiver(
     socket: Arc<Socket>,
     kind: SocketKind,
     ipv6: bool,
-    ours: Ours,
+    mut ours: Ours,
     tx: mpsc::UnboundedSender<Reply>,
     stop: &Arc<AtomicBool>,
 ) -> Result<()> {
@@ -406,7 +514,7 @@ fn spawn_receiver(
                 match read_packet(&socket, &mut buf, &mut control) {
                     Ok(Some(packet)) => {
                         let received_at = Instant::now();
-                        if let Some(reply) = decode(packet, ipv6, ours, received_at) {
+                        if let Some(reply) = decode(packet, ipv6, &mut ours, received_at) {
                             if tx.send(reply).is_err() {
                                 break; // nobody listens any more
                             }
@@ -476,7 +584,7 @@ fn read_packet<'a>(
 }
 
 /// Parse a received packet and keep it only if it answers one of our probes.
-fn decode(packet: Packet, ipv6: bool, ours: Ours, received_at: Instant) -> Option<Reply> {
+fn decode(packet: Packet, ipv6: bool, ours: &mut Ours, received_at: Instant) -> Option<Reply> {
     let reply = if ipv6 {
         parse_icmpv6(packet.bytes, packet.from?, packet.hop_limit)?
     } else {
@@ -487,15 +595,17 @@ fn decode(packet: Packet, ipv6: bool, ours: Ours, received_at: Instant) -> Optio
 
 impl Ours {
     /// `reply` as a `Reply` if it answers one of our probes.
-    fn reply(&self, reply: IcmpReply, received_at: Instant) -> Option<Reply> {
+    fn reply(&mut self, reply: IcmpReply, received_at: Instant) -> Option<Reply> {
+        let (seq, nat) = self.seq(reply.probe, reply.quote)?;
         Some(Reply {
             kind: reply.kind,
             source: reply.source,
-            seq: self.seq(reply.probe)?,
+            seq,
             received_at,
             ttl: reply.ttl,
             mpls: reply.mpls,
             interfaces: reply.interfaces,
+            nat,
         })
     }
 }
@@ -746,8 +856,8 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
         (3, _) => IcmpResponseType::DestinationUnreachable,
         _ => return None,
     };
-    let probe = if kind == IcmpResponseType::EchoReply {
-        echo_fields(icmp)
+    let (probe, quote) = if kind == IcmpResponseType::EchoReply {
+        (echo_fields(icmp), None)
     } else {
         // 8-byte ICMP header, then the quoted IP header and the first 8 bytes of our probe
         let inner = &icmp[8..];
@@ -755,7 +865,8 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
         if inner_ihl < 20 || inner.len() < inner_ihl + 8 {
             return None;
         }
-        quoted_probe(inner[9], &inner[inner_ihl..], ECHO_REQUEST)?
+        let source = Ipv4Addr::new(inner[12], inner[13], inner[14], inner[15]);
+        quoted(inner[9], &inner[inner_ihl..], ECHO_REQUEST, source.into())?
     };
     let ext = match kind {
         IcmpResponseType::EchoReply => Extensions::default(),
@@ -765,6 +876,7 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
         kind,
         source: IpAddr::V4(source),
         probe,
+        quote,
         ttl: Some(buf[8]),
         mpls: ext.mpls,
         interfaces: ext.interfaces,
@@ -790,12 +902,18 @@ fn parse_icmpv6(buf: &[u8], source: IpAddr, hop_limit: Option<u8>) -> Option<Icm
         },
         _ => return None,
     };
-    let probe = if kind == IcmpResponseType::EchoReply {
-        echo_fields(buf)
+    let (probe, quote) = if kind == IcmpResponseType::EchoReply {
+        (echo_fields(buf), None)
     } else {
         // 8-byte ICMPv6 header, then the 40-byte quoted IPv6 header and our probe
         let inner = buf.get(8..8 + 40 + 8)?;
-        quoted_probe(inner[6], &inner[40..], ECHO_REQUEST_V6)?
+        let source = <[u8; 16]>::try_from(&inner[8..24]).ok()?;
+        quoted(
+            inner[6],
+            &inner[40..],
+            ECHO_REQUEST_V6,
+            Ipv6Addr::from(source).into(),
+        )?
     };
     let ext = match kind {
         IcmpResponseType::EchoReply => Extensions::default(),
@@ -805,6 +923,7 @@ fn parse_icmpv6(buf: &[u8], source: IpAddr, hop_limit: Option<u8>) -> Option<Icm
         kind,
         source,
         probe,
+        quote,
         ttl: hop_limit,
         mpls: ext.mpls,
         interfaces: ext.interfaces,
@@ -819,19 +938,29 @@ fn echo_fields(echo: &[u8]) -> Quoted {
     }
 }
 
-/// The probe in the first 8 quoted bytes of a datagram of IP protocol `protocol`:
-/// an echo request (`echo_request` is its ICMP type) or a UDP header.
-fn quoted_probe(protocol: u8, quoted: &[u8], echo_request: u8) -> Option<Quoted> {
+/// The probe in the first 8 quoted bytes of a datagram of IP protocol `protocol`
+/// from `source`: an echo request (`echo_request` is its ICMP type) or a UDP
+/// header, and the rest of the quote.
+fn quoted(
+    protocol: u8,
+    quoted: &[u8],
+    echo_request: u8,
+    source: IpAddr,
+) -> Option<(Quoted, Option<Quote>)> {
     let word = |at: usize| u16::from_be_bytes([quoted[at], quoted[at + 1]]);
-    match protocol {
-        1 | 58 if quoted[0] == echo_request => Some(echo_fields(quoted)),
-        17 => Some(Quoted::Udp {
-            src_port: word(0),
-            dst_port: word(2),
-            checksum: word(6),
-        }),
-        _ => None,
-    }
+    let (probe, checksum) = match protocol {
+        1 | 58 if quoted[0] == echo_request => (echo_fields(quoted), word(2)),
+        17 => {
+            let udp = Quoted::Udp {
+                src_port: word(0),
+                dst_port: word(2),
+                checksum: word(6),
+            };
+            (udp, word(6))
+        }
+        _ => return None,
+    };
+    Some((probe, Some(Quote { source, checksum })))
 }
 
 /// The `len`-byte payload of a UDP probe whose checksum, as the kernel will compute
@@ -1001,6 +1130,32 @@ mod tests {
     }
 
     #[test]
+    fn an_error_shows_the_source_and_checksum_it_quotes() {
+        let mut inner = ipv4_header(20, 1, [192, 168, 1, 2]);
+        inner.extend(echo(8, 0x1234, 40001));
+        inner[22..24].copy_from_slice(&0x2c01u16.to_be_bytes());
+        let r = parse_icmpv4(&time_exceeded(&inner)).unwrap();
+        let quote = Quote {
+            source: IpAddr::from([192, 168, 1, 2]),
+            checksum: 0x2c01,
+        };
+        assert_eq!(r.quote, Some(quote));
+
+        let mut inner = ipv4_header(20, 17, [203, 0, 113, 9]);
+        inner.extend_from_slice(&[0xec, 0x6f, 0x82, 0x9a, 0, 16, 0x9c, 0x41]);
+        let r = parse_icmpv4(&time_exceeded(&inner)).unwrap();
+        let quote = Quote {
+            source: IpAddr::from([203, 0, 113, 9]),
+            checksum: 0x9c41,
+        };
+        assert_eq!(r.quote, Some(quote), "UDP");
+
+        let mut p = ipv4_header(20, 1, [1, 1, 1, 1]);
+        p.extend(echo(0, 0x1234, 40000));
+        assert_eq!(parse_icmpv4(&p).unwrap().quote, None, "an echo reply");
+    }
+
+    #[test]
     fn honours_quoted_header_with_ip_options() {
         let mut inner = ipv4_header(24, 1, [192, 168, 1, 2]);
         inner.extend(echo(8, 0x1234, 40002));
@@ -1045,33 +1200,91 @@ mod tests {
             dst_port,
             checksum: 40000,
         };
-        let ours = Ours {
-            packet_id: 0x1234,
-            udp_port: Some(0xec6f),
-        };
-        assert_eq!(ours.seq(udp(0xec6f, UDP_PORT)), Some(40000));
-        assert_eq!(ours.seq(udp(0xec6f, UDP_PORT + MAX_FLOWS - 1)), Some(40000));
+        let mut ours = Ours::new(0x1234, Some(0xec6f), None);
+        let mut seq = |probe| ours.seq(probe, None).map(|(seq, _)| seq);
+        assert_eq!(seq(udp(0xec6f, UDP_PORT)), Some(40000));
+        assert_eq!(seq(udp(0xec6f, UDP_PORT + MAX_FLOWS - 1)), Some(40000));
+        assert_eq!(seq(udp(0xec6f, UDP_PORT + MAX_FLOWS)), None, "no such flow");
+        assert_eq!(seq(udp(0xec70, UDP_PORT)), None, "another socket");
+        assert_eq!(seq(echo_of(0x1234, 40000)), None, "not probing with ICMP");
+        let mut icmp = Ours::new(0x1234, None, None);
+        let mut seq = |probe| icmp.seq(probe, None).map(|(seq, _)| seq);
+        assert_eq!(seq(udp(0xec6f, UDP_PORT)), None, "not probing with UDP");
+        assert_eq!(seq(echo_of(0x1234, 40000)), Some(40000));
+    }
+
+    #[test]
+    fn a_quote_from_another_address_or_with_another_checksum_shows_a_nat() {
+        let home: IpAddr = [192, 168, 1, 2].into();
+        let public: IpAddr = [203, 0, 113, 9].into();
+        let mut ours = Ours::new(0x1234, None, Some(home));
+        let quote = |source, checksum| Some(Quote { source, checksum });
+        let flow_1 = echo_of(0x1235, 40000);
         assert_eq!(
-            ours.seq(udp(0xec6f, UDP_PORT + MAX_FLOWS)),
-            None,
-            "no such flow"
+            ours.seq(flow_1, quote(home, FLOW_CHECKSUM + 1)),
+            Some((40000, None)),
+            "as sent"
         );
-        assert_eq!(ours.seq(udp(0xec70, UDP_PORT)), None, "another socket");
         assert_eq!(
-            ours.seq(echo_of(0x1234, 40000)),
-            None,
-            "not probing with ICMP"
+            ours.seq(flow_1, quote(public, FLOW_CHECKSUM + 1)),
+            Some((40000, Some(Nat::Source(public))))
         );
-        let icmp = Ours {
-            udp_port: None,
-            ..ours
-        };
         assert_eq!(
-            icmp.seq(udp(0xec6f, UDP_PORT)),
-            None,
-            "not probing with UDP"
+            ours.seq(flow_1, quote(home, 0xbeef)),
+            Some((40000, Some(Nat::Checksum))),
+            "identifier back, checksum not"
         );
-        assert_eq!(icmp.seq(echo_of(0x1234, 40000)), Some(40000));
+        assert_eq!(ours.seq(flow_1, None), Some((40000, None)), "an echo reply");
+
+        let home6: IpAddr = "2001:db8::2".parse().unwrap();
+        let mut ours6 = Ours::new(0x1234, None, Some(home6));
+        assert_eq!(
+            ours6.seq(flow_1, quote(home6, 0xbeef)),
+            Some((40000, None)),
+            "an ICMPv6 checksum covers the addresses, so it isn't known"
+        );
+        let unknown = Ours::new(0x1234, None, None).seq(flow_1, quote(public, FLOW_CHECKSUM + 1));
+        assert_eq!(unknown, Some((40000, None)), "no source to compare");
+    }
+
+    #[test]
+    fn a_nat_s_change_to_a_udp_checksum_is_undone() {
+        let pairs: [(IpAddr, IpAddr, IpAddr); 2] = [
+            (
+                [192, 168, 1, 2].into(),
+                [203, 0, 113, 9].into(),
+                [198, 51, 100, 1].into(),
+            ),
+            (
+                "fd00:1::2".parse().unwrap(),
+                "2001:db8:77::9".parse().unwrap(),
+                "2001:db8::1".parse().unwrap(),
+            ),
+        ];
+        for (home, public, dst) in pairs {
+            for (seq, public_port) in [(40000, 0xec6f), (32768, 1024), (60999, 65535)] {
+                let payload = udp_payload(home, dst, 0xec6f, UDP_PORT, seq, 8);
+                // The checksum the datagram has once its source is public
+                let datagram = udp_datagram(public_port, UDP_PORT, 0, &payload);
+                let header = pseudo_header(public, dst, datagram.len());
+                let translated = calculate_icmp_checksum(&[header, datagram].concat());
+                let probe = Quoted::Udp {
+                    src_port: public_port,
+                    dst_port: UDP_PORT,
+                    checksum: translated,
+                };
+                let quote = Some(Quote {
+                    source: public,
+                    checksum: translated,
+                });
+                let mut ours = Ours::new(0x1234, Some(0xec6f), Some(home));
+                assert_eq!(
+                    ours.seq(probe, quote),
+                    Some((seq, Some(Nat::Source(public)))),
+                    "{public}:{public_port}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1156,16 +1369,13 @@ mod tests {
         let reply_with_id = |id| {
             let mut p = ipv4_header(20, 1, [1, 1, 1, 1]);
             p.extend(echo(0, id, 40000));
-            let ours = Ours {
-                packet_id: 0x1234,
-                udp_port: None,
-            };
+            let mut ours = Ours::new(0x1234, None, None);
             let packet = Packet {
                 bytes: &p,
                 from: None,
                 hop_limit: None,
             };
-            decode(packet, false, ours, now)
+            decode(packet, false, &mut ours, now)
         };
         assert_eq!(reply_with_id(0x9999), None, "another process's ping");
         assert_eq!(
@@ -1220,6 +1430,8 @@ mod tests {
         let mut p = vec![3, 0, 0, 0, 0, 0, 0, 0];
         let mut inner = vec![0u8; 40];
         inner[6] = 58;
+        let home: Ipv6Addr = "2001:db8:1::2".parse().unwrap();
+        inner[8..24].copy_from_slice(&home.octets());
         p.extend(inner);
         p.extend(echo(128, 0x1234, 40004));
         let src: IpAddr = "2001:db8::1".parse().unwrap();
@@ -1227,5 +1439,6 @@ mod tests {
         assert_eq!(r.kind, IcmpResponseType::TimeExceeded);
         assert_eq!((r.probe, r.source), (echo_of(0x1234, 40004), src));
         assert_eq!(r.ttl, Some(62), "the hop limit from the control message");
+        assert_eq!(r.quote.map(|quote| quote.source), Some(home.into()));
     }
 }

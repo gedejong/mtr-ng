@@ -89,6 +89,7 @@ impl Prober for IcmpApi {
                             ttl: reply_ttl,
                             mpls: Vec::new(),
                             interfaces: Vec::new(),
+                            nat: None,
                         });
                     }
                     Ok(None) => {}

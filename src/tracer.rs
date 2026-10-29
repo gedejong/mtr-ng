@@ -148,6 +148,7 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                     reply_ttl: reply.ttl,
                     mpls: reply.mpls,
                     interfaces: reply.interfaces,
+                    nat: reply.nat,
                 };
                 let (name, asn, ipmap, resolver) = {
                     let mut s = session.lock().unwrap();
@@ -346,6 +347,7 @@ fn expire(session: &Shared, in_flight: &mut HashMap<u16, InFlight>, timeout: Dur
                 reply_ttl: None,
                 mpls: Vec::new(),
                 interfaces: Vec::new(),
+                nat: None,
             });
         }
     }
@@ -407,7 +409,7 @@ async fn reverse_lookup(session: Shared, resolver: hickory_resolver::TokioResolv
 mod tests {
     use super::*;
     use crate::icmp_ext::MplsLabel;
-    use crate::probe::Reply;
+    use crate::probe::{Nat, Reply};
     use crate::Args;
     use clap::Parser;
     use std::io;
@@ -423,6 +425,8 @@ mod tests {
         branches: HashMap<u8, Vec<IpAddr>>,
         /// TTL whose router reports this MPLS label
         mpls: Option<(u8, MplsLabel)>,
+        /// From this TTL on, routers quote the probes as a NAT left them
+        nat: Option<(u8, Nat)>,
         fail_ttl: Option<u8>,
         /// Past this TTL's router links take this many bytes, and larger probes get
         /// Fragmentation Needed from it
@@ -441,6 +445,7 @@ mod tests {
                 path,
                 branches: HashMap::new(),
                 mpls: None,
+                nat: None,
                 fail_ttl: None,
                 narrow: None,
                 black_hole: None,
@@ -499,6 +504,10 @@ mod tests {
                     ttl: Some(64 - hops),
                     mpls: mpls.into_iter().collect(),
                     interfaces: Vec::new(),
+                    nat: self
+                        .nat
+                        .filter(|&(at, _)| ttl >= at && kind == IcmpResponseType::TimeExceeded)
+                        .map(|(_, nat)| nat),
                 });
             }
             Ok((seq, sent_at))
@@ -674,6 +683,7 @@ mod tests {
             },
         ));
         prober.fail_ttl = Some(9); // lost without being sent
+        prober.nat = Some((2, Nat::Source(IpAddr::from([203, 0, 113, 9]))));
         let record = [
             "-c",
             "4",
@@ -698,7 +708,7 @@ mod tests {
             let mut responders: Vec<_> = hop
                 .responders
                 .values()
-                .map(|r| (r.addr, r.replies, r.reply_ttl, r.mpls.clone()))
+                .map(|r| (r.addr, r.replies, r.reply_ttl, r.mpls.clone(), r.nat))
                 .collect();
             responders.sort_by_key(|r| r.0);
             responders
@@ -722,7 +732,16 @@ mod tests {
             assert_eq!(a.is_target, b.is_target, "hop {hop}");
             assert_eq!(responders(a), responders(b), "hop {hop}");
             assert_eq!(flows(a), flows(b), "hop {hop}");
+            assert_eq!(
+                live.notes_after(hop),
+                replayed.notes_after(hop),
+                "hop {hop}"
+            );
         }
+        assert_eq!(
+            replayed.notes_after(2),
+            ["NAT before this hop: probes reach it from 203.0.113.9"]
+        );
         assert_eq!(
             replayed.hops[8].loss_percent, 100.0,
             "the probes that failed"

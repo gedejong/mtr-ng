@@ -6,6 +6,7 @@ use crate::icmp_ext::MplsLabel;
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::privacy::{self, show};
+use crate::probe::Nat;
 use crate::record::Replay;
 use crate::tracer::Trace;
 use crate::utils::network;
@@ -291,6 +292,11 @@ fn json_hubs(
             }
             if !hop.interfaces().is_empty() {
                 hub["interfaces"] = json!(hop.interfaces());
+            }
+            match hop.nat() {
+                Some(Nat::Source(addr)) => hub["nat"] = json!({ "source": show(addr) }),
+                Some(Nat::Checksum) => hub["nat"] = json!({ "checksum_changed": true }),
+                None => {}
             }
             if let Some(fix) = &hop.geo {
                 let assessment = hop.assess(origin);

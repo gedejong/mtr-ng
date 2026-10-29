@@ -14,6 +14,7 @@ use crate::geo::{self, GeoFix, Origin};
 use crate::hop_stats::ResponderStats;
 use crate::icmp_ext::{Interface, MplsLabel};
 use crate::privacy;
+use crate::probe::Nat;
 use crate::topology;
 use crate::utils::network::truncate_hostname;
 use crate::utils::text::pack;
@@ -781,6 +782,28 @@ fn detail_lines(
                     Span::raw(format!("  {interface}")),
                 ]));
             }
+        }
+    }
+
+    let translated: Vec<_> = letters
+        .iter()
+        .filter_map(|&(letter, addr)| hop.responders[&addr].nat.map(|nat| (letter, nat)))
+        .collect();
+    if !translated.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("NAT", bold));
+        for (letter, nat) in translated {
+            let what = match nat {
+                Nat::Source(addr) => format!(
+                    "  quotes the probe from {}, the address a NAT gave it",
+                    privacy::show(addr)
+                ),
+                Nat::Checksum => "  quotes the probe with the checksum a NAT gave it".to_string(),
+            };
+            lines.push(Line::from(vec![
+                letter_span(letter, ui.colors),
+                Span::raw(what),
+            ]));
         }
     }
 

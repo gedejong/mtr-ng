@@ -142,6 +142,8 @@ impl Message<'_> {
             kind,
             source,
             probe: echo_fields(echo),
+            // The error queue hands back the probe as it was sent, not the quote.
+            quote: None,
             ttl: self.ttl,
             mpls: Vec::new(),
             interfaces: Vec::new(),

@@ -48,6 +48,7 @@ HASH_POLICY=1
 ICMP_ECMP=0
 WIDE=0
 SPIN=0
+STATELESS_NAT=0
 SHELL_MODE=0
 
 while [ $# -gt 0 ]; do
@@ -94,6 +95,9 @@ while [ $# -gt 0 ]; do
             ;;
         --spin)
             SPIN=1
+            ;;
+        --stateless-nat)
+            STATELESS_NAT=1
             ;;
         --shell)
             SHELL_MODE=1
@@ -264,7 +268,11 @@ add_routes() {
     ip -n gw -6 route add default via fd00:2::1
     # IPv4 leaves home through NAT, like behind a home router; IPv6 is routed.
     # So upstream routers know fd00:1::/64 but not 10.0.1.0/24.
-    ip netns exec gw iptables -t nat -A POSTROUTING -s 10.0.1.0/24 -o r1 -j MASQUERADE
+    if [ "$STATELESS_NAT" -eq 1 ]; then
+        add_stateless_nat
+    else
+        ip netns exec gw iptables -t nat -A POSTROUTING -s 10.0.1.0/24 -o r1 -j MASQUERADE
+    fi
 
     # r1: the diamond. Two next hops for everything behind it, three with --wide.
     local p via4=(nexthop via 10.0.3.1 nexthop via 10.0.4.1)
@@ -311,6 +319,27 @@ add_routes() {
     ip -n r3 -6 route add default via fd00:5::2 src fd00:5::1
     ip -n target route add default via 10.0.7.2
     ip -n target -6 route add default via fd00:7::2
+}
+
+# --stateless-nat: gw rewrites addresses without connection tracking, so the
+# ICMP errors routers send back keep quoting the probe as it left gw, from
+# 10.0.2.2, with the UDP checksum changed to match. Linux's own NAT translates
+# the quote back, which hides it; NATs that don't are what mtr-ng detects.
+add_stateless_nat() {
+    ip netns exec gw nft -f - <<'EOF'
+table ip stateless_nat {
+    chain raw {
+        type filter hook prerouting priority raw; policy accept;
+        ip saddr 10.0.1.0/24 notrack
+        ip daddr 10.0.2.2 notrack
+        ip daddr 10.0.2.2 ip daddr set 10.0.1.2
+    }
+    chain out {
+        type filter hook postrouting priority srcnat; policy accept;
+        oifname "r1" ip saddr 10.0.1.0/24 ip saddr set 10.0.2.2
+    }
+}
+EOF
 }
 
 # --icmp-ecmp: make r1 split ICMP echo requests the way many hardware routers
@@ -415,6 +444,7 @@ print_map() {
     [ "$WIDE" -eq 1 ] && wide_note="
   --wide: a third branch, link 8 r1 .2 -> r2c .1 (10.0.8.1, 6 ms), link 9 r2c .2 -> r3 .1 (4 ms)"
     [ "$SPIN" -eq 1 ] && silent_note="$silent_note; CPUs kept busy (--spin)"
+    [ "$STATELESS_NAT" -eq 1 ] && silent_note="$silent_note; gw's NAT is stateless and leaves ICMP quotes alone"
     cat >&2 <<EOF
 
   client ──2ms── gw ──10ms── r1 ──┬──4ms── r2a ──4ms──┬── r3 ══20ms══ target

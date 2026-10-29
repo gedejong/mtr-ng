@@ -2,6 +2,7 @@ use crate::asn::AsInfo;
 use crate::geo::{self, Assessment, GeoFix, Origin};
 use crate::icmp_ext::{Extensions, Interface, MplsLabel};
 use crate::privacy::StandIns;
+use crate::probe::Nat;
 use crate::utils;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -78,6 +79,8 @@ pub struct ResponderStats {
     pub mpls: Vec<MplsLabel>,
     /// Interfaces its latest reply named (RFC 5837)
     pub interfaces: Vec<Interface>,
+    /// What a NAT did to the probe its latest error quoted
+    pub nat: Option<Nat>,
     /// Where the geolocation database puts it
     pub geo: Option<GeoFix>,
     rtt_sum_ns: u128,
@@ -96,6 +99,7 @@ impl ResponderStats {
             reply_ttl: None,
             mpls: Vec::new(),
             interfaces: Vec::new(),
+            nat: None,
             geo: None,
             rtt_sum_ns: 0,
         }
@@ -297,6 +301,13 @@ impl HopStats {
         }
     }
 
+    /// Remember what `addr`'s latest error quote showed of a NAT.
+    pub fn set_nat(&mut self, addr: IpAddr, nat: Option<Nat>) {
+        if let Some(responder) = self.responders.get_mut(&addr) {
+            responder.nat = nat;
+        }
+    }
+
     /// Reply for the most recent probe, no address (tests).
     pub fn add_rtt(&mut self, rtt: Duration) {
         self.record_reply(None, None, rtt);
@@ -385,6 +396,13 @@ impl HopStats {
             p99: at(0.99),
             max: rtts[rtts.len() - 1],
         })
+    }
+
+    /// What a NAT did to the probe the primary responder's latest error quoted.
+    pub fn nat(&self) -> Option<Nat> {
+        self.addr
+            .and_then(|addr| self.responders.get(&addr))
+            .and_then(|r| r.nat)
     }
 
     /// Interfaces the primary responder's latest reply named.

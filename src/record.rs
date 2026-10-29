@@ -16,7 +16,7 @@ use crate::asn::AsInfo;
 use crate::geo::GeoFix;
 use crate::icmp_ext::{Interface, MplsLabel};
 use crate::privacy::{self, StandIns};
-use crate::probe::{IcmpResponseType, ProbeResponse, MAX_FLOWS};
+use crate::probe::{IcmpResponseType, Nat, ProbeResponse, MAX_FLOWS};
 use crate::session::MtrSession;
 use crate::Result;
 use anyhow::{bail, Context};
@@ -96,6 +96,8 @@ pub enum Event {
         mpls: Vec<MplsLabel>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         interfaces: Vec<Interface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nat: Option<Nat>,
     },
     Timeout {
         hop: u8,
@@ -211,6 +213,17 @@ impl Recorder {
         }
     }
 
+    /// `nat` as the log shows it: the address a NAT gives probes is the network's
+    /// own, so with hidden hops it is hidden too.
+    fn show_nat(&self, nat: Nat) -> Nat {
+        match nat {
+            Nat::Source(addr) if self.privacy_hops > 0 => {
+                Nat::Source(self.state.lock().unwrap().stand_ins.get(addr))
+            }
+            nat => nat,
+        }
+    }
+
     /// True for an address that was hidden somewhere: its lookups stay out.
     fn hidden(&self, addr: IpAddr) -> bool {
         let state = self.state.lock().unwrap();
@@ -254,6 +267,7 @@ impl Recorder {
                 true => Vec::new(),
                 false => response.interfaces.clone(),
             },
+            nat: response.nat.map(|nat| self.show_nat(nat)),
         });
     }
 
@@ -432,6 +446,7 @@ mod tests {
             reply_ttl: Some(62),
             mpls: Vec::new(),
             interfaces: Vec::new(),
+            nat: None,
         }
     }
 
@@ -457,6 +472,7 @@ mod tests {
                 reply_ttl: Some(61),
                 mpls: Vec::new(),
                 interfaces: Vec::new(),
+                nat: None,
             },
         };
         let text = serde_json::to_string(&line).unwrap();

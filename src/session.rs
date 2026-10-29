@@ -4,8 +4,8 @@ use crate::geo::{self, GeoFix, GeoSource, Inflation, Origin};
 use crate::icmp_ext::Extensions;
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
-use crate::privacy::StandIns;
-use crate::probe::{self, IcmpResponseType, ProbeResponse, Prober};
+use crate::privacy::{self, StandIns};
+use crate::probe::{self, IcmpResponseType, Nat, ProbeResponse, Prober};
 use crate::record::{self, Event, Recorder};
 use crate::simulate::{self, SimProber};
 use crate::{tracer, Args, HopStats, Result};
@@ -155,18 +155,40 @@ impl MtrSession {
         u8::try_from(self.num_hosts).unwrap_or(u8::MAX)
     }
 
-    /// Lines for under `hop`: where the path MTU drops, how many branches it has.
+    /// Lines for under `hop`: a NAT before it, where the path MTU drops past it,
+    /// how many branches it has.
     pub fn notes_after(&self, hop: u8) -> Vec<String> {
-        let mut notes = match &self.pmtu {
-            Some(pmtu) => pmtu.notes_after(hop),
-            None => Vec::new(),
-        };
+        let mut notes: Vec<String> = self.nat_note(hop).into_iter().collect();
+        if let Some(pmtu) = &self.pmtu {
+            notes.extend(pmtu.notes_after(hop));
+        }
         notes.extend(
             self.mda
                 .as_ref()
                 .and_then(|mda| mda.note(hop, self.last_ttl())),
         );
         notes
+    }
+
+    /// Where the quotes start to show a NAT, or another one than before: under
+    /// the first hop past it that answered with an error.
+    fn nat_note(&self, hop: u8) -> Option<String> {
+        let index = usize::from(hop).checked_sub(1)?;
+        let nat = self.hops.get(index)?.nat()?;
+        let before = self.hops[..index].iter().rev().find_map(HopStats::nat);
+        if before == Some(nat) {
+            return None;
+        }
+        Some(match nat {
+            Nat::Source(addr) => format!(
+                "NAT before this hop: probes reach it from {}",
+                privacy::show(addr)
+            ),
+            Nat::Checksum => {
+                "NAT before this hop: it puts the probes' identifier back, not their checksum"
+                    .to_string()
+            }
+        })
     }
 
     pub fn is_simulated(&self) -> bool {
@@ -387,6 +409,16 @@ impl MtrSession {
                 });
             }
         }
+        // The address a NAT gives probes is the hidden network's own.
+        let responders = self
+            .hops
+            .iter_mut()
+            .flat_map(|hop| hop.responders.values_mut());
+        for nat in responders.filter_map(|responder| responder.nat.as_mut()) {
+            if let Nat::Source(addr) = nat {
+                *addr = stand_ins.get(*addr);
+            }
+        }
     }
 
     /// Hops worth showing: up to the end of the path once it is known, otherwise
@@ -461,6 +493,10 @@ impl MtrSession {
             interfaces: response.interfaces.clone(),
         };
         self.hops[index].record_reply_details(addr, response.reply_ttl, ext);
+        // An echo reply quotes nothing, so it shows no NAT either way.
+        if response.icmp_type != IcmpResponseType::EchoReply {
+            self.hops[index].set_nat(addr, response.nat);
+        }
         if self.is_hidden(index + 1) {
             return true;
         }
@@ -672,6 +708,7 @@ impl MtrSession {
                 reply_ttl,
                 mpls,
                 interfaces,
+                nat,
             } => {
                 let Some(index) = index(hop) else { return };
                 // A negative or absurd RTT becomes 0
@@ -690,6 +727,7 @@ impl MtrSession {
                     reply_ttl,
                     mpls,
                     interfaces,
+                    nat,
                 });
             }
             Event::Timeout { hop, probe } => {
@@ -860,6 +898,7 @@ mod tests {
             reply_ttl: None,
             mpls: Vec::new(),
             interfaces: Vec::new(),
+            nat: None,
         }
     }
 
@@ -885,6 +924,46 @@ mod tests {
             session.apply_response(&response(1, IcmpResponseType::TimeExceeded, [10, 0, 0, 1]));
             assert_eq!(session.silence(), None, "{cli:?}: a hop answered");
         }
+    }
+
+    #[tokio::test]
+    async fn a_note_marks_where_quotes_start_to_show_a_nat() {
+        let mut session = session_for(&["-n", "198.51.100.200"]).await;
+        let cgn = IpAddr::from([100, 64, 0, 9]);
+        let public = IpAddr::from([203, 0, 113, 9]);
+        let quoting = |hop, nat, from| ProbeResponse {
+            nat,
+            ..response(hop, IcmpResponseType::TimeExceeded, from)
+        };
+        session.apply_response(&quoting(0, None, [192, 168, 1, 1]));
+        session.apply_response(&quoting(1, Some(Nat::Source(cgn)), [100, 64, 0, 1]));
+        session.apply_response(&quoting(3, Some(Nat::Source(cgn)), [198, 51, 100, 1]));
+        session.apply_response(&quoting(4, Some(Nat::Source(public)), [198, 51, 100, 5]));
+        let target = [198, 51, 100, 200];
+        session.apply_response(&response(5, IcmpResponseType::EchoReply, target));
+        assert!(session.notes_after(1).is_empty());
+        assert_eq!(
+            session.notes_after(2),
+            ["NAT before this hop: probes reach it from 100.64.0.9"]
+        );
+        assert!(session.notes_after(4).is_empty(), "the same NAT");
+        assert_eq!(
+            session.notes_after(5),
+            ["NAT before this hop: probes reach it from 203.0.113.9"],
+            "a second NAT"
+        );
+        assert!(
+            session.notes_after(6).is_empty(),
+            "an echo reply quotes nothing"
+        );
+
+        session.args.privacy_hops = 1;
+        session.redact();
+        assert_eq!(
+            session.notes_after(2),
+            ["NAT before this hop: probes reach it from (hidden)"],
+            "the hidden network's public address"
+        );
     }
 
     #[tokio::test]

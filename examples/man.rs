@@ -154,6 +154,17 @@ balanced hop gives its branches; a report without -c runs until the search is do
 with what it found. Where branches cross between hops, one address leading to several and \
 another reached from several, a branch may have been missed: MDA-Lite assumes they don't cross.";
 
+const NAT: &str = "A router that drops a probe quotes the probe's IP header and first eight \
+bytes in its ICMP error. A NAT that changed the probe ought to translate that quote back too \
+(RFC 5508), and Linux's NAT does, address, port and checksum alike, so most home routers stay \
+out of sight. Some NATs leave the quote as the probe was past them. Then it shows the probe \
+leaving from the NAT's address, or, for an IPv4 echo request, with the checksum the NAT gave \
+it when it changed the identifier, which Dublin traceroute also checks. mtr-ng notes NAT before \
+this hop under the first hop past each such NAT. A UDP probe's checksum is its sequence \
+number, so past such a NAT mtr-ng takes the NAT's change off the checksum again, using the \
+address and port in the quote. On Linux without privileges, ping sockets hand back the probe as \
+it was sent instead of the quote, so no NAT shows.";
+
 const GEOLOCATION: [&str; 4] = [
     "With -g, the geo, dist or stretch columns, or the map (m), mtr-ng places hops with a local \
      database in MaxMind's format: --geoip-mmdb, else the newest .mmdb in \
@@ -230,6 +241,7 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
     }
 
     writeln!(out, ".SH LOAD BALANCING\n{}", roff(LOAD_BALANCING))?;
+    writeln!(out, ".SH NAT\n{}", roff(NAT))?;
     writeln!(out, ".SH GEOLOCATION\n{}", roff(GEOLOCATION[0]))?;
     writeln!(out, ".PP\n.nf\n{}\n.fi", roff(geo::DOWNLOAD))?;
     for paragraph in &GEOLOCATION[1..] {

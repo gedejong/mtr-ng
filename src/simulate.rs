@@ -4,7 +4,7 @@
 
 use crate::geo::{GeoFix, GeoSource};
 use crate::icmp_ext::{Interface, MplsLabel, Role};
-use crate::probe::{IcmpResponseType, Prober, Reply};
+use crate::probe::{IcmpResponseType, Nat, Prober, Reply};
 use std::{
     io,
     net::IpAddr,
@@ -31,6 +31,10 @@ struct SimHop {
     /// Routers more on the way back than on the way there
     detour: u8,
 }
+
+/// The address the home router's NAT gives probes. It leaves the routers' quotes
+/// of them that way, which shows it; most NATs change the quotes back.
+const NAT_SOURCE: [u8; 4] = [198, 51, 100, 77];
 
 /// TTLs past the end reach the target. Addresses come from the documentation
 /// ranges (RFC 5737) and names end in .example, so none of it is a real network.
@@ -270,6 +274,9 @@ impl Prober for SimProber {
                 1.0 + 0.15 * rand::random::<f64>()
             };
             let rtt = Duration::from_secs_f64(rtt_ms * factor / 1000.0);
+            // Routers past the home router quote the probe from its NAT.
+            let quoted = matches!(kind, IcmpResponseType::TimeExceeded);
+            let nat = (quoted && ttl > 1).then_some(Nat::Source(IpAddr::from(NAT_SOURCE)));
             let reply = Reply {
                 kind,
                 source,
@@ -278,6 +285,7 @@ impl Prober for SimProber {
                 ttl: Some(reply_ttl),
                 mpls: mpls.into_iter().collect(),
                 interfaces,
+                nat,
             };
             let tx = self.tx.clone();
             tokio::spawn(async move {
