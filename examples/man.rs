@@ -87,8 +87,10 @@ privileges through a ping socket when the user's group is in net.ipv4.ping_group
 every group is on systemd 243 and newer, but a ping socket shows no MPLS labels. UDP probes and \
 MPLS labels need root or the CAP_NET_RAW capability \
 (setcap cap_net_raw+ep \"$(command -v mtr-ng)\"), which the Debian package grants on \
-install. mtr-ng opens its raw sockets first and then gives up these privileges before it \
-resolves the target or reads a packet; root keeps only the right to read files. On Windows \
+install. FreeBSD has no unprivileged ICMP socket, so mtr-ng needs root there: run it with \
+doas or sudo, or install it setuid root. mtr-ng opens its raw sockets first and then gives up \
+these privileges before it resolves the target or reads a packet: a setuid install becomes the \
+user who ran it, and root keeps only the right to read files. On Windows \
 mtr-ng needs no administrator either: it sends echo requests through Windows' ICMP API, which \
 builds them itself, so there are no flows, UDP probes, MPLS labels or --pmtu. TCP probes are not \
 implemented yet.";

@@ -53,6 +53,7 @@ cargo install --locked --git https://github.com/gedejong/mtr-ng
 
 - **macOS**: unprivileged ICMP datagram sockets; no sudo, no setuid.
 - **Linux**: ICMP through a ping socket when the user's group is in `net.ipv4.ping_group_range` (systemd 243 and newer allow every group), without MPLS labels. Raw sockets, needed otherwise and for `-P udp`, take root or the `CAP_NET_RAW` file capability: `sudo setcap cap_net_raw+ep /usr/bin/mtr-ng` (or `scripts/setup-capabilities.sh`). A capability is narrower than setuid root. Reinstalling the binary drops it.
+- **FreeBSD**: no unprivileged ICMP, so root: `doas` (with a `doas.conf` rule) or `sudo`, or a setuid-root install, which mtr-ng gives up right after opening its raw sockets. Type-checked in CI, not yet run on FreeBSD.
 - **Windows**: the ICMP API (`IcmpSendEcho2Ex`, `Icmp6SendEcho2`), no administrator. ICMP only: no flows, UDP probes, MPLS labels or `--pmtu`.
 
 The `.deb` sets the capability in its post-install script (`packaging/deb/postinst`), as Debian's `mtr` does for `mtr-packet`, and recommends `libcap2-bin` for `setcap`; without it, the script says how to grant the capability and the install still succeeds. Other Linux packages can do the same. A setuid-root install works too.

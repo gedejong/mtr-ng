@@ -102,6 +102,7 @@ Homebrew and the `.deb` install completions for bash, zsh and fish, and the rele
   The capability is narrower than sudo (raw sockets only, not full root). Copying a new binary over the old one drops it, so set it again afterwards. The `.deb` sets it on install, when `setcap` (package `libcap2-bin`) is there.
 
   However it gets them, mtr-ng opens its raw sockets first and then gives the privileges up before it resolves the target or reads a packet, as mtr's `mtr-packet` does: a capability-holding user ends up with no capabilities, and root keeps only the right to read files.
+- **FreeBSD**: has no unprivileged ICMP socket, so mtr-ng needs root: run it with `doas mtr-ng example.com` (from `security/doas`, with a rule in `/usr/local/etc/doas.conf` such as `permit :wheel cmd /usr/local/bin/mtr-ng`) or `sudo`. Or install it setuid root (`chown root:wheel` and `chmod u+s` on the binary): it opens its raw sockets and then becomes the user who ran it, before it does anything else. FreeBSD builds are type-checked in CI but have not been run yet.
 - **Windows**: runs as a normal user. mtr-ng sends its echo requests through Windows' ICMP API, as `tracert` does, and that API builds the packets itself: on Windows there are no flows (`--flows`), UDP probes, MPLS labels or `--pmtu`. There is no release download yet; build it with `cargo build --release`.
 
 mtr-ng never falls back to fake data: if it can't probe, it exits with an error. Use `--simulate` for a demo without network access.
