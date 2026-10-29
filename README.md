@@ -137,6 +137,7 @@ mtr-ng google.com
 # s, v, c     RTT scale, sparkline/heatmap, colour mode
 # f           Hop table or flow matrix
 # m           Hop table or map
+# g           Hop table or route graph (branches side by side)
 # e           Show or hide MPLS labels
 # ↑ ↓ PgUp PgDn Home End  Select and scroll hops
 # Enter       Details of the selected hop (↑ ↓ for the others)
@@ -171,8 +172,9 @@ mtr-ng -r -c 40 --flows 8 google.com
 # Find every load-balanced branch, then follow one flow per branch
 mtr-ng -r -P udp --flows auto google.com
 
-# The routes as a picture
+# The routes as a picture, or as a Mermaid flowchart for a GitHub issue
 mtr-ng -c 40 --flows 8 --dot google.com | dot -Tsvg > routes.svg
+mtr-ng -c 40 --flows 8 --mermaid google.com
 
 # MPLS labels under their hop
 mtr-ng -r -e google.com

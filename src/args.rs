@@ -155,9 +155,14 @@ pub struct Args {
     #[arg(long, conflicts_with_all = ["json", "csv"])]
     pub dot: bool,
 
+    /// Print the routes as a Mermaid flowchart, which Markdown on GitHub, GitLab and
+    /// many wikis draws (implies --report). Most useful with --flows
+    #[arg(long, conflicts_with_all = ["json", "csv", "dot"])]
+    pub mermaid: bool,
+
     /// Print the located hops and the path between them as GeoJSON, for map tools
     /// (implies --report; needs a geolocation database, see --geo)
-    #[arg(long, conflicts_with_all = ["json", "csv", "dot"])]
+    #[arg(long, conflicts_with_all = ["json", "csv", "dot", "mermaid"])]
     pub geojson: bool,
 
     /// Show IP addresses instead of hostnames

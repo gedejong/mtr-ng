@@ -10,6 +10,7 @@ use std::{
     fmt::Write,
     net::IpAddr,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Letters for the addresses that answered at a hop, most replies first.
 pub fn letters(hop: &HopStats) -> Vec<(char, IpAddr)> {
@@ -89,6 +90,22 @@ pub fn matrix_lines(hops: &[HopStats], flows: u16, numeric: bool) -> Vec<String>
 /// Flow numbers, one per two-character column (`0 1 2 ... 9 0 1`).
 pub fn flow_header(flows: u16) -> String {
     (0..flows).map(|flow| format!("{} ", flow % 10)).collect()
+}
+
+/// Whether some TTL has more than one route through it.
+pub fn branched(hops: &[HopStats]) -> bool {
+    let nodes: BTreeSet<Node> = edges(hops).into_iter().map(|e| e.to).collect();
+    nodes
+        .iter()
+        .zip(nodes.iter().skip(1))
+        .any(|(a, b)| a.ttl == b.ttl)
+}
+
+/// Name of the responder `node`, from the hop it answered at.
+pub fn node_name(hops: &[HopStats], node: Node, numeric: bool) -> String {
+    hops.iter()
+        .find(|hop| hop.hop == node.ttl)
+        .map_or_else(|| show(node.addr), |hop| name(hop, node.addr, numeric))
 }
 
 /// Name of `addr` as answered at `hop`, or the address itself.
@@ -220,6 +237,219 @@ pub fn to_dot(hops: &[HopStats], source: &str, numeric: bool) -> String {
     dot
 }
 
+/// Mermaid source for the route graph, for Markdown that renders it (GitHub,
+/// GitLab, many wikis). Labelled and dashed as `to_dot` does.
+pub fn to_mermaid(hops: &[HopStats], source: &str, numeric: bool) -> String {
+    // Mermaid wants plain identifiers and its own escape for quotes
+    let quote = |text: &str| format!("\"{}\"", text.replace('"', "#quot;"));
+    let edges = edges(hops);
+    let nodes: BTreeSet<Node> = edges.iter().map(|e| e.to).collect();
+    let ids: BTreeMap<Node, String> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &node)| (node, format!("n{}_{i}", node.ttl)))
+        .collect();
+    let all_flows: BTreeSet<u16> = edges.iter().flat_map(|e| e.flows.iter().copied()).collect();
+
+    let mut out = String::from("flowchart TD\n");
+    let _ = writeln!(out, "  source[{}]", quote(source));
+    for node in &nodes {
+        let hop = hops.iter().find(|hop| hop.hop == node.ttl);
+        let addr = show(node.addr);
+        let name = hop.map_or_else(|| addr.clone(), |hop| name(hop, node.addr, numeric));
+        let label = match name == addr {
+            true => format!("{}. {addr}", node.ttl),
+            false => format!("{}. {name}<br/>{addr}", node.ttl),
+        };
+        let _ = writeln!(out, "  {}[{}]", ids[node], quote(&label));
+    }
+    for edge in &edges {
+        let from = edge.from.map_or("source", |node| &ids[&node]);
+        let mut label = Vec::new();
+        if edge.flows != all_flows {
+            label.push(format!("flows {}", ranges(&edge.flows)));
+        }
+        if edge.gap() > 0 {
+            label.push(format!("+{} silent", edge.gap()));
+        }
+        let arrow = match edge.gap() {
+            0 => "-->",
+            _ => "-.->",
+        };
+        let label = match label.is_empty() {
+            true => String::new(),
+            false => format!("|{}|", quote(&label.join("<br/>"))),
+        };
+        let _ = writeln!(out, "  {from} {arrow}{label} {}", ids[&edge.to]);
+    }
+    out
+}
+
+/// One line of a drawn route graph, and the TTL whose responders it shows; `None`
+/// for the lines that join them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawnLine {
+    pub ttl: Option<u8>,
+    pub text: String,
+}
+
+/// Directions a box-drawing cell connects to.
+const UP: u8 = 1;
+const DOWN: u8 = 2;
+const RIGHT: u8 = 4;
+const LEFT: u8 = 8;
+
+#[derive(Clone, Copy)]
+enum Drawn {
+    Blank,
+    Text(char),
+    /// Directions, and whether only edges over silent TTLs pass
+    Lines(u8, bool),
+}
+
+impl Drawn {
+    fn add(&mut self, directions: u8, dashed: bool) {
+        *self = match *self {
+            Drawn::Blank => Drawn::Lines(directions, dashed),
+            Drawn::Lines(had, was_dashed) => Drawn::Lines(had | directions, was_dashed && dashed),
+            text => text,
+        };
+    }
+
+    fn symbol(self) -> char {
+        let Drawn::Lines(d, dashed) = self else {
+            return match self {
+                Drawn::Text(c) => c,
+                _ => ' ',
+            };
+        };
+        match (d & UP != 0, d & DOWN != 0, d & RIGHT != 0, d & LEFT != 0) {
+            (true, true, false, false) if dashed => '┆',
+            (_, _, false, false) => '│',
+            (false, false, _, _) => '─',
+            (false, true, true, false) => '┌',
+            (false, true, false, true) => '┐',
+            (true, false, true, false) => '└',
+            (true, false, false, true) => '┘',
+            (true, true, true, false) => '├',
+            (true, true, false, true) => '┤',
+            (false, true, true, true) => '┬',
+            (true, false, true, true) => '┴',
+            (true, true, true, true) => '┼',
+        }
+    }
+}
+
+/// The route graph in box-drawing characters, top to bottom: a line per TTL with
+/// its responders side by side, named by `name`, and between them lines for the
+/// edges that join them. Edges over silent TTLs are dashed. Each responder goes
+/// under the responders it follows, as far as it can; the lanes share `width`
+/// columns, and names longer than their lane are cut. Where branches cross, one
+/// line can stand for several edges.
+pub fn draw(hops: &[HopStats], name: &dyn Fn(Node) -> String, width: usize) -> Vec<DrawnLine> {
+    let edges = edges(hops);
+    let Some(last) = edges.iter().map(|e| e.to.ttl).max() else {
+        return Vec::new();
+    };
+    // Lanes, TTL by TTL: a responder goes to the mean lane of those it follows
+    let mut lane: BTreeMap<Node, usize> = BTreeMap::new();
+    for ttl in 1..=last {
+        let Some(hop) = hops.iter().find(|hop| hop.hop == ttl) else {
+            continue;
+        };
+        let order: Vec<IpAddr> = letters(hop).into_iter().map(|(_, addr)| addr).collect();
+        let mut nodes: Vec<(f64, usize, Node)> = edges
+            .iter()
+            .filter(|e| e.to.ttl == ttl)
+            .map(|e| e.to)
+            .collect::<BTreeSet<Node>>()
+            .into_iter()
+            .map(|node| {
+                let parents: Vec<usize> = edges
+                    .iter()
+                    .filter(|e| e.to == node)
+                    .filter_map(|e| lane.get(&e.from?).copied())
+                    .collect();
+                let mean = match parents.len() {
+                    0 => 0.0,
+                    n => parents.iter().sum::<usize>() as f64 / n as f64,
+                };
+                let rank = order
+                    .iter()
+                    .position(|&a| a == node.addr)
+                    .unwrap_or(usize::MAX);
+                (mean, rank, node)
+            })
+            .collect();
+        nodes.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        for (i, (_, _, node)) in nodes.into_iter().enumerate() {
+            lane.insert(node, i);
+        }
+    }
+    let lanes = lane.values().max().map_or(1, |&max| max + 1);
+    let names: BTreeMap<Node, String> = lane.keys().map(|&node| (node, name(node))).collect();
+    let longest = names.values().map(|n| n.width()).max().unwrap_or(0);
+    let margin = last.to_string().len() + 2;
+    let lane_width = (longest + 2)
+        .min(width.saturating_sub(margin) / lanes)
+        .max(4);
+    let x = |node: &Node| margin + lane[node] * lane_width;
+
+    // Line 2(t-1) shows TTL t, line 2(t-1)+1 joins it to what follows
+    let width = margin + lanes * lane_width;
+    let mut grid = vec![vec![Drawn::Blank; width]; usize::from(last) * 2 - 1];
+    let row = |ttl: u8| usize::from(ttl - 1) * 2;
+    for ttl in 1..=last {
+        for (i, c) in format!("{ttl:>w$}", w = margin - 2).chars().enumerate() {
+            grid[row(ttl)][i] = Drawn::Text(c);
+        }
+    }
+    for (node, text) in &names {
+        let mut used = 0;
+        let chars = text.chars().take_while(|c| {
+            used += c.width().unwrap_or(0);
+            used < lane_width
+        });
+        for (i, c) in chars.enumerate() {
+            grid[row(node.ttl)][x(node) + i] = Drawn::Text(c);
+        }
+    }
+    for edge in &edges {
+        let Some(from) = edge.from else { continue };
+        let (x1, x2) = (x(&from), x(&edge.to));
+        let below = row(from.ttl) + 1;
+        let (toward, back) = match x2.cmp(&x1) {
+            std::cmp::Ordering::Greater => (RIGHT, LEFT),
+            std::cmp::Ordering::Less => (LEFT, RIGHT),
+            std::cmp::Ordering::Equal => (DOWN, UP),
+        };
+        if x1 == x2 {
+            grid[below][x1].add(UP | DOWN, false);
+        } else {
+            grid[below][x1].add(UP | toward, false);
+            for cell in &mut grid[below][x1.min(x2) + 1..x1.max(x2)] {
+                cell.add(LEFT | RIGHT, false);
+            }
+            grid[below][x2].add(DOWN | back, false);
+        }
+        for line in &mut grid[below + 1..row(edge.to.ttl)] {
+            line[x2].add(UP | DOWN, edge.gap() > 0);
+        }
+    }
+    grid.into_iter()
+        .enumerate()
+        .map(|(i, cells)| DrawnLine {
+            ttl: (i % 2 == 0).then(|| (i / 2 + 1) as u8),
+            text: cells
+                .into_iter()
+                .map(Drawn::symbol)
+                .collect::<String>()
+                .trim_end()
+                .to_string(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +547,56 @@ mod tests {
             "{named}"
         );
         assert!(!dot.lines().any(|l| l.ends_with('\n') || l.contains("\n\n")));
+    }
+
+    #[test]
+    fn the_route_graph_is_drawn_lane_by_lane() {
+        let hops = diamond();
+        let name = |node: Node| node.addr.to_string();
+        let lines = draw(&hops, &name, 30);
+        let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            text,
+            [
+                "1  10.0.1.1",
+                "   ├─────────┐",
+                "2  10.0.2.1  10.0.2.2",
+                "   │         │",
+                "3  10.0.3.1  10.0.3.2",
+                "   ├─────────┘",
+                "4  ┆",
+                "   ┆",
+                "5  10.0.5.1",
+            ]
+        );
+        let ttls: Vec<Option<u8>> = lines.iter().map(|l| l.ttl).collect();
+        assert_eq!(ttls[..3], [Some(1), None, Some(2)]);
+
+        let narrow = draw(&hops, &name, 15);
+        assert_eq!(narrow[2].text, "2  10.0. 10.0.", "names cut to their lane");
+        assert!(draw(&[], &name, 30).is_empty());
+    }
+
+    #[test]
+    fn mermaid_labels_partial_flows_and_dashes_gaps() {
+        let mermaid = to_mermaid(&diamond(), "say \"hi\"", true);
+        assert!(
+            mermaid.starts_with("flowchart TD\n  source[\"say #quot;hi#quot;\"]\n"),
+            "{mermaid}"
+        );
+        assert!(mermaid.contains("  n1_0[\"1. 10.0.1.1\"]"), "{mermaid}");
+        assert!(
+            mermaid.contains("  source --> n1_0\n"),
+            "every flow: {mermaid}"
+        );
+        assert!(
+            mermaid.contains("  n1_0 -->|\"flows 1, 3\"| n2_2\n"),
+            "{mermaid}"
+        );
+        assert!(
+            mermaid.contains("  n3_3 -.->|\"flows 0, 2<br/>+1 silent\"| n5_5\n"),
+            "{mermaid}"
+        );
     }
 
     #[test]

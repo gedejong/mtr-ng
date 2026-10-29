@@ -27,6 +27,8 @@ pub enum View {
     Flows,
     /// The located hops on a world map
     Map,
+    /// The route graph: responders TTL by TTL, joined where flows went
+    Routes,
 }
 
 /// The column chooser: every column, shown ones first in their current order.

@@ -210,6 +210,9 @@ fn host_label(hop: &HopStats, numeric: bool) -> String {
     }
 }
 
+/// Widest the report's route graph gets; names longer than their lane are cut.
+const ROUTES_WIDTH: usize = 120;
+
 /// A hop's stretch to two decimals, or null.
 fn json_stretch(assessment: Option<Assessment>) -> Value {
     json!(assessment
@@ -542,6 +545,10 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         print!("{}", topology::to_dot(hops, &source, args.numeric));
         return Ok(());
     }
+    if args.mermaid {
+        print!("{}", topology::to_mermaid(hops, &source, args.numeric));
+        return Ok(());
+    }
 
     println!("Start: {}", start.format("%Y-%m-%d %H:%M:%S UTC"));
     println!(
@@ -572,6 +579,14 @@ pub async fn run_report(mut session: MtrSession) -> Result<()> {
         println!();
         for line in topology::matrix_lines(hops, session.flows(), args.numeric) {
             println!("{line}");
+        }
+        if topology::branched(hops) {
+            println!();
+            println!("Routes  ┆ over hops that didn't answer");
+            let name = |node| topology::node_name(hops, node, args.numeric);
+            for line in topology::draw(hops, &name, ROUTES_WIDTH) {
+                println!("{}", line.text);
+            }
         }
     }
     if let Some(mda) = &session.mda {

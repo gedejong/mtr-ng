@@ -10,6 +10,7 @@ Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/
 - On the map, an arc that passes over hops not on the map says how many, as `+2` halfway along.
 - Shell completions for bash, zsh and fish, installed by Homebrew and the `.deb`, and in the release archives.
 - ICMPv6 sockets ask the kernel only for the message types a trace reads, so the receiving thread no longer wakes for every neighbour solicitation and router advertisement on the link.
+- `g` draws the routes the flows took, TTL by TTL, with the branches of each load balancer side by side and dashed lines over hops that didn't answer. The report draws it too, under the flow matrix, when the path branches. `--mermaid` prints the routes as a Mermaid flowchart, which Markdown on GitHub and GitLab draws.
 - `a` opens an About pane: what the running trace sends where (DNS to your resolver, AS lookups to Team Cymru, nothing for locations), and the data sources with their licences.
 
 ## 0.5.0 - 2026-10-29

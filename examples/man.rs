@@ -44,6 +44,10 @@ const EXAMPLES: &[(&str, &str)] = &[
         "Draw the routes with Graphviz.",
     ),
     (
+        "mtr-ng -c 40 --flows 8 --mermaid example.com",
+        "The routes as a Mermaid flowchart, for Markdown on GitHub or GitLab.",
+    ),
+    (
         "mtr-ng -r -e example.com",
         "Show MPLS labels under their hop.",
     ),

@@ -85,6 +85,10 @@ pub fn render(f: &mut Frame, session: &MtrSession, ui: &mut UiState) {
             render_flows(f, table, session, hops, ui);
             render_flow_legend(f, scale_area, session);
         }
+        View::Routes => {
+            render_routes(f, table, session, hops, ui);
+            render_routes_legend(f, scale_area, session);
+        }
         View::Map => {
             let below = Rect {
                 height: table.height + scale_area.height,
@@ -572,6 +576,63 @@ fn legend_spans(hop: &HopStats, names: bool, colors: ColorSupport) -> Vec<Span<'
         }));
     }
     spans
+}
+
+/// The route graph, scrolled to keep the selected hop in view.
+fn render_routes(
+    f: &mut Frame,
+    area: Rect,
+    session: &MtrSession,
+    hops: &[HopStats],
+    ui: &mut UiState,
+) {
+    let shown: Vec<HopStats> = hops.iter().filter(|hop| hop.sent > 0).cloned().collect();
+    track_rows(ui, shown.iter().map(|hop| hop.hop).collect());
+    // No table clamps the selection here
+    if ui.table.selected().is_some_and(|row| row >= shown.len()) {
+        ui.table.select(shown.len().checked_sub(1));
+    }
+    let names = shows_names(session, ui);
+    let name = |node| topology::node_name(&shown, node, !names);
+    let lines = topology::draw(&shown, &name, usize::from(area.width));
+    if lines.is_empty() {
+        let text = "No route yet: nothing has answered.";
+        return f.render_widget(Paragraph::new(text), area);
+    }
+    let selected = ui.selected_hop();
+    let at = lines
+        .iter()
+        .position(|l| l.ttl.is_some() && l.ttl == selected);
+    let height = usize::from(area.height);
+    let top = at.map_or(0, |at| {
+        (at + 1)
+            .saturating_sub(height)
+            .max(at.saturating_sub(height / 2))
+    });
+    let top = top.min(lines.len().saturating_sub(height));
+    let text: Vec<Line> = lines
+        .into_iter()
+        .map(|line| match line.ttl.is_some() && line.ttl == selected {
+            true => Line::styled(line.text, Style::default().add_modifier(Modifier::REVERSED)),
+            false => Line::from(line.text),
+        })
+        .collect();
+    let scroll = u16::try_from(top).unwrap_or(u16::MAX);
+    f.render_widget(Paragraph::new(text).scroll((scroll, 0)), area);
+}
+
+fn render_routes_legend(f: &mut Frame, area: Rect, session: &MtrSession) {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut lines = vec![Line::styled(
+        "Each flow's route, TTL by TTL · ┆ over hops that didn't answer · ↑↓ select, Enter details",
+        dim,
+    )];
+    if session.flows() <= 1 {
+        lines.push(Line::from(
+            "One flow follows one path: start with --flows auto to find load-balanced ones.",
+        ));
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn render_flow_legend(f: &mut Frame, area: Rect, session: &MtrSession) {
@@ -1315,7 +1376,7 @@ mod tests {
             Mode::Detail,
             Mode::About,
         ];
-        let views = [View::Hops, View::Flows, View::Map];
+        let views = [View::Hops, View::Flows, View::Map, View::Routes];
         for (mode, view) in modes.into_iter().flat_map(|m| views.map(|v| (m, v))) {
             for (w, h) in [(1, 1), (39, 5), (40, 6), (50, 10), (80, 24), (200, 60)] {
                 let mut ui = UiState::new(&s.args);
@@ -1415,6 +1476,23 @@ mod tests {
         ui.mode = Mode::About;
         let text = screen(&s, &mut ui, 80, 30).join("\n");
         assert!(text.contains("Hops 1-2 are never looked up"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_route_graph_puts_branches_side_by_side() {
+        let s = diamond().await;
+        let mut ui = UiState::new(&s.args);
+        ui.view = View::Routes;
+        let lines = screen(&s, &mut ui, 80, 12);
+        // Only flow 0 went to hops 1 and 3, so flow 1's router hangs from nothing
+        assert!(lines[1].starts_with("1  192.168.1.1"), "{lines:#?}");
+        assert!(lines[2].starts_with("   │"), "{lines:#?}");
+        assert!(
+            lines[3].starts_with("2  203.0.113.254") && lines[3].contains(" 203.0.113.253"),
+            "{lines:#?}"
+        );
+        assert!(lines[5].starts_with("3  198.51.100.7"), "{lines:#?}");
+        assert_eq!(ui.row_hops, [1, 2, 3], "Enter and the arrows work here too");
     }
 
     #[tokio::test]
