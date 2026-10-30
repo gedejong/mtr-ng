@@ -2,22 +2,39 @@
 
 Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/mtr-ng/releases).
 
-## Unreleased
+## 0.6.0 - 2026-10-30
 
-- AS lookups (`-z`) also find the prefix each router's address is announced in and the AS's name. The detail pane (Enter) shows both, `--fields ...,as-name,prefix` adds them as columns, and the JSON and CSV carry them. A name is asked for once per AS.
-- `--privacy-hops N` hides the first N hops, usually your own network and your provider's first routers, so a screenshot or a pasted report doesn't give them away: their addresses, names, ASes and locations, and the local host name, are left out of the TUI and every report format, and they are never looked up. Load-balanced branches among them stay apart.
-- The `stretch` column (`--fields ...,stretch`) shows how much longer a hop's best RTT is than light in fibre would take for its distance, counting from the origin hop so your own line doesn't count: 1.0 is a straight fibre, and a hop well above its neighbours sits behind a detour. The report and the map's key also say how much longer the path through the located hops is than the great circle. JSON, CSV and GeoJSON carry both.
-- On the map, an arc that passes over hops not on the map says how many, as `+2` halfway along.
-- Shell completions for bash, zsh and fish, installed by Homebrew and the `.deb`, and in the release archives.
-- ICMPv6 sockets ask the kernel only for the message types a trace reads, so the receiving thread no longer wakes for every neighbour solicitation and router advertisement on the link.
-- `g` draws the routes the flows took, TTL by TTL, with the branches of each load balancer side by side and dashed lines over hops that didn't answer. The report draws it too, under the flow matrix, when the path branches. `--mermaid` prints the routes as a Mermaid flowchart, which Markdown on GitHub and GitLab draws.
-- `-e` also shows the interface a router says a probe came in on (RFC 5837): its name, address, ifIndex and MTU, which tells apart the interfaces of one router, and names an unnumbered one. The detail pane, JSON and `--record` carry it too. Linux routers send it from late 2025 when asked to (`net.ipv4.icmp_errors_extension_mask`), and the simulated path has one.
+Traces to keep and share: `--metrics` serves one to Prometheus, `--record` saves it and `--replay` plays it back, and `--privacy-hops` hides your own network first. `g` draws the routes the flows take, and mtr-ng shows the NATs on the path, the interfaces routers name, and with `--ipmap` where RIPE Atlas measured a router to be.
+
+### Keeping a trace
+
 - `--metrics [ADDR:]PORT` serves the trace for Prometheus at `/metrics`: per hop, counters of probes sent, received and lost, the loss ratio, an RTT summary with quantiles over the last 600 probes, the last, best and worst RTT, and which addresses answered with their names and ASes. OpenMetrics goes to scrapers that ask for it, the Prometheus text format to the rest. It runs alongside the TUI, or with `-r` and no `-c` until stopped. A bare port listens on 127.0.0.1 only.
 - `--record PATH` keeps a log of the trace, one JSON object per line: each probe sent, each reply or timeout, and each name and AS that arrived. `--replay PATH` plays it back in the TUI, at the recorded pace or `--replay-speed` times faster, or with `-r` and the other report formats prints its report at once, without sending anything. Hops hidden by `--privacy-hops` are recorded hidden.
 - A report stopped with Ctrl-C, or SIGTERM, prints what it has so far instead of nothing.
-- A NAT whose changes show in the routers' ICMP errors gets a note under the first hop past it: `NAT before this hop: probes reach it from 203.0.113.9`. The hop details have a NAT section, and the JSON a `nat` object. UDP probes past such a NAT used to go unanswered, since their checksum, which the NAT changes, is how mtr-ng tells them apart; now its change is taken off again. Linux's NAT, in most home routers, translates the errors back and can't be seen this way.
-- `--ipmap` also asks RIPE IPmap where each public address that answers is. IPmap places routers by measuring them from nearby RIPE Atlas probes, so it finds the routers a database puts at their owner's head office. Only answers backed by measurements count (a score of 30 or more), anycast addresses get none, and a city from the router's name still goes first. It works without a database, and is off unless asked for, since it sends the addresses to the RIPE NCC.
+
+### Privacy
+
+- `--privacy-hops N` hides the first N hops, usually your own network and your provider's first routers, so a screenshot or a pasted report doesn't give them away: their addresses, names, ASes and locations, and the local host name, are left out of the TUI and every report format, and they are never looked up. Load-balanced branches among them stay apart.
 - `a` opens an About pane: what the running trace sends where (DNS to your resolver, AS lookups to Team Cymru, addresses to RIPE IPmap with `--ipmap`), and the data sources with their licences.
+
+### Routes
+
+- `g` draws the routes the flows took, TTL by TTL, with the branches of each load balancer side by side and dashed lines over hops that didn't answer. The report draws it too, under the flow matrix, when the path branches. `--mermaid` prints the routes as a Mermaid flowchart, which Markdown on GitHub and GitLab draws.
+- `-e` also shows the interface a router says a probe came in on (RFC 5837): its name, address, ifIndex and MTU, which tells apart the interfaces of one router, and names an unnumbered one. The detail pane, JSON and `--record` carry it too. Linux routers send it from late 2025 when asked to (`net.ipv4.icmp_errors_extension_mask`), and the simulated path has one.
+- A NAT whose changes show in the routers' ICMP errors gets a note under the first hop past it: `NAT before this hop: probes reach it from 203.0.113.9`. The hop details have a NAT section, and the JSON a `nat` object. UDP probes past such a NAT used to go unanswered, since their checksum, which the NAT changes, is how mtr-ng tells them apart; now its change is taken off again. Linux's NAT, in most home routers, translates the errors back and can't be seen this way.
+- AS lookups (`-z`) also find the prefix each router's address is announced in and the AS's name. The detail pane (Enter) shows both, `--fields ...,as-name,prefix` adds them as columns, and the JSON and CSV carry them. A name is asked for once per AS.
+
+### Locations
+
+- `--ipmap` also asks RIPE IPmap where each public address that answers is. IPmap places routers by measuring them from nearby RIPE Atlas probes, so it finds the routers a database puts at their owner's head office. Only answers backed by measurements count (a score of 30 or more), anycast addresses get none, and a city from the router's name still goes first. It works without a database, and is off unless asked for, since it sends the addresses to the RIPE NCC.
+- The `stretch` column (`--fields ...,stretch`) shows how much longer a hop's best RTT is than light in fibre would take for its distance, counting from the origin hop so your own line doesn't count: 1.0 is a straight fibre, and a hop well above its neighbours sits behind a detour. The report and the map's key also say how much longer the path through the located hops is than the great circle. JSON, CSV and GeoJSON carry both.
+- On the map, an arc that passes over hops not on the map says how many, as `+2` halfway along.
+
+### Smaller things
+
+- Shell completions for bash, zsh and fish, installed by Homebrew and the `.deb`, and in the release archives.
+- ICMPv6 sockets ask the kernel only for the message types a trace reads, so the receiving thread no longer wakes for every neighbour solicitation and router advertisement on the link.
+- The README and man page say how to run mtr-ng on FreeBSD with `doas`, or installed setuid root.
 
 ## 0.5.0 - 2026-10-29
 
