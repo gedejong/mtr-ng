@@ -607,11 +607,14 @@ mod tests {
         assert_eq!(parse(&["--psize", "1500"]).unwrap().psize, 1500);
         assert!(parse(&["-s", "27"]).is_err());
         assert!(parse(&["-s", "1501"]).is_err());
-        assert!(parse(&["--pmtu", "-s", "576"]).unwrap().validate().is_ok());
-        let error = parse(&["--pmtu", "-s", "577"])
-            .unwrap()
-            .validate()
-            .unwrap_err();
+        // --simulate, since Windows refuses --pmtu for real probes
+        let pmtu = |size| {
+            parse(&["--simulate", "--pmtu", "-s", size])
+                .unwrap()
+                .validate()
+        };
+        assert!(pmtu("576").is_ok());
+        let error = pmtu("577").unwrap_err();
         assert!(error.contains("at most 576"), "{error}");
     }
 
