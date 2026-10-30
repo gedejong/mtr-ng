@@ -34,6 +34,12 @@ cargo build
 
 It simulates unless `MTR_REAL=1`; `MTR_TARGET` and `MTR_ARGS` set the target and extra flags.
 
+## The demo video
+
+`just demo-video` records the demo at the top of the README, `docs/demo.gif` and `docs/demo.mp4`, on macOS. `scripts/demo/record.py` runs a scripted session with real probes in a tmux server of its own: it types the command, presses keys at set times, and captures the pane with its colours ten times a second. `scripts/demo/render.py` draws every capture and puts each caption where the screen stays empty for as long as the caption shows. It marks every cell that any frame in that time uses, keeps a cell of margin around them, and takes the free spot nearest the lower middle, or the previous caption's spot while that one stays free. Key presses show as keycaps in the title bar.
+
+The script, with its captions and timings, is `script()` in `record.py`. Recording needs tmux, ffmpeg and Pillow (`python3 -m pip install Pillow`). The trace starts in your own network, so the script hides the first three hops with `--privacy-hops 3`; before you publish a new recording, check that no hop after them names your provider.
+
 ## Recorded traces
 
 `--record PATH` saves a trace as it runs, and `--replay PATH` plays it back without sending anything. A trace from a network you can't reach again, or one attached to a bug report, can then be watched in the TUI or turned into any report format:
