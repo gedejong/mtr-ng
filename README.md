@@ -251,7 +251,7 @@ Counters let Prometheus work out any window: the loss at hop 5 over the last fiv
 ### Record and replay
 `--record PATH` writes what the trace sees as it happens, one JSON object per line: what was traced, from where and how, then each probe sent, each reply (from whom, its RTT, TTL and MPLS labels) or timeout, and each name and AS that arrived, stamped with the seconds since the start.
 ```json
-{"t":0.0,"event":"start","version":"0.6.0","start":"2026-10-29T21:40:49Z","source":"laptop","target":"1.1.1.1","target_addr":"1.1.1.1","protocol":"icmp","flows":"1","interval_ms":1000,"max_hops":30,"simulated":false}
+{"t":0.0,"event":"start","version":"0.6.1","start":"2026-10-29T21:40:49Z","source":"laptop","target":"1.1.1.1","target_addr":"1.1.1.1","protocol":"icmp","flows":"1","interval_ms":1000,"max_hops":30,"simulated":false}
 {"t":1.005632,"event":"sent","hop":1,"flow":0,"probe":1}
 {"t":1.011853,"event":"reply","hop":1,"probe":1,"from":"192.168.1.1","kind":"time_exceeded","rtt_ms":6.221,"reply_ttl":64}
 {"t":1.0302,"event":"name","addr":"198.51.100.1","name":"core-1.isp.example"}

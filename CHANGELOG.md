@@ -2,7 +2,9 @@
 
 Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/mtr-ng/releases).
 
-## Unreleased
+## 0.6.1 - 2026-10-30
+
+Routers that ignored mtr-ng's tiny probes, as some on MPLS backbones do, now answer: probes are 64 bytes, as mtr's are.
 
 - Probes are 64 bytes with their IP header, as mtr's are, instead of the fewest bytes that carry the sequence number (30 for ICMP over IPv4). Some MPLS routers send no Time Exceeded for such tiny probes, so whole stretches of a path stayed `???` where mtr showed routers. `-s`/`--psize BYTES` sets another size, from 28 to 1500, at most 576 with `--pmtu`. On Windows the echo requests have that size too, instead of Windows' 32 bytes of data.
 
