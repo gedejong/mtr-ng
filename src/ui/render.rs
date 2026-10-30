@@ -1223,7 +1223,7 @@ fn about_lines(session: &MtrSession, width: usize) -> Vec<Line<'static>> {
             |credit| format!("Locations: {credit}."),
         ),
         "Router names: city codes from the looking glasses of Arelion, Cogent, Hurricane \
-         Electric and Lumen; airports from OurAirports, public domain."
+         Electric and Lumen; airports, for Cogent and Zayo, from OurAirports, public domain."
             .to_string(),
         "Coastlines and city coordinates: Natural Earth, public domain.".to_string(),
         "AS numbers, prefixes and names: Team Cymru's IP to ASN mapping.".to_string(),
