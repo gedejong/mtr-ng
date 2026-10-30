@@ -2,6 +2,10 @@
 
 Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/mtr-ng/releases).
 
+## Unreleased
+
+- Router names: Zayo's are read too. `ae7.cr1.ord8.us.zip.zayo.com` is in Chicago, where the database had Amsterdam. Zayo names its sites after airports and adds the country, so a code counts only when it is a large airport in that country, and other codes, such as Milan's `mil`, say nothing.
+
 ## 0.6.1 - 2026-10-30
 
 Routers that ignored mtr-ng's tiny probes, as some on MPLS backbones do, now answer: probes are 64 bytes, as mtr's are.

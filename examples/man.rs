@@ -175,7 +175,8 @@ const GEOLOCATION: [&str; 4] = [
     "A database places a router where its owner registered it, which can be a continent \
      away. Where a router's name carries its network's city code, as Arelion's \
      adm-b3-link.ip.twelve99.net does, that city goes before the database; mtr-ng knows \
-     the codes of Arelion, Cogent, Hurricane Electric and Lumen. Either way, a reply \
+     the codes of Arelion, Cogent, Hurricane Electric and Lumen, and reads Zayo's as \
+     airports in the country its names give. Either way, a reply \
      cannot come from farther than light in fibre travels in its round trip, about \
      100 km per ms, so a location farther from the origin than the hop's best RTT \
      allows, granting both locations their accuracy, is marked ! and left off the map.",
