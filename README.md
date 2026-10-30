@@ -1,20 +1,20 @@
 # MTR-NG - Modern My Traceroute in Rust
 
-A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offering real-time network path visualization with enhanced sparklines, jitter analysis, and advanced column customization.
+mtr-ng is My Traceroute (mtr) reimplemented in Rust. It probes every hop on the path to a host, round after round, and shows how each hop's loss, round-trip times and jitter change, in a terminal interface or as a report.
 
 ## Features
 
 ### Core Network Analysis
-- **Real-time Path Tracing**: Live network path discovery and monitoring
-- **RTT Statistics**: Min/Max/Average/EMA (Exponential Moving Average) calculations  
-- **Packet Loss Detection**: Accurate loss percentage tracking per hop
-- **Jitter Analysis**: Last jitter and average jitter measurements for network stability
+- **Path tracing**: every round sends one probe to each hop, and the table changes as the replies arrive. A round starts every second, and `-i` sets another interval in milliseconds
+- **RTT statistics**: each hop keeps its last, best, worst and average RTT, their standard deviation, and an exponential moving average, which `--ema-alpha` makes follow new RTTs faster or slower
+- **Packet loss**: a probe without an answer after 2 seconds counts as lost, and probes still in flight stay out of the loss until then
+- **Jitter**: `jitter` is how much a hop's last two RTTs differ, and `jitter-avg` the mean of all those differences
 
-### Advanced Visualization
-- **Unicode Sparklines**: Beautiful real-time RTT history visualization (`▁▂▂▆█▄▂▃▂▁`)
-- **Color-coded Metrics**: Green (good) → Yellow (warning) → Red (problematic)
-- **Customizable Columns**: Select exactly which metrics to display
-- **Scalable Display**: Auto-scaling sparklines with manual override options
+### Visualization
+- **Sparklines**: the graph column draws a hop's recent replies as bars (`▁▂▂▆█▄▂▃▂▁`), newest on the right, and `v` turns them into a heatmap of colour alone
+- **Colour**: colour, like bar height, places each reply between the fastest and the slowest reply of all hops, from blue to orange in true colour. A lost probe is a red `·`
+- **Columns**: `--fields` and the column chooser decide which columns show, and in what order (see below)
+- **Scale**: the scale stretches to fit the replies to the latest 100 probes of every hop. It is logarithmic unless `--sparkline-scale linear` says otherwise, and `s` switches between the two while mtr-ng runs
 
 ### Load Balancers and MPLS
 - **Stable flows**: `--flows N` probes N flows in turn. All probes of one flow carry the same ICMP checksum and identifier (Paris traceroute), so a per-flow load balancer keeps each on one path, and the flows together show the paths it spreads traffic over. `-P udp` keeps the ports fixed per flow instead, and IPv6 probes carry a flow label per flow. Load balancers hash on ports far more often than on ICMP fields, so UDP flows show more diamonds
@@ -37,23 +37,22 @@ A modern, feature-rich implementation of My Traceroute (MTR) built in Rust, offe
 - **Origin**: distances are measured from `--origin LAT,LON`, or else from the first hop placed in a city
 
 ### Column Selection System
-- **Flexible Fields**: Choose from 21 columns
+- **Fields**: `--fields` takes any of 21 columns, in the order they should appear:
   - `hop`, `host`, `asn`, `as-name`, `prefix`, `geo`, `dist`, `stretch`, `reach`, `back`
   - `loss`, `sent`, `last`, `avg`, `ema`, `jitter`, `jitter-avg`, `best`, `worst`, `stdev`, `graph`
-- **Quick Presets**: `--show-all` for complete metrics, custom combinations via `--fields`
-- **Interactive Chooser**: `o` opens a column chooser to show, hide and reorder columns
-- **Report Mode**: Same column selection works for both interactive and report output
+- **All columns**: `--show-all` shows every column
+- **Interactive chooser**: `o` opens a column chooser to show, hide and reorder columns
+- **Reports**: the columns chosen with `--fields` apply to `--report` as well
 
 ### Interface Modes
-- **Interactive UI**: Real-time terminal interface with keyboard controls
-- **Report Mode**: Clean output for automation and scripting
+- **Terminal interface**: by default the table updates as replies arrive, and keys switch between the table, the flow matrix, the route graph and the map (see Interactive Mode)
+- **Report mode**: `-r` runs 10 rounds, or as many as `-c` says, and then prints a table for people or JSON, CSV, Graphviz, Mermaid or GeoJSON for scripts
 - **Prometheus exporter**: `--metrics PORT` serves per-hop loss and RTT for Prometheus to scrape, alongside the TUI or, with `-r`, until stopped
-- **Colour Depth**: Detected from `COLORTERM`/`TERM` (none, 16, 256 or true colour); `c` cycles through them
+- **Colour depth**: mtr-ng reads it from `COLORTERM` and `TERM` (none, 16, 256 or true colour), and `c` cycles through them
 
-### Performance & Compatibility
-- **Efficient Async**: Built with Tokio for high-performance networking
-- **Platforms**: macOS and Linux, both without sudo for ICMP (see Privileges). Windows probes without administrator rights too, but has been tested only over loopback and has no release download yet; FreeBSD is only type-checked.
-- **IPv4 and IPv6**: a name with both kinds of address is traced over IPv6 when this machine has an IPv6 route, as a connection would be, else over IPv4; `-4` and `-6` choose. ICMP echo by default, UDP to port 33434 and up with `-P udp`; `-P tcp` exits with an error for now. Reverse DNS for hop names (`-n` turns it off).
+### Platforms and Protocols
+- **Platforms**: mtr-ng runs on macOS and Linux, on both without sudo for ICMP (see Privileges). Windows probes without administrator rights too, but has been tested only over loopback and has no release download yet; FreeBSD is only type-checked.
+- **IPv4 and IPv6**: a name with both kinds of address is traced over IPv6 when this machine has an IPv6 route, as a connection would be, else over IPv4; `-4` and `-6` choose. Probes are ICMP echo requests by default, or UDP datagrams to port 33434 and up with `-P udp`; `-P tcp` exits with an error for now. Hop names come from reverse DNS, which `-n` turns off.
 
 ## Installation
 
@@ -68,7 +67,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/gedejong/mtr-ng/release
 ```bash
 brew install gedejong/tap/mtr-ng
 ```
-Installed from the old `edejong-dbc/tap`? Run `brew uninstall mtr-ng && brew untap edejong-dbc/tap` first.
+If you installed it from the old `edejong-dbc/tap`, run `brew uninstall mtr-ng && brew untap edejong-dbc/tap` first.
 
 #### Debian/Ubuntu (amd64, arm64)
 Download the `.deb` from the release, then:
@@ -95,7 +94,7 @@ sudo cp install/mtr-ng.1 /usr/local/share/man/man1/
 Homebrew and the `.deb` install completions for bash, zsh and fish, and the release archives carry them (`mtr-ng.bash`, `_mtr-ng`, `mtr-ng.fish`). From a checkout or after `cargo install`, they are in `install/completions/`; for zsh, for example, copy `_mtr-ng` into a directory on your `$fpath`.
 
 ### Privileges
-- **macOS**: runs as a normal user (unprivileged ICMP sockets). No sudo.
+- **macOS**: runs as a normal user, through unprivileged ICMP sockets, without sudo.
 - **Linux**: ICMP works as a normal user through a ping socket when the user's group is in `net.ipv4.ping_group_range`, which systemd 243 and newer open to everyone. Check with `sysctl net.ipv4.ping_group_range`: `0 2147483647` allows all groups, `1 0` none. Ping sockets don't pass on MPLS labels or interfaces. Otherwise, and for `-P udp`, mtr-ng needs raw sockets, so root or `CAP_NET_RAW`. Either run it with `sudo`, or grant the capability to the installed binary once:
   ```bash
   sudo setcap cap_net_raw+ep "$(readlink -f "$(which mtr-ng)")"
@@ -226,7 +225,7 @@ Router names are often better evidence. Large networks name their routers after 
 `--ipmap` also asks [RIPE IPmap](https://ipmap.ripe.net) where each public address that answers is. IPmap places routers by measuring them from nearby RIPE Atlas probes, which a database can't, and gives each answer a score: those resting on measurements scored 38 to 57 in testing, those resting only on reverse DNS, crowdsourcing or a city's population 30 or less, and those were wrong about as often as right. mtr-ng takes city-level answers that score 30 or more, and none for anycast addresses, which have no one place. Such an answer replaces the database's location, but not a city from the router's name, and not when the RTT rules it out and not the database's location. The hop details say `RIPE IPmap, score 51`, and the credits name IPmap wherever its locations are shown. `--ipmap` works without a database too. It sends the addresses to the RIPE NCC (see Privacy), so it is off unless asked for.
 
 ### Privacy
-What mtr-ng sends, apart from the probes themselves: the target's name and, unless `-n`, the name of every address that answers go to this machine's resolver; with `-z`, every public address that answers goes to Team Cymru's DNS service. Locations are looked up in a local database, and with `--ipmap` every public address that answers also goes to RIPE IPmap, which may measure it from RIPE Atlas probes. Private addresses are never looked up anywhere. With `--metrics`, anyone who can reach its address can read the trace. `a` in the TUI lists this for the running trace, with the data sources and their licences.
+Apart from the probes themselves, mtr-ng sends only names and addresses. The target's name and, unless `-n`, the name of every address that answers go to this machine's resolver; with `-z`, every public address that answers goes to Team Cymru's DNS service. Locations are looked up in a local database, and with `--ipmap` every public address that answers also goes to RIPE IPmap, which may measure it from RIPE Atlas probes. Private addresses are never looked up anywhere. With `--metrics`, anyone who can reach its address can read the trace. `a` in the TUI lists this for the running trace, with the data sources and their licences.
 
 `--privacy-hops N` hides the first N hops, usually your own network and your provider's first routers, in the TUI and in every report format: their addresses, names, ASes and locations show as `(hidden)` or not at all, the local host name in the report header too, and they are never looked up. Load-balanced branches among them stay apart, as `A (hidden)` and `B (hidden)` in the flow matrix.
 
@@ -271,19 +270,11 @@ mtr-ng --simulate -r -c 8 --flows 4 -e example.com
 mtr-ng --simulate -r --flows auto example.com
 ```
 
-### Sparkline Visualization
-MTR-NG provides beautiful Unicode sparklines showing RTT history:
-- `▁▂▃▄▅▆▇█` - Visual representation of network performance
-- Bar height and colour place each reply on one RTT scale shared by all hops (shown under the table); `·` is a lost probe, `?` one still in flight
-- Real-time updates as packets are sent/received
+### Sparklines
+The graph column gives each probe one cell, newest on the right, with a bar of eight heights (`▁▂▃▄▅▆▇█`). Bar height and colour place each reply on one RTT scale that all hops share, drawn and labelled under the table; `·` is a lost probe and `?` one still in flight. A cell appears when its probe is sent and changes when the reply arrives.
 
-### Jitter Analysis  
-Monitor network stability with comprehensive jitter metrics:
-- **Last Jitter**: Most recent RTT variation
-- **Average Jitter**: Long-term jitter trends
-- Helps identify unstable network segments
-
-
+### Jitter
+A hop's jitter is how much its RTT changed from one reply to the next: `jitter` shows the latest change and `jitter-avg` the mean of all of them. Jitter that starts at one hop and carries on to every hop after it points at a link that queues; jitter at one hop alone usually means that router is slow to answer, which says nothing about the traffic it forwards.
 
 ## Column Reference
 
@@ -311,18 +302,10 @@ Monitor network stability with comprehensive jitter metrics:
 | `stdev`     | RTT standard deviation        | `3.1ms`  |
 | `graph`     | RTT sparkline visualization   | `▁▂▄▇▆▃▁` |
 
-## Development Status
-
-MTR-NG is actively developed with focus on:
-- **Stable Core**: Reliable network tracing and statistics
-- **Rich Visualization**: Unicode sparklines and color coding  
-- **Column Flexibility**: Complete customization system
-- **Interactive UI**: Real-time monitoring with controls
-
 ## Development & Testing
 
-### Easy Testing (No Sudo Required)
-MTR-NG provides comprehensive testing tools that work without administrator privileges:
+### Testing Without Sudo
+None of these commands needs administrator rights:
 
 ```bash
 # Quick start - test simulation mode
@@ -341,20 +324,17 @@ cargo build && ./target/debug/mtr-ng -r -c 2 -n 127.0.0.1
 **Testing Documentation**: See [TESTING.md](TESTING.md) for simulation, the headless TUI check, recorded traces and the Linux network lab, and [DEVELOPMENT.md](DEVELOPMENT.md) for how probing works and how CI is set up.
 
 ### Development Tools
-The project includes several convenience tools:
-- `justfile` - Task runner with development commands (`just --list`)
-- Simulation mode - Exercise the UI and statistics without network access
-- Unit tests: `cargo test`
+The `justfile` holds the commands used while developing, and `just --list` shows them. `--simulate` exercises the TUI and the statistics without network access, and `cargo test` runs the unit tests.
 
 ## Contributing
 
-Contributions welcome! Areas of interest:
-- Terminal graphics and visualization improvements
+Contributions are welcome, for example in these areas:
+- Terminal graphics and visualization
 - TCP probes
-- Additional statistical metrics
-- Platform-specific optimizations
+- More statistics
+- Platform-specific work
 
-**Getting Started**: All development can be done without sudo using simulation mode - see [TESTING.md](TESTING.md).
+**Getting started**: simulation mode lets you develop without sudo, as [TESTING.md](TESTING.md) explains.
 
 ## License
 

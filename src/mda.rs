@@ -312,14 +312,14 @@ impl Mda {
                 .max_by_key(|hop| (hop.needed() - hop.flows, Reverse(hop.ttl)));
             match furthest {
                 Some(hop) => lines.push(format!(
-                    "Branches not all found yet: after {} flows, hop {} has {}. \
+                    "Not all branches have been found yet: after {} flows, hop {} has {}. \
                      Leave out -c, or raise it, to let discovery finish.",
                     self.sent,
                     hop.ttl,
                     hop.describe()
                 )),
                 None => lines.push(format!(
-                    "Branches not all found yet: {} flows sent, no answers.",
+                    "No branch has been found yet: nothing answered the {} flows sent.",
                     self.sent
                 )),
             }
@@ -332,11 +332,11 @@ impl Mda {
             let cover = self.cover(last_ttl);
             lines.push(match balanced.len() {
                 0 => format!(
-                    "No load balancing found: {} flows met one address at every hop.",
+                    "No load balancing was found: {} flows met one address at every hop.",
                     self.sent
                 ),
                 _ => format!(
-                    "Load balanced at {}. {} flows found the branches; then flow{} {}, \
+                    "The path is load balanced at {}. {} flows found the branches; then flow{} {}, \
                      which together pass every address, took turns.",
                     join(&balanced),
                     self.sent,
@@ -346,7 +346,7 @@ impl Mda {
             });
             for hop in hops.iter().filter(|hop| !hop.sure()) {
                 lines.push(format!(
-                    "Hop {}: {}, too few to rule out another branch.",
+                    "Hop {} has {}, too few to rule out another branch.",
                     hop.ttl,
                     hop.describe()
                 ));
@@ -359,8 +359,8 @@ impl Mda {
             ));
         }
         lines.push(
-            "Per hop 95% sure that no branch was missed, if balancers spread flows evenly \
-             (MDA-Lite)."
+            "At each hop the chance that a branch was missed is at most 5%, if balancers \
+             spread flows evenly (MDA-Lite)."
                 .to_string(),
         );
         lines
@@ -458,7 +458,7 @@ mod tests {
         assert_eq!(mda.sent, MAX_FLOWS);
         assert_eq!(mda.note(1, 2), None, "hop 1 is sure");
         assert_eq!(mda.note(2, 2).unwrap(), "1 branch so far, 4 of 6 flows");
-        assert!(mda.summary(2)[1].starts_with("Hop 2: 1 branch so far, 4 of 6 flows"));
+        assert!(mda.summary(2)[1].starts_with("Hop 2 has 1 branch so far, 4 of 6 flows"));
     }
 
     #[test]
@@ -480,7 +480,7 @@ mod tests {
         let summary = mda.summary(3);
         assert_eq!(
             summary[0],
-            "Load balanced at hop 2 (2 branches). 11 flows found the branches; \
+            "The path is load balanced at hop 2 (2 branches). 11 flows found the branches; \
              then flows 0-1, which together pass every address, took turns."
         );
     }

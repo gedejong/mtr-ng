@@ -300,7 +300,7 @@ impl MtrSession {
         // IPmap can do without a database
         if self.geo_source.is_none() && self.args.wants_geo() && !self.args.ipmap {
             bail!(
-                "no geolocation database found. Get DB-IP's free one with\n  {}\nor pass --geoip-mmdb PATH",
+                "no geolocation database was found. Get DB-IP's free one with\n  {}\nor pass --geoip-mmdb PATH",
                 geo::DOWNLOAD
             );
         }

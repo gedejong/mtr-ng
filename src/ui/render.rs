@@ -51,7 +51,7 @@ pub fn render(f: &mut Frame, session: &MtrSession, ui: &mut UiState) {
     let area = f.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         let text = format!(
-            "Terminal too small ({}x{}, need {MIN_WIDTH}x{MIN_HEIGHT}). q quits.",
+            "The terminal is too small ({}x{}); mtr-ng needs {MIN_WIDTH}x{MIN_HEIGHT}. q quits.",
             area.width, area.height
         );
         f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
@@ -585,7 +585,7 @@ fn render_routes(
     let name = |node| topology::node_name(&shown, node, !names);
     let lines = topology::draw(&shown, &name, usize::from(area.width));
     if lines.is_empty() {
-        let text = "No route yet: nothing has answered.";
+        let text = "Nothing has answered yet, so there is no route to draw.";
         return f.render_widget(Paragraph::new(text), area);
     }
     let selected = ui.selected_hop();
@@ -644,7 +644,7 @@ fn render_detail(f: &mut Frame, area: Rect, session: &MtrSession, hops: &[HopSta
     let hop = hops.iter().find(|hop| hop.hop == ui.detail_hop);
     let lines = match hop {
         Some(hop) if hop.sent > 0 => detail_lines(hop, session, ui, usize::from(width) - 4),
-        _ => vec![Line::from("Nothing sent to this hop yet.")],
+        _ => vec![Line::from("Nothing has been sent to this hop yet.")],
     };
     let title = match hop {
         Some(hop) if hop.is_target => format!(" Hop {} · target ", ui.detail_hop),
@@ -771,13 +771,13 @@ fn detail_lines(
         lines.push(Line::from(""));
         lines.push(Line::styled(
             format!(
-                "Back: routers the reply crossed, judged by its TTL. The probe crossed {}.",
+                "Back counts the routers the reply crossed, judged by its TTL; the probe crossed {}.",
                 hop.hop.saturating_sub(1)
             ),
             dim,
         ));
         lines.push(Line::styled(
-            "+N or -N: that many more or fewer, so the reply came back another way.",
+            "+N or -N means the reply crossed that many more or fewer, so it came back another way.",
             dim,
         ));
     }
@@ -1142,33 +1142,33 @@ fn render_about(f: &mut Frame, area: Rect, session: &MtrSession) {
 fn live_sends(session: &MtrSession) -> Vec<String> {
     let args = &session.args;
     let mut sent = vec![match (session.is_simulated(), args.protocol) {
-        (true, _) => "Probes: none, --simulate makes the trace up.".to_string(),
+        (true, _) => "Probes: none leave, since --simulate makes the trace up.".to_string(),
         (false, ProbeProtocol::Udp) => format!(
-            "Probes: UDP datagrams to {}, answered by the routers on the way.",
+            "Probes: UDP datagrams go to {}, and the routers on the way answer them.",
             session.target_addr
         ),
         (false, _) => format!(
-            "Probes: ICMP echo requests to {}, answered by the routers on the way.",
+            "Probes: ICMP echo requests go to {}, and the routers on the way answer them.",
             session.target_addr
         ),
     }];
     sent.push(match args.numeric || session.is_simulated() {
-        true => "DNS: the target's name, to this machine's resolver.".to_string(),
-        false => "DNS: the target's name and the name of each address that answers, \
-                  to this machine's resolver (-n: the target's only)."
+        true => "DNS: the target's name goes to this machine's resolver.".to_string(),
+        false => "DNS: the target's name goes to this machine's resolver, and so does each \
+                  address that answers, for its name (-n sends the target's only)."
             .to_string(),
     });
     sent.push(match args.wants_asn() && !session.is_simulated() {
-        true => "AS lookups: each public address that answers, to Team Cymru's DNS service. \
-                 Private addresses never leave."
+        true => "AS lookups: each public address that answers goes to Team Cymru's DNS \
+                 service. Private addresses never leave."
             .to_string(),
-        false => "AS lookups: none (-z sends public addresses to Team Cymru).".to_string(),
+        false => "AS lookups: none are made; -z sends public addresses to Team Cymru.".to_string(),
     });
     sent.push(match args.ipmap && !session.is_simulated() {
-        true => "Locations: each public address that answers, to RIPE IPmap (--ipmap), \
+        true => "Locations: each public address that answers goes to RIPE IPmap (--ipmap), \
                  which may measure it from RIPE Atlas probes. Private addresses never leave."
             .to_string(),
-        false => "Locations: nothing, the database is on this machine.".to_string(),
+        false => "Locations: nothing leaves, since the database is on this machine.".to_string(),
     });
     sent
 }
@@ -1190,7 +1190,7 @@ fn about_lines(session: &MtrSession, width: usize) -> Vec<Line<'static>> {
 
     let mut sent = match (&session.replayed, &args.replay) {
         (Some(recorded), Some(path)) => vec![format!(
-            "Nothing: this plays back {}, recorded {} on {}.",
+            "Nothing leaves, since this plays back {}, recorded {} on {}.",
             path.file_name()
                 .unwrap_or(path.as_os_str())
                 .to_string_lossy(),
@@ -1216,7 +1216,10 @@ fn about_lines(session: &MtrSession, width: usize) -> Vec<Line<'static>> {
 
     let data = [
         session.geo_attribution().map_or_else(
-            || "Locations: no database (see -g), no IPmap (see --ipmap).".to_string(),
+            || {
+                "Locations: none are shown without a database (see -g) or IPmap (see --ipmap)."
+                    .to_string()
+            },
             |credit| format!("Locations: {credit}."),
         ),
         "Router names: city codes from the looking glasses of Arelion, Cogent, Hurricane \
@@ -1502,7 +1505,7 @@ mod tests {
         let mut ui = UiState::new(&s.args);
         ui.view = View::Map;
         let text = screen(&s, &mut ui, 100, 30).join("\n");
-        assert!(text.contains("No geolocation database"), "{text}");
+        assert!(text.contains("Without a geolocation database"), "{text}");
         assert!(text.contains("download.db-ip.com"), "{text}");
 
         s.set_geo_source(Arc::new(FakeGeo(HashMap::new())));

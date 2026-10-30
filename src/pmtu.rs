@@ -290,22 +290,22 @@ impl PathMtu {
             (None, _) => String::new(),
         };
         let mut lines = vec![match (self.mtu(), self.black_hole()) {
-            (Some(mtu), None) => format!("Path MTU {mtu}{up_to}."),
+            (Some(mtu), None) => format!("The path MTU is {mtu}{up_to}."),
             (Some(mtu), Some(vanished)) => format!(
-                "Path MTU {mtu}{up_to}: probes of {vanished} bytes and more vanish without \
-                 an ICMP error, a black hole for path MTU discovery."
+                "The path MTU is {mtu}{up_to}. Probes of {vanished} bytes and more vanish \
+                 without an ICMP error, a black hole for path MTU discovery."
             ),
             (None, _) if self.done => {
-                "Path MTU unknown: even the smallest probes vanished.".to_string()
+                "The path MTU is unknown: even the smallest probes vanished.".to_string()
             }
             (None, _) => match self.vanished {
                 Some(vanished) => format!(
-                    "Path MTU unknown: probes of {vanished} bytes vanish without an ICMP \
+                    "The path MTU is unknown: probes of {vanished} bytes vanish without an ICMP \
                      error, and the search for the largest that arrives was still trying {}.",
                     self.size
                 ),
                 None => format!(
-                    "Path MTU unknown: the search was still trying {} bytes.",
+                    "The path MTU is unknown: the search was still trying {} bytes.",
                     self.size
                 ),
             },
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(
             pmtu.summary(Some(9)),
             [
-                "Path MTU 1400.",
+                "The path MTU is 1400.",
                 "  1500 to 1492 after hop 1 (10.0.0.1)",
                 "  1492 to 1400 after hop 4 (10.0.0.4)",
             ]
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(pmtu.mtu(), None);
         assert_eq!(
             pmtu.summary(None)[0],
-            "Path MTU unknown: even the smallest probes vanished."
+            "The path MTU is unknown: even the smallest probes vanished."
         );
     }
 
@@ -510,7 +510,7 @@ mod tests {
         let summary = pmtu.summary(None);
         assert_eq!(
             summary[0],
-            "Path MTU 1480 up to hop 3, the last that answered."
+            "The path MTU is 1480 up to hop 3, the last that answered."
         );
         assert_eq!(summary[1], "  1500 to 1480 on this machine's route");
     }
