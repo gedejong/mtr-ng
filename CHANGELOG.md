@@ -2,9 +2,12 @@
 
 Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/mtr-ng/releases).
 
-## Unreleased
+## 0.6.2 - 2026-10-30
+
+Zayo routers are placed where their names say, Chicago for ord8, instead of wherever the database had them, and the notes on screen are full sentences.
 
 - Router names: Zayo's are read too. `ae7.cr1.ord8.us.zip.zayo.com` is in Chicago, where the database had Amsterdam. Zayo names its sites after airports and adds the country, so a code counts only when it is a large airport in that country, and other codes, such as Milan's `mil`, say nothing.
+- The notes in the TUI and in reports, on load balancing, the path MTU, the map and the About pane, are written as full sentences.
 
 ## 0.6.1 - 2026-10-30
 
