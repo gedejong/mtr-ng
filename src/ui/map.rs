@@ -151,7 +151,9 @@ pub fn render_map(
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         return message(
             f,
-            vec![Line::from("Too small for the map. m returns to the table.")],
+            vec![Line::from(
+                "The window is too small for the map. m returns to the table.",
+            )],
         );
     }
     let origin = session.origin();
@@ -164,12 +166,17 @@ pub fn render_map(
         .map(|(hop, _)| u16::from(hop.hop))
         .collect();
     if located.is_empty() {
-        let mut text = "No hop located yet. Private addresses, and those the database doesn't \
+        let mut text =
+            "No hop has a location yet. Private addresses, and those the database doesn't \
                         know, stay off the map."
-            .to_string();
+                .to_string();
         if !ruled_out.is_empty() {
+            let which = match ruled_out.len() {
+                1 => "the one at hop",
+                _ => "those at hops",
+            };
             text.push_str(&format!(
-                " So do locations their RTT rules out: hop {}.",
+                " So do locations their RTT rules out, like {which} {}.",
                 ranges(&ruled_out)
             ));
         }
@@ -427,7 +434,7 @@ fn clamp_range(mid: f64, span: f64, limit: f64) -> [f64; 2] {
 fn no_database() -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
     vec![
-        Line::styled("No geolocation database, so no map.", bold),
+        Line::styled("Without a geolocation database there is no map.", bold),
         Line::from(""),
         Line::from("DB-IP's free City Lite database (CC BY 4.0, about 130 MB) can be fetched with"),
         Line::from(""),
