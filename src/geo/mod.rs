@@ -24,7 +24,7 @@ use tracing::{info, warn};
 
 /// Light in fibre covers about 200 km per millisecond, so a round trip of one
 /// millisecond reaches at most 100 km.
-pub const KM_PER_RTT_MS: f64 = 100.0;
+const KM_PER_RTT_MS: f64 = 100.0;
 
 /// Accuracy assumed for a city-level location whose database gives none, as
 /// DB-IP's free edition doesn't.
@@ -240,13 +240,13 @@ pub trait GeoSource: Send + Sync {
 }
 
 /// A database in MaxMind's format with the City layout.
-pub struct Mmdb<S: AsRef<[u8]>> {
+struct Mmdb<S: AsRef<[u8]>> {
     reader: Reader<S>,
     attribution: String,
 }
 
 impl<S: AsRef<[u8]>> Mmdb<S> {
-    pub fn new(reader: Reader<S>) -> Self {
+    fn new(reader: Reader<S>) -> Self {
         let attribution = attribution(&reader.metadata().database_type);
         Self {
             reader,
@@ -290,7 +290,7 @@ fn attribution(database_type: &str) -> String {
 }
 
 /// Opens a database. It is memory-mapped, since the free ones are over 100 MB.
-pub fn open_mmdb(path: &Path) -> Result<Arc<dyn GeoSource>> {
+fn open_mmdb(path: &Path) -> Result<Arc<dyn GeoSource>> {
     // SAFETY: the mapping is only sound while nobody truncates or rewrites the file
     // in place. geoipupdate and the documented download (`DOWNLOAD`) replace it
     // with a rename, which leaves the mapped original intact.
@@ -300,7 +300,7 @@ pub fn open_mmdb(path: &Path) -> Result<Arc<dyn GeoSource>> {
 }
 
 /// `$XDG_DATA_HOME/mtr-ng`, or `~/.local/share/mtr-ng`.
-pub fn user_dir() -> Option<PathBuf> {
+fn user_dir() -> Option<PathBuf> {
     let base = match env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         Some(data) => PathBuf::from(data),
         None => PathBuf::from(env::var_os("HOME")?).join(".local/share"),

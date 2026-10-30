@@ -63,7 +63,7 @@ pub fn locate(addr: IpAddr) -> Option<GeoFix> {
 
 /// The location in an answer from `/best`, if it names a city, scores at least
 /// `MIN_SCORE` and isn't for an anycast address.
-pub fn parse(body: &str) -> Option<GeoFix> {
+fn parse(body: &str) -> Option<GeoFix> {
     let answer: Value = serde_json::from_str(body).ok()?;
     if anycast(&answer) {
         return None;

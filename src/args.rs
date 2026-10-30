@@ -18,6 +18,14 @@ pub enum ProbeProtocol {
     Tcp,
 }
 
+impl ProbeProtocol {
+    /// The name `-P` takes
+    pub fn name(self) -> String {
+        self.to_possible_value()
+            .map_or_else(String::new, |p| p.get_name().to_string())
+    }
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq)]
 pub enum Column {
     /// Hop number
@@ -65,34 +73,12 @@ pub enum Column {
 }
 
 impl Column {
-    /// Get all available columns in default order
+    /// Every column, in table order
     pub fn all() -> Vec<Column> {
-        vec![
-            Column::Hop,
-            Column::Host,
-            Column::Asn,
-            Column::AsName,
-            Column::Prefix,
-            Column::Geo,
-            Column::Dist,
-            Column::Stretch,
-            Column::Reach,
-            Column::Back,
-            Column::Loss,
-            Column::Sent,
-            Column::Last,
-            Column::Avg,
-            Column::Ema,
-            Column::Jitter,
-            Column::JitterAvg,
-            Column::Best,
-            Column::Worst,
-            Column::Stdev,
-            Column::Graph,
-        ]
+        Self::value_variants().to_vec()
     }
 
-    /// Get default columns (excludes jitter by default for backwards compatibility)
+    /// The columns shown without `--fields` or `--show-all`
     pub fn default_columns() -> Vec<Column> {
         vec![
             Column::Hop,
@@ -114,7 +100,7 @@ impl Column {
 #[command(
     about = "A modern implementation of mtr (My Traceroute) with unicode and terminal graphics"
 )]
-#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(version)]
 pub struct Args {
     /// Target hostname or IP address
     #[arg(required_unless_present = "replay", default_value = "")]
@@ -234,8 +220,8 @@ pub struct Args {
     #[arg(long, value_enum, value_delimiter = ',')]
     pub fields: Option<Vec<Column>>,
 
-    /// Show all available columns including jitter metrics
-    #[arg(long, help = "Display all available columns")]
+    /// Display all available columns
+    #[arg(long)]
     pub show_all: bool,
 
     /// Show fake data instead of probing (for demos and testing); marked SIMULATED
@@ -349,7 +335,7 @@ fn smoothing_factor(s: &str) -> Result<f64, String> {
 }
 
 /// Shortest interval for real probes: every round sends one probe per hop.
-pub const MIN_INTERVAL_MS: u64 = 100;
+const MIN_INTERVAL_MS: u64 = 100;
 
 impl Args {
     /// Checks that depend on more than one flag.
@@ -410,21 +396,13 @@ impl Args {
     /// Locations were asked for: `--geo`, `--geojson`, or `--fields` naming a column
     /// that shows them. `--show-all` doesn't count, so it works without a database.
     pub fn wants_geo(&self) -> bool {
-        let named = |fields: &Vec<Column>| {
-            fields
-                .iter()
-                .any(|c| matches!(c, Column::Geo | Column::Dist | Column::Stretch))
-        };
+        let named = |fields: &Vec<Column>| fields.iter().any(|c| c.is_location());
         self.geo || self.geojson || self.fields.as_ref().is_some_and(named)
     }
 
     /// AS numbers are looked up for `--aslookup`, or when a column shows them.
     pub fn wants_asn(&self) -> bool {
-        self.aslookup
-            || self
-                .get_columns()
-                .iter()
-                .any(|c| matches!(c, Column::Asn | Column::AsName | Column::Prefix))
+        self.aslookup || self.get_columns().iter().any(|c| c.is_as())
     }
 }
 

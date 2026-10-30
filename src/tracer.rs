@@ -138,13 +138,9 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                 let response = ProbeResponse {
                     hop: probe.hop,
                     ordinal: Some(probe.ordinal),
-                    seq: reply.seq,
                     source_addr: reply.source,
                     icmp_type: reply.kind,
                     rtt,
-                    send_time: probe.sent_at,
-                    receive_time: reply.received_at,
-                    precise_rtt_ns: rtt.as_nanos(),
                     reply_ttl: reply.ttl,
                     mpls: reply.mpls,
                     interfaces: reply.interfaces,
@@ -286,7 +282,7 @@ fn mtu_answered(session: &Shared, probe: &MtuProbe, reply: &Reply) {
         IcmpResponseType::TimeExceeded
         | IcmpResponseType::EchoReply
         | IcmpResponseType::PortUnreachable => pmtu.arrived(probe.size, probe.ttl),
-        IcmpResponseType::DestinationUnreachable | IcmpResponseType::Timeout => {}
+        IcmpResponseType::DestinationUnreachable => {}
     }
     s.notify();
 }
@@ -295,19 +291,15 @@ fn mtu_answered(session: &Shared, probe: &MtuProbe, reply: &Reply) {
 /// went to answers small probes.
 fn expire_mtu_probes(session: &Shared, in_flight: &mut HashMap<u16, MtuProbe>, timeout: Duration) {
     let now = Instant::now();
-    let expired: Vec<u16> = in_flight
-        .iter()
-        .filter(|(_, p)| now.duration_since(p.sent_at) >= timeout)
-        .map(|(seq, _)| *seq)
+    let expired: Vec<MtuProbe> = in_flight
+        .extract_if(|_, p| now.duration_since(p.sent_at) >= timeout)
+        .map(|(_, probe)| probe)
         .collect();
     if expired.is_empty() {
         return;
     }
     let mut s = session.lock().unwrap();
-    for seq in expired {
-        let Some(probe) = in_flight.remove(&seq) else {
-            continue;
-        };
+    for probe in expired {
         let answers = s
             .hops
             .get(usize::from(probe.ttl) - 1)
@@ -323,33 +315,16 @@ fn expire_mtu_probes(session: &Shared, in_flight: &mut HashMap<u16, MtuProbe>, t
 /// Count probes that have waited longer than `timeout` as lost.
 fn expire(session: &Shared, in_flight: &mut HashMap<u16, InFlight>, timeout: Duration) {
     let now = Instant::now();
-    let expired: Vec<u16> = in_flight
-        .iter()
-        .filter(|(_, p)| now.duration_since(p.sent_at) >= timeout)
-        .map(|(seq, _)| *seq)
+    let expired: Vec<InFlight> = in_flight
+        .extract_if(|_, p| now.duration_since(p.sent_at) >= timeout)
+        .map(|(_, probe)| probe)
         .collect();
     if expired.is_empty() {
         return;
     }
     let mut s = session.lock().unwrap();
-    for seq in expired {
-        if let Some(probe) = in_flight.remove(&seq) {
-            s.apply_response(&ProbeResponse {
-                hop: probe.hop,
-                ordinal: Some(probe.ordinal),
-                seq,
-                source_addr: IpAddr::from([0, 0, 0, 0]),
-                icmp_type: IcmpResponseType::Timeout,
-                rtt: timeout,
-                send_time: probe.sent_at,
-                receive_time: now,
-                precise_rtt_ns: 0,
-                reply_ttl: None,
-                mpls: Vec::new(),
-                interfaces: Vec::new(),
-                nat: None,
-            });
-        }
+    for probe in expired {
+        s.lost(probe.hop, probe.ordinal);
     }
     s.notify();
 }

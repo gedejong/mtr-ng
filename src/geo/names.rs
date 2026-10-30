@@ -14,7 +14,7 @@ use super::GeoFix;
 const ACCURACY_KM: u16 = 50;
 
 /// A city code and the city: (code, city, ISO country, latitude, longitude).
-pub type Code = (&'static str, &'static str, &'static str, f64, f64);
+pub(super) type Code = (&'static str, &'static str, &'static str, f64, f64);
 
 /// Where one network's routers carry their city code, and what the codes mean.
 struct Network {

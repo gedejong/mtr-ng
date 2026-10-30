@@ -10,6 +10,7 @@
 
 use super::recvmsg::{read, set_option, Message};
 use super::{echo_fields, IcmpReply, IcmpResponseType};
+use super::{ECHO_REQUEST, ECHO_REQUEST_V6, MAX_MTU, RECEIVE_POLL};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io,
@@ -53,18 +54,17 @@ pub(super) fn open(ipv6: bool) -> io::Result<(Socket, u16)> {
 pub(super) fn receive(
     socket: &Socket,
     ipv6: bool,
-    poll_interval: Duration,
     stop: &AtomicBool,
     mut deliver: impl FnMut(IcmpReply, Instant) -> bool,
 ) {
     let fd = socket.as_raw_fd();
-    let mut buf = [0u8; 1500];
+    let mut buf = [0u8; MAX_MTU];
     // u64s keep the control messages aligned
     let mut control = [0u64; 64];
     while !stop.load(Ordering::Relaxed) {
-        if let Err(e) = wait(fd, poll_interval) {
+        if let Err(e) = wait(fd, RECEIVE_POLL) {
             tracing::warn!("ICMP receive failed: {e}");
-            std::thread::sleep(poll_interval);
+            std::thread::sleep(RECEIVE_POLL);
             continue;
         }
         // Errors first: while one is queued, a plain read fails with its errno.
@@ -123,7 +123,7 @@ impl Message<'_> {
                     true => libc::SO_EE_ORIGIN_ICMP6,
                 };
                 // The data is the probe we sent.
-                let echo_request = if ipv6 { 128 } else { 8 };
+                let echo_request = if ipv6 { ECHO_REQUEST_V6 } else { ECHO_REQUEST };
                 if error.origin != icmp_origin || echo[0] != echo_request {
                     return None;
                 }

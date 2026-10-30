@@ -10,9 +10,9 @@
 use crate::hop_stats::{HopStats, ResponderStats};
 use crate::privacy;
 use crate::session::MtrSession;
+use crate::utils::text::escape;
 use crate::Result;
 use anyhow::Context;
-use clap::ValueEnum;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -120,14 +120,6 @@ impl Exposition {
     }
 }
 
-/// A label value with backslashes, quotes and line breaks escaped.
-fn escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-}
-
 fn seconds(rtt: Option<Duration>) -> Option<f64> {
     rtt.map(|rtt| rtt.as_secs_f64())
 }
@@ -142,13 +134,9 @@ pub fn render(session: &MtrSession, format: Format) -> String {
     };
 
     x.family("mtr_ng_trace", Kind::Info, "What is traced, and how.");
-    let protocol = session.args.protocol.to_possible_value();
     let mut labels = vec![
         ("target_addr", session.target_addr.to_string()),
-        (
-            "protocol",
-            protocol.map_or_else(String::new, |p| p.get_name().to_string()),
-        ),
+        ("protocol", session.args.protocol.name()),
         ("version", env!("CARGO_PKG_VERSION").to_string()),
     ];
     if session.is_simulated() {
@@ -209,7 +197,7 @@ pub fn render(session: &MtrSession, format: Format) -> String {
             Kind::Counter,
             "Probes that went unanswered for 2 seconds.",
         ),
-        |hop| count(lost(hop)),
+        |hop| count(hop.lost()),
     );
     x.per_hop(
         hops,
@@ -353,13 +341,6 @@ fn responders(hop: &HopStats) -> Vec<&ResponderStats> {
     responders
 }
 
-/// Probes that timed out: neither answered nor still in flight.
-fn lost(hop: &HopStats) -> usize {
-    hop.sent
-        .saturating_sub(hop.in_flight())
-        .saturating_sub(hop.received)
-}
-
 /// Bind before the trace starts, so that a port in use stops mtr-ng at once.
 pub async fn bind(addr: SocketAddr) -> Result<TcpListener> {
     TcpListener::bind(addr)
@@ -485,7 +466,6 @@ mod tests {
                 name: Some("EXAMPLE".to_string()),
             }),
         );
-        session.hops[2].addr = None;
         session.hops[1].mark_as_target();
         session
     }

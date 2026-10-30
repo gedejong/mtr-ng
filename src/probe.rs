@@ -57,7 +57,7 @@ const ECHO_REQUEST_V6: u8 = 128;
 
 /// Destination port of UDP probes in flow 0; flow `f` uses `UDP_PORT + f`.
 /// traceroute's base port, unlikely to have a listener.
-pub const UDP_PORT: u16 = 33434;
+const UDP_PORT: u16 = 33434;
 
 /// UDP probe payload after the two bytes that set the checksum
 const UDP_PAYLOAD: &[u8] = b"mtr-ng";
@@ -75,7 +75,6 @@ pub enum IcmpResponseType {
     TooBig {
         mtu: u16,
     },
-    Timeout,
 }
 
 /// What a NAT on the way did to a probe, as the router that answered quotes it.
@@ -96,13 +95,9 @@ pub struct ProbeResponse {
     pub hop: usize,
     /// Which probe to this hop it answers (see `HopStats::increment_sent`)
     pub ordinal: Option<u64>,
-    pub seq: u16,
     pub source_addr: IpAddr,
     pub icmp_type: IcmpResponseType,
     pub rtt: Duration,
-    pub send_time: Instant,
-    pub receive_time: Instant, // High-precision receive timestamp
-    pub precise_rtt_ns: u128,  // Nanosecond precision RTT
     /// TTL or hop limit of the reply as it arrived
     pub reply_ttl: Option<u8>,
     /// MPLS labels the router quoted (RFC 4950)
@@ -313,6 +308,8 @@ pub struct ProbeEngine {
     socket: Arc<Socket>,
     ipv6: bool,
     packet_id: u16,
+    /// A ping socket sets the identifier itself
+    #[cfg(target_os = "linux")]
     kind: SocketKind,
     udp: Option<UdpSender>,
     replies: Option<mpsc::UnboundedReceiver<Reply>>,
@@ -363,16 +360,12 @@ impl ProbeEngine {
             socket,
             ipv6,
             packet_id,
+            #[cfg(target_os = "linux")]
             kind,
             udp,
             replies: Some(rx),
             stop,
         })
-    }
-
-    /// True when probing without privileges, through a datagram or ping socket.
-    pub fn is_unprivileged(&self) -> bool {
-        self.kind != SocketKind::Raw
     }
 
     /// Set Don't Fragment on every probe, so that a router whose next link is too
@@ -424,13 +417,14 @@ impl Prober for ProbeEngine {
             })
             .max(minimum)
         };
+        let socket = self.udp.as_ref().map_or(&*self.socket, |udp| &udp.socket);
+        if self.ipv6 {
+            socket.set_unicast_hops_v6(ttl.into())?;
+        } else {
+            socket.set_ttl_v4(ttl.into())?;
+        }
         if let Some(udp) = &self.udp {
             let port = UDP_PORT + flow;
-            if self.ipv6 {
-                udp.socket.set_unicast_hops_v6(ttl.into())?;
-            } else {
-                udp.socket.set_ttl_v4(ttl.into())?;
-            }
             let len = padded(2 + UDP_PAYLOAD.len());
             let payload = udp_payload(udp.source, dst, udp.port, port, seq, len);
             let sent_at = Instant::now();
@@ -450,13 +444,12 @@ impl Prober for ProbeEngine {
         #[cfg(not(target_os = "linux"))]
         let flow_id = flow;
         let id = self.packet_id.wrapping_add(flow_id);
-        let mut packet = if self.ipv6 {
-            self.socket.set_unicast_hops_v6(ttl.into())?;
-            echo_request(ECHO_REQUEST_V6, id, seq, FLOW_CHECKSUM + flow).to_vec()
+        let kind = if self.ipv6 {
+            ECHO_REQUEST_V6
         } else {
-            self.socket.set_ttl_v4(ttl.into())?;
-            echo_request(ECHO_REQUEST, id, seq, FLOW_CHECKSUM + flow).to_vec()
+            ECHO_REQUEST
         };
+        let mut packet = echo_request(kind, id, seq, FLOW_CHECKSUM + flow).to_vec();
         // Zeros add nothing to the checksum.
         packet.resize(8 + padded(packet.len() - 8), 0);
 
@@ -498,7 +491,7 @@ fn spawn_receiver(
         .spawn(move || {
             #[cfg(target_os = "linux")]
             if kind == SocketKind::Ping {
-                ping_socket::receive(&socket, ipv6, RECEIVE_POLL, &stop, |reply, at| {
+                ping_socket::receive(&socket, ipv6, &stop, |reply, at| {
                     match ours.reply(reply, at) {
                         Some(reply) => tx.send(reply).is_ok(),
                         None => true,
@@ -1053,24 +1046,10 @@ fn ones_complement_add(a: u16, b: u16) -> u16 {
 }
 
 pub(crate) fn calculate_icmp_checksum(packet: &[u8]) -> u16 {
-    let mut sum = 0u32;
-
-    // Sum all 16-bit words
-    for chunk in packet.chunks(2) {
-        if chunk.len() == 2 {
-            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-        } else {
-            sum += (chunk[0] as u32) << 8;
-        }
-    }
-
-    // Add carry
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-
-    // One's complement
-    !(sum as u16)
+    !packet
+        .chunks(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair.get(1).copied().unwrap_or(0)]))
+        .fold(0, ones_complement_add)
 }
 
 #[cfg(test)]

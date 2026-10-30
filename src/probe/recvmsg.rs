@@ -37,20 +37,7 @@ fn icmpv6_filter(wanted: &[u8], set_blocks: bool) -> [u32; 8] {
 /// multicast listener report on the link.
 pub(super) fn filter_icmpv6(fd: RawFd) -> io::Result<()> {
     let filter = icmpv6_filter(&ICMPV6_WANTED, cfg!(target_os = "linux"));
-    // SAFETY: a valid descriptor and a 32-byte icmp6_filter, the size passed.
-    let ret = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_ICMPV6,
-            ICMP6_FILTER,
-            filter.as_ptr().cast(),
-            mem::size_of_val(&filter) as libc::socklen_t,
-        )
-    };
-    match ret {
-        0 => Ok(()),
-        _ => Err(io::Error::last_os_error()),
-    }
+    setsockopt(fd, libc::IPPROTO_ICMPV6, ICMP6_FILTER, &filter)
 }
 
 /// Turn on the boolean socket option `name` at `level`.
@@ -59,21 +46,25 @@ pub(super) fn set_option(fd: RawFd, level: libc::c_int, name: libc::c_int) -> io
 }
 
 /// Set the integer socket option `name` at `level` to `value`.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(super) fn set_int_option(
     fd: RawFd,
     level: libc::c_int,
     name: libc::c_int,
     value: libc::c_int,
 ) -> io::Result<()> {
-    // SAFETY: a valid descriptor and a c_int option value of the size passed.
+    setsockopt(fd, level, name, &value)
+}
+
+/// Set the socket option `name` at `level` to `value`, passing its size.
+fn setsockopt<T>(fd: RawFd, level: libc::c_int, name: libc::c_int, value: &T) -> io::Result<()> {
+    // SAFETY: a valid descriptor, and a value of the size passed.
     let ret = unsafe {
         libc::setsockopt(
             fd,
             level,
             name,
-            ptr::from_ref(&value).cast(),
-            mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ptr::from_ref(value).cast(),
+            mem::size_of::<T>() as libc::socklen_t,
         )
     };
     match ret {

@@ -2,8 +2,10 @@
 //! the same path, so the addresses one flow met, TTL by TTL, form a route. Where
 //! flows part and meet again sits a load balancer.
 
+use crate::columns;
 use crate::hop_stats::{FlowStats, HopStats};
 use crate::privacy::show;
+use crate::utils::text::escape;
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
@@ -110,11 +112,11 @@ pub fn node_name(hops: &[HopStats], node: Node, numeric: bool) -> String {
 
 /// Name of `addr` as answered at `hop`, or the address itself.
 fn name(hop: &HopStats, addr: IpAddr, numeric: bool) -> String {
-    hop.responders
+    let name = hop
+        .responders
         .get(&addr)
-        .and_then(|r| r.hostname.clone())
-        .filter(|_| !numeric)
-        .unwrap_or_else(|| show(addr))
+        .and_then(|r| r.hostname.as_deref());
+    columns::host(name, Some(addr), !numeric)
 }
 
 /// An address seen at a TTL.
@@ -185,40 +187,27 @@ pub fn ranges(flows: &BTreeSet<u16>) -> String {
 /// Graphviz source for the route graph. Edges are labelled with their flows
 /// unless every flow takes them; dashed edges skip silent TTLs.
 pub fn to_dot(hops: &[HopStats], source: &str, numeric: bool) -> String {
-    let quote = |text: &str| {
-        let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{}\"", escaped.replace('\n', "\\n"))
-    };
+    let quote = |text: &str| format!("\"{}\"", escape(text));
     let id = |node: Option<Node>| match node {
         Some(node) => quote(&format!("{}:{}", node.ttl, node.addr)),
         None => "source".to_string(),
     };
     let edges = edges(hops);
-    let all_flows: BTreeSet<u16> = edges.iter().flat_map(|e| e.flows.iter().copied()).collect();
+    let all_flows = all_flows(&edges);
 
     let mut dot = String::from("digraph mtr_ng {\n  rankdir=LR;\n  node [shape=box];\n");
     let _ = writeln!(dot, "  source [label={}];", quote(source));
     let nodes: BTreeSet<Node> = edges.iter().map(|e| e.to).collect();
     for node in nodes {
-        let hop = hops.iter().find(|hop| hop.hop == node.ttl);
-        let addr = show(node.addr);
-        let name = hop.map_or_else(|| addr.clone(), |hop| name(hop, node.addr, numeric));
-        let label = match name == addr {
-            true => format!("{}. {addr}", node.ttl),
-            false => format!("{}. {name}\n{addr}", node.ttl),
-        };
+        let label = node_label(hops, node, numeric, "\n");
         let _ = writeln!(dot, "  {} [label={}];", id(Some(node)), quote(&label));
     }
     for edge in &edges {
         let mut attributes = Vec::new();
-        let mut label = Vec::new();
-        if edge.flows != all_flows {
-            label.push(format!("flows {}", ranges(&edge.flows)));
-        }
         if edge.gap() > 0 {
-            label.push(format!("+{} silent", edge.gap()));
             attributes.push("style=dashed".to_string());
         }
+        let label = edge_label(edge, &all_flows);
         if !label.is_empty() {
             attributes.push(format!("label={}", quote(&label.join("\n"))));
         }
@@ -237,6 +226,34 @@ pub fn to_dot(hops: &[HopStats], source: &str, numeric: bool) -> String {
     dot
 }
 
+/// Every flow some edge carries.
+fn all_flows(edges: &[Edge]) -> BTreeSet<u16> {
+    edges.iter().flat_map(|e| e.flows.iter().copied()).collect()
+}
+
+/// `ttl. name`, then `line_break` and the address; or `ttl. address` without a name.
+fn node_label(hops: &[HopStats], node: Node, numeric: bool, line_break: &str) -> String {
+    let addr = show(node.addr);
+    let name = node_name(hops, node, numeric);
+    match name == addr {
+        true => format!("{}. {addr}", node.ttl),
+        false => format!("{}. {name}{line_break}{addr}", node.ttl),
+    }
+}
+
+/// An edge's label lines: its flows, unless every flow takes it, and the silent
+/// TTLs it skips.
+fn edge_label(edge: &Edge, all_flows: &BTreeSet<u16>) -> Vec<String> {
+    let mut label = Vec::new();
+    if edge.flows != *all_flows {
+        label.push(format!("flows {}", ranges(&edge.flows)));
+    }
+    if edge.gap() > 0 {
+        label.push(format!("+{} silent", edge.gap()));
+    }
+    label
+}
+
 /// Mermaid source for the route graph, for Markdown that renders it (GitHub,
 /// GitLab, many wikis). Labelled and dashed as `to_dot` does.
 pub fn to_mermaid(hops: &[HopStats], source: &str, numeric: bool) -> String {
@@ -249,29 +266,17 @@ pub fn to_mermaid(hops: &[HopStats], source: &str, numeric: bool) -> String {
         .enumerate()
         .map(|(i, &node)| (node, format!("n{}_{i}", node.ttl)))
         .collect();
-    let all_flows: BTreeSet<u16> = edges.iter().flat_map(|e| e.flows.iter().copied()).collect();
+    let all_flows = all_flows(&edges);
 
     let mut out = String::from("flowchart TD\n");
     let _ = writeln!(out, "  source[{}]", quote(source));
-    for node in &nodes {
-        let hop = hops.iter().find(|hop| hop.hop == node.ttl);
-        let addr = show(node.addr);
-        let name = hop.map_or_else(|| addr.clone(), |hop| name(hop, node.addr, numeric));
-        let label = match name == addr {
-            true => format!("{}. {addr}", node.ttl),
-            false => format!("{}. {name}<br/>{addr}", node.ttl),
-        };
-        let _ = writeln!(out, "  {}[{}]", ids[node], quote(&label));
+    for &node in &nodes {
+        let label = node_label(hops, node, numeric, "<br/>");
+        let _ = writeln!(out, "  {}[{}]", ids[&node], quote(&label));
     }
     for edge in &edges {
         let from = edge.from.map_or("source", |node| &ids[&node]);
-        let mut label = Vec::new();
-        if edge.flows != all_flows {
-            label.push(format!("flows {}", ranges(&edge.flows)));
-        }
-        if edge.gap() > 0 {
-            label.push(format!("+{} silent", edge.gap()));
-        }
+        let label = edge_label(edge, &all_flows);
         let arrow = match edge.gap() {
             0 => "-->",
             _ => "-.->",
@@ -317,11 +322,10 @@ impl Drawn {
     }
 
     fn symbol(self) -> char {
-        let Drawn::Lines(d, dashed) = self else {
-            return match self {
-                Drawn::Text(c) => c,
-                _ => ' ',
-            };
+        let (d, dashed) = match self {
+            Drawn::Blank => return ' ',
+            Drawn::Text(c) => return c,
+            Drawn::Lines(d, dashed) => (d, dashed),
         };
         match (d & UP != 0, d & DOWN != 0, d & RIGHT != 0, d & LEFT != 0) {
             (true, true, false, false) if dashed => '┆',
@@ -418,10 +422,10 @@ pub fn draw(hops: &[HopStats], name: &dyn Fn(Node) -> String, width: usize) -> V
         let Some(from) = edge.from else { continue };
         let (x1, x2) = (x(&from), x(&edge.to));
         let below = row(from.ttl) + 1;
-        let (toward, back) = match x2.cmp(&x1) {
-            std::cmp::Ordering::Greater => (RIGHT, LEFT),
-            std::cmp::Ordering::Less => (LEFT, RIGHT),
-            std::cmp::Ordering::Equal => (DOWN, UP),
+        let (toward, back) = if x2 > x1 {
+            (RIGHT, LEFT)
+        } else {
+            (LEFT, RIGHT)
         };
         if x1 == x2 {
             grid[below][x1].add(UP | DOWN, false);

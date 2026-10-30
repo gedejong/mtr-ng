@@ -32,7 +32,7 @@ pub enum View {
 }
 
 /// The column chooser: every column, shown ones first in their current order.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ColumnChooser {
     pub entries: Vec<(Column, bool)>,
     pub cursor: usize,
@@ -84,7 +84,7 @@ impl ColumnChooser {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct UiState {
     pub mode: Mode,
     pub view: View,
@@ -96,7 +96,7 @@ pub struct UiState {
     pub show_hostnames: bool,
     /// MPLS labels and interfaces on rows of their own under the hop (`-e`)
     pub show_mpls: bool,
-    /// Selected row and scroll offset of the hop table or flow matrix.
+    /// Selected row and scroll offset of the table, flow matrix, route graph or map.
     pub table: TableState,
     /// Hop number of each row in the last frame, so keys can find the selected hop.
     pub row_hops: Vec<u8>,

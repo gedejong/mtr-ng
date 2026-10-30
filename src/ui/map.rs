@@ -142,10 +142,6 @@ pub fn render_map(
 ) {
     let shown: Vec<&HopStats> = hops.iter().filter(|hop| hop.sent > 0).collect();
     track_rows(ui, shown.iter().map(|hop| hop.hop).collect());
-    // No table clamps the selection here
-    if ui.table.selected().is_some_and(|row| row >= shown.len()) {
-        ui.table.select(shown.len().checked_sub(1));
-    }
     let message = |f: &mut Frame, lines: Vec<Line<'static>>| {
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
     };

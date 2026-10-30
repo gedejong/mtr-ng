@@ -3,10 +3,12 @@
 //! report, without sending a probe or a lookup.
 //!
 //! The log holds what the session was told, not the packets: each probe sent,
-//! each reply (from whom, how long it took, its TTL and MPLS labels) or timeout,
-//! and each name and AS that arrived. Played back in order, the same events
-//! build the same statistics. The path MTU search and `--flows auto`'s branch
-//! search are not recorded: a replay shows the flows, not their notes.
+//! each reply (from whom, how long it took, its TTL, MPLS labels, interfaces and
+//! what a NAT did to it) or timeout, each name, AS, AS name and IPmap location
+//! that arrived, and each reset. Played back in order, the same events build the
+//! same statistics. The path MTU search and `--flows auto`'s branch search are
+//! not recorded, so a replay shows the flows without the notes those searches
+//! add.
 //!
 //! Hops hidden by `--privacy-hops` are recorded with stand-ins (see `privacy`),
 //! so a log can be passed on like a report.
@@ -250,7 +252,6 @@ impl Recorder {
             IcmpResponseType::TimeExceeded => Answer::TimeExceeded,
             IcmpResponseType::PortUnreachable => Answer::PortUnreachable,
             IcmpResponseType::DestinationUnreachable => Answer::Unreachable,
-            IcmpResponseType::Timeout => return self.timeout(response.hop, probe),
             IcmpResponseType::TooBig { .. } => return,
         };
         let hidden = hop <= usize::from(self.privacy_hops);
@@ -306,19 +307,18 @@ impl Recorder {
 }
 
 /// The first line for a trace about to start.
-pub fn start(args: &Args, target: &str, target_addr: IpAddr) -> Start {
+pub fn start(args: &Args, target_addr: IpAddr) -> Start {
     let source = match args.privacy_hops {
         0 => gethostname::gethostname().to_string_lossy().into_owned(),
         _ => privacy::HIDDEN.to_string(),
     };
-    let protocol = args.protocol.to_possible_value();
     Start {
         version: env!("CARGO_PKG_VERSION").to_string(),
         start: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         source,
-        target: target.to_string(),
+        target: args.target.clone(),
         target_addr,
-        protocol: protocol.map_or_else(String::new, |p| p.get_name().to_string()),
+        protocol: args.protocol.name(),
         flows: match args.flows {
             Flows::Fixed(n) => n.to_string(),
             Flows::Auto => "auto".to_string(),
@@ -432,17 +432,12 @@ mod tests {
     }
 
     fn reply(hop: usize, probe: u64, from: IpAddr) -> ProbeResponse {
-        let now = Instant::now();
         ProbeResponse {
             hop,
             ordinal: Some(probe),
-            seq: 0,
             source_addr: from,
             icmp_type: IcmpResponseType::TimeExceeded,
             rtt: Duration::from_millis(5),
-            send_time: now,
-            receive_time: now,
-            precise_rtt_ns: 5_000_000,
             reply_ttl: Some(62),
             mpls: Vec::new(),
             interfaces: Vec::new(),

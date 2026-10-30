@@ -1,5 +1,6 @@
-//! Draws one frame: status line, hop table or flow matrix, RTT scale, and the help,
-//! column or hop detail overlay.
+//! Draws one frame: status line, hop table, flow matrix or route graph (the map is
+//! in `map.rs`), RTT scale, and the help, column chooser, hop detail or About
+//! overlay.
 
 use super::events::{Binding, COLUMN_KEYS, DETAIL_KEYS, TABLE_KEYS};
 use super::map::render_map;
@@ -16,8 +17,7 @@ use crate::icmp_ext::{Interface, MplsLabel};
 use crate::privacy;
 use crate::probe::Nat;
 use crate::topology;
-use crate::utils::network::truncate_hostname;
-use crate::utils::text::pack;
+use crate::utils::text::{pack, truncate};
 use crate::{HopStats, MtrSession, SparklineScale};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -107,12 +107,17 @@ pub fn render(f: &mut Frame, session: &MtrSession, ui: &mut UiState) {
     }
 }
 
-/// Remember which hop each row shows, and select the row `ui.follow` asks for.
+/// Remember which hop each row shows, select the row `ui.follow` asks for, and
+/// keep the selection on a row (as a table does when drawn; the route graph and
+/// the map aren't tables).
 pub(super) fn track_rows(ui: &mut UiState, row_hops: Vec<u8>) {
     if let Some(hop) = ui.follow.take() {
         if let Some(row) = row_hops.iter().position(|&h| h == hop) {
             ui.table.select(Some(row));
         }
+    }
+    if ui.table.selected().is_some_and(|row| row >= row_hops.len()) {
+        ui.table.select(row_hops.len().checked_sub(1));
     }
     ui.row_hops = row_hops;
 }
@@ -181,15 +186,6 @@ fn shows_names(session: &MtrSession, ui: &UiState) -> bool {
     ui.show_hostnames && !session.args.numeric
 }
 
-/// Host name, or the address when names are off or unknown.
-fn host_label(name: Option<&String>, addr: Option<IpAddr>, names: bool) -> String {
-    match (name, addr) {
-        (Some(name), _) if names => name.clone(),
-        (_, Some(addr)) => privacy::show(addr),
-        _ => "???".to_string(),
-    }
-}
-
 /// What a table row stands for.
 enum RowKind<'a> {
     Hop,
@@ -210,7 +206,7 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
     let names = shows_names(session, ui);
     let mut rows = Vec::new();
     for hop in hops.iter().filter(|hop| hop.sent > 0) {
-        let mut host = host_label(hop.hostname.as_ref(), hop.addr, names);
+        let mut host = columns::host(hop.hostname.as_deref(), hop.addr, names);
         if hop.has_multiple_paths() && hop.addr.is_some() {
             host = format!("{host} ({:.0}%)", hop.get_primary_path_percentage());
         }
@@ -225,7 +221,7 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
         for alt in hop.get_alternate_paths() {
             let host = format!(
                 "↳ {} ({:.0}%)",
-                host_label(alt.hostname.as_ref(), Some(alt.addr), names),
+                columns::host(alt.hostname.as_deref(), Some(alt.addr), names),
                 hop.get_path_percentage(alt)
             );
             rows.push(HostRow {
@@ -275,13 +271,7 @@ fn cell_text(column: Column, row: &HostRow, origin: Option<&Origin>) -> String {
         (Column::Hop, RowKind::Hop) => format!("{}.", row.hop.hop),
         (_, RowKind::Hop) => column.value(row.hop, origin),
         (Column::Geo, RowKind::Alternate(alt)) => alt.geo.as_ref().map_or(String::new(), |fix| {
-            let assessment = origin.and_then(|o| geo::assess(fix, alt.best_rtt, o));
-            let mark = if assessment.is_some_and(|a| a.impossible) {
-                "!"
-            } else {
-                ""
-            };
-            format!("{}{mark}", fix.place())
+            columns::location(fix, alt.best_rtt, origin)
         }),
         (Column::Last, RowKind::Alternate(alt)) => format_ms(alt.last_rtt),
         (Column::Avg, RowKind::Alternate(alt)) => format_ms(alt.avg_rtt()),
@@ -289,9 +279,7 @@ fn cell_text(column: Column, row: &HostRow, origin: Option<&Origin>) -> String {
         (Column::Back, RowKind::Alternate(alt)) => {
             columns::routers_back(alt.routers_back(), row.hop.hop)
         }
-        (Column::Asn | Column::AsName | Column::Prefix, RowKind::Alternate(alt))
-            if !privacy::is_stand_in(alt.addr) =>
-        {
+        (_, RowKind::Alternate(alt)) if column.is_as() && !privacy::is_stand_in(alt.addr) => {
             columns::as_value(column, alt.asn.as_ref())
         }
         _ => String::new(),
@@ -390,12 +378,7 @@ fn render_table(
     let columns = &columns[..widths.len()];
 
     let header = Row::new(columns.iter().map(|&c| match c {
-        Column::Host
-        | Column::Asn
-        | Column::AsName
-        | Column::Prefix
-        | Column::Geo
-        | Column::Graph => Line::from(c.header()),
+        _ if c.is_text() || c == Column::Graph => Line::from(c.header()),
         _ => right(c.header()),
     }))
     .style(Style::default().add_modifier(Modifier::BOLD));
@@ -415,15 +398,15 @@ fn render_table(
                         usize::from(width),
                     )))
                 }
-                Column::Host => Cell::from(truncate_hostname(&text, usize::from(width))),
-                Column::Geo | Column::Dist | Column::Stretch if text.ends_with('!') => {
+                Column::Host => Cell::from(truncate(&text, usize::from(width))),
+                _ if c.is_location() && text.ends_with('!') => {
                     let line = Line::styled(text, Style::default().fg(loss_color(ui.colors)));
                     Cell::from(match c {
                         Column::Geo => line,
                         _ => line.alignment(Alignment::Right),
                     })
                 }
-                Column::Asn | Column::AsName | Column::Prefix | Column::Geo => Cell::from(text),
+                _ if c.is_text() => Cell::from(text),
                 _ => Cell::from(right(text)),
             });
         let style = match row.kind {
@@ -583,7 +566,7 @@ fn legend_spans(hop: &HopStats, names: bool, colors: ColorSupport) -> Vec<Span<'
             spans.push(Span::raw("  "));
         }
         spans.push(letter_span(letter, colors));
-        let host = host_label(responder.hostname.as_ref(), Some(addr), names);
+        let host = columns::host(responder.hostname.as_deref(), Some(addr), names);
         spans.push(Span::raw(match letters.len() {
             1 => format!(" {host}"),
             _ => format!(" {host} ({:.0}%)", hop.get_path_percentage(responder)),
@@ -602,10 +585,6 @@ fn render_routes(
 ) {
     let shown: Vec<HopStats> = hops.iter().filter(|hop| hop.sent > 0).cloned().collect();
     track_rows(ui, shown.iter().map(|hop| hop.hop).collect());
-    // No table clamps the selection here
-    if ui.table.selected().is_some_and(|row| row >= shown.len()) {
-        ui.table.select(shown.len().checked_sub(1));
-    }
     let names = shows_names(session, ui);
     let name = |node| topology::node_name(&shown, node, !names);
     let lines = topology::draw(&shown, &name, usize::from(area.width));
@@ -635,6 +614,10 @@ fn render_routes(
     f.render_widget(Paragraph::new(text).scroll((scroll, 0)), area);
 }
 
+/// Under the route graph and the flow matrix while only one flow is probed
+const ONE_FLOW: &str =
+    "One flow follows one path: start with --flows auto to find load-balanced ones.";
+
 fn render_routes_legend(f: &mut Frame, area: Rect, session: &MtrSession) {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let mut lines = vec![Line::styled(
@@ -642,9 +625,7 @@ fn render_routes_legend(f: &mut Frame, area: Rect, session: &MtrSession) {
         dim,
     )];
     if session.flows() <= 1 {
-        lines.push(Line::from(
-            "One flow follows one path: start with --flows auto to find load-balanced ones.",
-        ));
+        lines.push(Line::from(ONE_FLOW));
     }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
@@ -656,9 +637,7 @@ fn render_flow_legend(f: &mut Frame, area: Rect, session: &MtrSession) {
         dim,
     )];
     if session.flows() <= 1 {
-        lines.push(Line::from(
-            "One flow follows one path: start with --flows auto to find load-balanced ones.",
-        ));
+        lines.push(Line::from(ONE_FLOW));
     }
     f.render_widget(Paragraph::new(lines), area);
 }
@@ -684,8 +663,9 @@ fn render_detail(f: &mut Frame, area: Rect, session: &MtrSession, hops: &[HopSta
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
-/// The detail pane's text, `width` cells wide: a summary, every responder, the RTT
-/// spread with a histogram, and MPLS labels.
+/// The detail pane's text, `width` cells wide: a summary, every responder, their
+/// networks and locations, the RTT spread with a histogram, MPLS labels, the
+/// interfaces routers named, and NATs.
 fn detail_lines(
     hop: &HopStats,
     session: &MtrSession,
@@ -749,41 +729,22 @@ fn detail_lines(
         }
     }
 
-    let labelled: Vec<_> = letters
+    let responders: Vec<_> = letters
         .iter()
         .map(|&(letter, addr)| (letter, &hop.responders[&addr]))
-        .filter(|(_, r)| !r.mpls.is_empty())
         .collect();
-    if !labelled.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::styled("MPLS labels", bold));
-        for (letter, responder) in labelled {
-            for label in &responder.mpls {
-                lines.push(Line::from(vec![
-                    letter_span(letter, ui.colors),
-                    Span::raw(format!("  {label}")),
-                ]));
-            }
-        }
-    }
-
-    let named: Vec<_> = letters
-        .iter()
-        .map(|&(letter, addr)| (letter, &hop.responders[&addr]))
-        .filter(|(_, r)| !r.interfaces.is_empty())
-        .collect();
-    if !named.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::styled("Interfaces (RFC 5837)", bold));
-        for (letter, responder) in named {
-            for interface in &responder.interfaces {
-                lines.push(Line::from(vec![
-                    letter_span(letter, ui.colors),
-                    Span::raw(format!("  {interface}")),
-                ]));
-            }
-        }
-    }
+    lines.extend(lettered_section(
+        "MPLS labels",
+        &responders,
+        |r| r.mpls.as_slice(),
+        ui.colors,
+    ));
+    lines.extend(lettered_section(
+        "Interfaces (RFC 5837)",
+        &responders,
+        |r| r.interfaces.as_slice(),
+        ui.colors,
+    ));
 
     let translated: Vec<_> = letters
         .iter()
@@ -827,6 +788,57 @@ fn detail_lines(
     lines
 }
 
+/// `facts` packed into lines `width` cells wide, the first after `letter` and the
+/// rest lined up under it.
+fn lettered(
+    letter: char,
+    facts: &[String],
+    width: usize,
+    style: Style,
+    colors: ColorSupport,
+) -> Vec<Line<'static>> {
+    pack(facts, " · ", width.saturating_sub(3))
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let lead = match i {
+                0 => letter_span(letter, colors),
+                _ => Span::raw(" "),
+            };
+            Line::from(vec![lead, Span::styled(format!("  {text}"), style)])
+        })
+        .collect()
+}
+
+/// A section titled `title` with a line for each of a responder's `items`, after
+/// its letter. Nothing when no responder has any.
+fn lettered_section<T: std::fmt::Display>(
+    title: &str,
+    responders: &[(char, &ResponderStats)],
+    items: impl Fn(&ResponderStats) -> &[T],
+    colors: ColorSupport,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = responders
+        .iter()
+        .flat_map(|&(letter, responder)| {
+            items(responder).iter().map(move |item| {
+                Line::from(vec![
+                    letter_span(letter, colors),
+                    Span::raw(format!("  {item}")),
+                ])
+            })
+        })
+        .collect();
+    if !lines.is_empty() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        lines.splice(
+            0..0,
+            [Line::from(""), Line::styled(title.to_string(), bold)],
+        );
+    }
+    lines
+}
+
 /// Each responder's AS with its name, and the prefix it is in. Nothing before
 /// an AS lookup has returned.
 fn network_lines(
@@ -850,16 +862,7 @@ fn network_lines(
             None => format!("AS{}", info.number),
         }];
         facts.extend(info.prefix.clone());
-        for (i, text) in pack(&facts, " · ", width.saturating_sub(3))
-            .into_iter()
-            .enumerate()
-        {
-            let lead = match i {
-                0 => letter_span(letter, colors),
-                _ => Span::raw(" "),
-            };
-            lines.push(Line::from(vec![lead, Span::raw(format!("  {text}"))]));
-        }
+        lines.extend(lettered(letter, &facts, width, Style::default(), colors));
     }
     lines
 }
@@ -922,20 +925,7 @@ fn location_lines(
             }
             false => Style::default(),
         };
-        // Continuation lines line up under the first, past the letter
-        for (i, text) in pack(&facts, " · ", width.saturating_sub(3))
-            .into_iter()
-            .enumerate()
-        {
-            let lead = match i {
-                0 => letter_span(letter, colors),
-                _ => Span::raw(" "),
-            };
-            lines.push(Line::from(vec![
-                lead,
-                Span::styled(format!("  {text}"), style),
-            ]));
-        }
+        lines.extend(lettered(letter, &facts, width, style, colors));
     }
     // Credit the database or IPmap where they placed something; names need none
     let from = |source: fn(&GeoFix) -> bool| placed.iter().any(|(_, _, fix)| source(fix));
@@ -1013,7 +1003,7 @@ fn responder_lines(
     let host_width = longest.min(width.saturating_sub(fixed)).max(8);
 
     let row = |host: String, cells: Vec<String>, asn: String, flows_text: String| {
-        let mut text = format!("{:<host_width$}", truncate_hostname(&host, host_width));
+        let mut text = format!("{:<host_width$}", truncate(&host, host_width));
         for cell in cells {
             text.push_str(&format!(" {cell:>6}"));
         }

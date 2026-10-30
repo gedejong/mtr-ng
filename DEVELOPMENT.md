@@ -94,13 +94,13 @@ cargo install cargo-llvm-cov
 cargo llvm-cov --locked --lcov --output-path lcov.info
 ```
 
-### Advisories
+### Dependencies
 
-CI does not check advisories yet (see `BACKLOG.md`, C8). Locally:
+CI runs `cargo deny check` against `deny.toml`: licences, bans and sources must pass, and advisories are reported without failing the build. Locally:
 
 ```bash
 cargo install cargo-deny
-cargo deny check advisories
+cargo deny check            # or: just audit
 ```
 
 ## CI (.github/workflows/ci.yml)
@@ -109,9 +109,10 @@ Runs on pushes to `master` and on pull requests:
 
 - **Lint**: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on stable.
 - **Test**: `cargo test --locked` on ubuntu-latest (x86_64), ubuntu-24.04-arm, macos-15 and windows-latest.
-- **Smoke test**: real probes to 127.0.0.1 (`mtr-ng -r -c 2 -n 127.0.0.1`), with sudo on Linux and without on macOS. It fails unless hop 1 answers.
+- **Smoke test**: real probes to 127.0.0.1 (`mtr-ng -r -c 2 -n 127.0.0.1`), with sudo on Linux, without on macOS, and through the ICMP API on Windows. It fails unless hop 1 answers.
 - **FreeBSD**: `cargo check --target x86_64-unknown-freebsd` (type-check only).
 - **MSRV**: `cargo check --all-targets` with the toolchain named by `rust-version` in `Cargo.toml`.
+- **cargo-deny**: advisories (allowed to fail), and bans, licences and sources.
 
 Every job uses `--locked`, so `Cargo.lock` must be committed and current.
 

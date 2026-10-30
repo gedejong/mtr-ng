@@ -330,20 +330,18 @@ cargo run -- --simulate --count 3 --report google.com
 # Run all unit tests
 cargo test
 
-# Use automated testing tools
-./scripts/test-dev.sh test-all     # Shell script
-just ci                            # The CI gate: fmt, clippy, tests
+# The CI gate: fmt, clippy, tests
+just ci
 
 # Real probes over loopback (no sudo on macOS, nor on Linux where ping sockets are allowed)
 cargo build && ./target/debug/mtr-ng -r -c 2 -n 127.0.0.1
 ```
 
-**Testing Documentation**: See [TESTING.md](TESTING.md) for comprehensive testing guide, and [DEVELOPMENT.md](DEVELOPMENT.md) for how probing works and how CI is set up.
+**Testing Documentation**: See [TESTING.md](TESTING.md) for simulation, the headless TUI check, recorded traces and the Linux network lab, and [DEVELOPMENT.md](DEVELOPMENT.md) for how probing works and how CI is set up.
 
 ### Development Tools
 The project includes several convenience tools:
 - `justfile` - Task runner with development commands (`just --list`)
-- `scripts/test-dev.sh` - Shell script for common testing tasks
 - Simulation mode - Exercise the UI and statistics without network access
 - Unit tests: `cargo test`
 

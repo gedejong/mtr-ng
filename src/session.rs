@@ -17,17 +17,18 @@ use hickory_resolver::{
 };
 
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
+    hash::Hash,
     net::IpAddr,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tracing::{debug, info, warn};
 
 /// Rounds in report mode when `--count` is not given (same as mtr).
 pub const DEFAULT_REPORT_CYCLES: usize = 10;
 
-// Add callback type for real-time updates
+/// Called when the session changes, so the TUI can redraw
 pub type UpdateCallback = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
@@ -38,7 +39,7 @@ pub struct MtrSession {
     pub args: Args,
     pub resolver: TokioResolver,
     pub num_hosts: usize, // TTLs probed each round (trimmed once the path end is known)
-    pub update_callback: Option<UpdateCallback>, // callback for real-time updates
+    update_callback: Option<UpdateCallback>,
     /// How long a probe may stay unanswered before it counts as lost
     pub probe_timeout: Duration,
     /// Reverse DNS results per address; `None` while pending or when there is no name
@@ -113,7 +114,7 @@ impl MtrSession {
         let mda = (args.flows == Flows::Auto).then(Mda::new);
         let recorder = match &args.record {
             Some(path) => {
-                let start = record::start(&args, &args.target, target_addr);
+                let start = record::start(&args, target_addr);
                 Some(Recorder::create(path, start, args.privacy_hops)?)
             }
             None => None,
@@ -317,7 +318,7 @@ impl MtrSession {
             return known.clone();
         }
         let source = self.geo_source.as_ref()?;
-        let public = crate::asn::is_public(addr) || self.args.simulate;
+        let public = crate::asn::is_public(addr) || self.is_simulated();
         self.locations
             .entry(addr)
             .or_insert_with(|| public.then(|| source.locate(addr)).flatten())
@@ -472,18 +473,11 @@ impl MtrSession {
             | IcmpResponseType::PortUnreachable
             | IcmpResponseType::DestinationUnreachable => {
                 hop.record_reply(response.ordinal, Some(addr), response.rtt);
-                if response.icmp_type == IcmpResponseType::DestinationUnreachable {
-                    hop.set_icmp_error();
-                }
                 hop.mark_as_target();
                 if index + 1 < self.num_hosts {
                     info!("Path ends at hop {} ({})", index + 1, addr);
                     self.num_hosts = index + 1;
                 }
-            }
-            IcmpResponseType::Timeout => {
-                hop.record_timeout(response.ordinal);
-                return true;
             }
             // Only path MTU probes are large enough; the tracer hands these on.
             IcmpResponseType::TooBig { .. } => return true,
@@ -514,11 +508,7 @@ impl MtrSession {
 
     /// True the first time an address is seen: the caller should look it up.
     pub fn want_lookup(&mut self, addr: IpAddr) -> bool {
-        if self.dns_names.contains_key(&addr) {
-            return false;
-        }
-        self.dns_names.insert(addr, None);
-        true
+        first_time(&mut self.dns_names, addr)
     }
 
     /// Store a reverse DNS result and show it on every hop where `addr` answered.
@@ -568,15 +558,10 @@ impl MtrSession {
     /// True the first time a public address is seen with `--aslookup`: the caller
     /// should look up its AS. Private and special addresses are never sent out.
     pub fn want_asn(&mut self, addr: IpAddr) -> bool {
-        if !self.args.wants_asn()
-            || self.is_simulated()
-            || !crate::asn::is_public(addr)
-            || self.asns.contains_key(&addr)
-        {
-            return false;
-        }
-        self.asns.insert(addr, None);
-        true
+        self.args.wants_asn()
+            && !self.is_simulated()
+            && crate::asn::is_public(addr)
+            && first_time(&mut self.asns, addr)
     }
 
     /// Store an AS lookup result, with the AS's name if it is known already, and
@@ -603,11 +588,7 @@ impl MtrSession {
 
     /// True the first time AS `number` is seen: the caller should look up its name.
     pub fn want_as_name(&mut self, number: u32) -> bool {
-        if self.as_names.contains_key(&number) {
-            return false;
-        }
-        self.as_names.insert(number, None);
-        true
+        first_time(&mut self.as_names, number)
     }
 
     /// Store the name of AS `number` and show it wherever that AS answered.
@@ -633,15 +614,10 @@ impl MtrSession {
     /// True the first time a public address is seen with `--ipmap`: the caller
     /// should ask IPmap where it is.
     pub fn want_ipmap(&mut self, addr: IpAddr) -> bool {
-        if !self.args.ipmap
-            || self.is_simulated()
-            || !crate::asn::is_public(addr)
-            || self.ipmap.contains_key(&addr)
-        {
-            return false;
-        }
-        self.ipmap.insert(addr, None);
-        true
+        self.args.ipmap
+            && !self.is_simulated()
+            && crate::asn::is_public(addr)
+            && first_time(&mut self.ipmap, addr)
     }
 
     /// Store IPmap's answer for `addr` and place it there, unless a city code in
@@ -679,8 +655,8 @@ impl MtrSession {
         probe
     }
 
-    /// Count probe `probe` to hop `index` as lost without waiting: it could not
-    /// be sent, or its sequence number came round again.
+    /// Count probe `probe` to hop `index` as lost: it timed out, could not be
+    /// sent, or its sequence number came round again.
     pub fn lost(&mut self, index: usize, probe: u64) {
         if let Some(recorder) = &self.recorder {
             recorder.timeout(index, probe);
@@ -713,17 +689,12 @@ impl MtrSession {
                 let Some(index) = index(hop) else { return };
                 // A negative or absurd RTT becomes 0
                 let rtt = Duration::from_nanos((rtt_ms * 1e6).round() as u64);
-                let now = Instant::now();
                 self.apply_response(&ProbeResponse {
                     hop: index,
                     ordinal: Some(probe),
-                    seq: 0,
                     source_addr: from,
                     icmp_type: kind.into(),
                     rtt,
-                    send_time: now,
-                    receive_time: now,
-                    precise_rtt_ns: rtt.as_nanos(),
                     reply_ttl,
                     mpls,
                     interfaces,
@@ -779,6 +750,17 @@ fn choose_address(
     }
 }
 
+/// True if `key` is new to `map`, which then holds it with no answer yet.
+fn first_time<K: Hash + Eq, V>(map: &mut HashMap<K, Option<V>>, key: K) -> bool {
+    match map.entry(key) {
+        Entry::Vacant(entry) => {
+            entry.insert(None);
+            true
+        }
+        Entry::Occupied(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,47 +768,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mtr_session_new_with_ip() {
-        let args = Args {
-            target: "192.168.1.1".to_string(),
-            count: Some(5),
-            interval: 500,
-            max_hops: 20,
-            report: false,
-            numeric: true,
-            sparkline_scale: crate::SparklineScale::Logarithmic,
-            ema_alpha: 0.1,
-            fields: None,
-            show_all: false,
-            simulate: false,
-            protocol: crate::args::ProbeProtocol::Icmp,
-            quiet: false,
-            aslookup: false,
-            mpls: false,
-            flows: Flows::Fixed(1),
-            json: false,
-            csv: false,
-            dot: false,
-            mermaid: false,
-            geojson: false,
-            ipv4: false,
-            ipv6: false,
-            pmtu: false,
-            geo: false,
-            geoip_mmdb: None,
-            origin: None,
-            privacy_hops: 0,
-            ipmap: false,
-            metrics: None,
-            record: None,
-            replay: None,
-            replay_speed: 1.0,
-            log_file: None,
-        };
-
-        let session = MtrSession::new(args).await;
-        assert!(session.is_ok());
-
-        let session = session.unwrap();
+        let session = session_for(&["-n", "-c", "5", "-i", "500", "-M", "20", "192.168.1.1"]).await;
         assert_eq!(session.target, "192.168.1.1");
         assert_eq!(session.target_addr.to_string(), "192.168.1.1");
         assert_eq!(session.hops.len(), 20);
@@ -836,47 +778,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mtr_session_new_with_localhost() {
-        let args = Args {
-            target: "localhost".to_string(),
-            count: Some(3),
-            interval: 1000,
-            max_hops: 15,
-            report: true,
-            numeric: false,
-            sparkline_scale: crate::SparklineScale::Logarithmic,
-            ema_alpha: 0.1,
-            fields: None,
-            show_all: false,
-            simulate: false,
-            protocol: crate::args::ProbeProtocol::Icmp,
-            quiet: false,
-            aslookup: false,
-            mpls: false,
-            flows: Flows::Fixed(1),
-            json: false,
-            csv: false,
-            dot: false,
-            mermaid: false,
-            geojson: false,
-            ipv4: false,
-            ipv6: false,
-            pmtu: false,
-            geo: false,
-            geoip_mmdb: None,
-            origin: None,
-            privacy_hops: 0,
-            ipmap: false,
-            metrics: None,
-            record: None,
-            replay: None,
-            replay_speed: 1.0,
-            log_file: None,
-        };
-
-        let session = MtrSession::new(args).await;
-        assert!(session.is_ok());
-
-        let session = session.unwrap();
+        let session = session_for(&["-r", "-c", "3", "-M", "15", "localhost"]).await;
         assert_eq!(session.target, "localhost");
         assert_eq!(session.hops.len(), 15);
         assert!(session.args.report);
@@ -884,17 +786,12 @@ mod tests {
     }
 
     fn response(hop: usize, kind: IcmpResponseType, from: [u8; 4]) -> ProbeResponse {
-        let now = std::time::Instant::now();
         ProbeResponse {
             hop,
             ordinal: None,
-            seq: 0,
             source_addr: IpAddr::V4(std::net::Ipv4Addr::from(from)),
             icmp_type: kind,
             rtt: Duration::from_millis(10),
-            send_time: now,
-            receive_time: now,
-            precise_rtt_ns: 10_000_000,
             reply_ttl: None,
             mpls: Vec::new(),
             interfaces: Vec::new(),
@@ -999,7 +896,7 @@ mod tests {
         ));
         assert_eq!(session.num_hosts, 5);
         assert_eq!(session.display_hop_count(), 5);
-        assert!(session.hops[4].has_icmp_error());
+        assert!(session.hops[4].is_target);
         assert_eq!(
             session.hops[4].received, 1,
             "an unreachable reply is still a reply"
@@ -1206,52 +1103,5 @@ mod tests {
             session.open_probe_engine().is_ok(),
             "simulated, even for IPv6"
         );
-    }
-
-    #[test]
-    fn test_mtr_session_clone() {
-        let args = Args {
-            target: "example.com".to_string(),
-            count: Some(10),
-            interval: 1000,
-            max_hops: 30,
-            report: false,
-            numeric: false,
-            sparkline_scale: crate::SparklineScale::Logarithmic,
-            ema_alpha: 0.1,
-            fields: None,
-            show_all: false,
-            simulate: false,
-            protocol: crate::args::ProbeProtocol::Icmp,
-            quiet: false,
-            aslookup: false,
-            mpls: false,
-            flows: Flows::Fixed(1),
-            json: false,
-            csv: false,
-            dot: false,
-            mermaid: false,
-            geojson: false,
-            ipv4: false,
-            ipv6: false,
-            pmtu: false,
-            geo: false,
-            geoip_mmdb: None,
-            origin: None,
-            privacy_hops: 0,
-            ipmap: false,
-            metrics: None,
-            record: None,
-            replay: None,
-            replay_speed: 1.0,
-            log_file: None,
-        };
-
-        // We can't easily test MtrSession::new in sync context due to async resolver,
-        // but we can test that the struct supports Clone
-        // This is mainly a compilation test
-        let args_clone = args.clone();
-        assert_eq!(args.target, args_clone.target);
-        assert_eq!(args.count, args_clone.count);
     }
 }

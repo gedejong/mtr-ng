@@ -3,11 +3,10 @@ use crate::geo::{self, Assessment, GeoFix, Origin};
 use crate::icmp_ext::{Extensions, Interface, MplsLabel};
 use crate::privacy::StandIns;
 use crate::probe::Nat;
-use crate::utils;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     net::IpAddr,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// Probes remembered per hop: for the history graph, the RTT distribution and
@@ -70,7 +69,6 @@ pub struct ResponderStats {
     /// Origin AS, prefix and AS name, with `--aslookup`
     pub asn: Option<AsInfo>,
     pub replies: usize,
-    pub last_seen: Instant,
     pub last_rtt: Option<Duration>,
     pub best_rtt: Option<Duration>,
     /// TTL of its latest reply on arrival, which hints at the return path's length
@@ -81,7 +79,7 @@ pub struct ResponderStats {
     pub interfaces: Vec<Interface>,
     /// What a NAT did to the probe its latest error quoted
     pub nat: Option<Nat>,
-    /// Where the geolocation database puts it
+    /// Where it is: from the router's name, RIPE IPmap or the database
     pub geo: Option<GeoFix>,
     rtt_sum_ns: u128,
 }
@@ -93,7 +91,6 @@ impl ResponderStats {
             hostname: None,
             asn: None,
             replies: 0,
-            last_seen: Instant::now(),
             last_rtt: None,
             best_rtt: None,
             reply_ttl: None,
@@ -107,7 +104,6 @@ impl ResponderStats {
 
     fn record(&mut self, rtt: Duration) {
         self.replies += 1;
-        self.last_seen = Instant::now();
         self.last_rtt = Some(rtt);
         self.best_rtt = Some(self.best_rtt.map_or(rtt, |best| best.min(rtt)));
         self.rtt_sum_ns += rtt.as_nanos();
@@ -128,7 +124,7 @@ const INITIAL_TTLS: [u8; 4] = [32, 64, 128, 255];
 
 /// Routers a packet crossed, judged by the TTL it arrived with: it most likely
 /// left with the next common initial TTL up.
-pub fn routers_back(arrival_ttl: u8) -> u8 {
+fn routers_back(arrival_ttl: u8) -> u8 {
     let initial = INITIAL_TTLS
         .into_iter()
         .find(|&ttl| ttl >= arrival_ttl)
@@ -147,7 +143,7 @@ pub struct HopStats {
     pub addr: Option<IpAddr>,
     pub hostname: Option<String>,
     pub asn: Option<AsInfo>,
-    /// Where the geolocation database puts the primary responder
+    /// Where the primary responder is
     pub geo: Option<GeoFix>,
     pub sent: usize,
     pub received: usize,
@@ -163,10 +159,7 @@ pub struct HopStats {
     pub history: VecDeque<ProbeRecord>,
     /// Loss among probes that have been answered or timed out (in-flight excluded)
     pub loss_percent: f64,
-    // Exponential smoothing factor (0.0 to 1.0)
-    // Higher values = more responsive to recent changes
-    // Lower values = more stable, less sensitive to spikes
-    // Typical values: 0.1-0.3 for network monitoring
+    /// Exponential smoothing factor (see `set_ema_alpha`)
     pub ema_alpha: f64,
 
     /// Every address that answered at this hop
@@ -176,9 +169,6 @@ pub struct HopStats {
 
     // Target tracking
     pub is_target: bool,
-
-    // ICMP error tracking (for MTR algorithm compatibility)
-    pub icmp_error: bool,
 
     // All-time accumulators
     rtt_sum_ns: u128,
@@ -211,7 +201,6 @@ impl HopStats {
             responders: HashMap::new(),
             flows: BTreeMap::new(),
             is_target: false,
-            icmp_error: false,
             rtt_sum_ns: 0,
             rtt_mean_ns: 0.0,
             rtt_m2: 0.0,
@@ -226,14 +215,15 @@ impl HopStats {
         let ordinal = self.sent as u64;
         self.sent += 1;
         self.flows.entry(flow).or_default().sent += 1;
+        // Make room first, so the history never outgrows its capacity
+        if self.history.len() == HISTORY_LEN {
+            self.history.pop_front();
+        }
         self.history.push_back(ProbeRecord {
             flow,
             outcome: PacketOutcome::Pending,
             from: None,
         });
-        if self.history.len() > HISTORY_LEN {
-            self.history.pop_front();
-        }
         self.update_loss_percent();
         ordinal
     }
@@ -308,17 +298,20 @@ impl HopStats {
         }
     }
 
-    /// Reply for the most recent probe, no address (tests).
+    /// Reply for the most recent probe, no address.
+    #[cfg(test)]
     pub fn add_rtt(&mut self, rtt: Duration) {
         self.record_reply(None, None, rtt);
     }
 
     /// Reply from `addr` for the most recent probe.
+    #[cfg(test)]
     pub fn add_rtt_from_addr(&mut self, addr: IpAddr, rtt: Duration) {
         self.record_reply(None, Some(addr), rtt);
     }
 
     /// Timeout for the oldest pending probe.
+    #[cfg(test)]
     pub fn add_timeout(&mut self) {
         self.record_timeout(None);
     }
@@ -346,7 +339,7 @@ impl HopStats {
 
     fn update_rtt_stats(&mut self, rtt: Duration) {
         if let Some(prev_rtt) = self.last_rtt {
-            let jitter = utils::time::calculate_timing_jitter(rtt, prev_rtt);
+            let jitter = rtt.abs_diff(prev_rtt);
             self.last_jitter = Some(jitter);
             self.jitter_sum_ns += jitter.as_nanos();
             self.jitter_count += 1;
@@ -365,11 +358,10 @@ impl HopStats {
         self.rtt_mean_ns += delta / self.received as f64;
         self.rtt_m2 += delta * (x - self.rtt_mean_ns);
 
-        self.ema_rtt = Some(utils::time::calculate_timing_ema(
-            rtt,
-            self.ema_rtt,
-            self.ema_alpha,
-        ));
+        self.ema_rtt = Some(self.ema_rtt.map_or(rtt, |ema| {
+            let (rtt, ema) = (rtt.as_nanos() as f64, ema.as_nanos() as f64);
+            Duration::from_nanos((self.ema_alpha * rtt + (1.0 - self.ema_alpha) * ema) as u64)
+        }));
     }
 
     /// RTTs of the answered probes in the history window, oldest first.
@@ -398,25 +390,24 @@ impl HopStats {
         })
     }
 
+    /// The address with the most replies.
+    pub fn primary(&self) -> Option<&ResponderStats> {
+        self.responders.get(&self.addr?)
+    }
+
     /// What a NAT did to the probe the primary responder's latest error quoted.
     pub fn nat(&self) -> Option<Nat> {
-        self.addr
-            .and_then(|addr| self.responders.get(&addr))
-            .and_then(|r| r.nat)
+        self.primary()?.nat
     }
 
     /// Interfaces the primary responder's latest reply named.
     pub fn interfaces(&self) -> &[Interface] {
-        self.addr
-            .and_then(|addr| self.responders.get(&addr))
-            .map_or(&[], |r| &r.interfaces)
+        self.primary().map_or(&[], |r| &r.interfaces)
     }
 
     /// MPLS labels in the primary responder's latest reply.
     pub fn mpls(&self) -> &[MplsLabel] {
-        self.addr
-            .and_then(|addr| self.responders.get(&addr))
-            .map_or(&[], |r| &r.mpls)
+        self.primary().map_or(&[], |r| &r.mpls)
     }
 
     /// How the primary responder's location squares with its best RTT, seen
@@ -451,10 +442,17 @@ impl HopStats {
             .count()
     }
 
-    pub fn update_loss_percent(&mut self) {
+    /// Probes that timed out: neither answered nor still in flight.
+    pub fn lost(&self) -> usize {
+        self.sent
+            .saturating_sub(self.in_flight())
+            .saturating_sub(self.received)
+    }
+
+    fn update_loss_percent(&mut self) {
         let settled = self.sent.saturating_sub(self.in_flight());
         self.loss_percent = if settled > 0 {
-            settled.saturating_sub(self.received) as f64 / settled as f64 * 100.0
+            self.lost() as f64 / settled as f64 * 100.0
         } else {
             0.0
         };
@@ -477,7 +475,7 @@ impl HopStats {
     }
 
     /// Replies across all responders
-    pub fn get_total_frequency(&self) -> usize {
+    fn get_total_frequency(&self) -> usize {
         self.responders.values().map(|r| r.replies).sum()
     }
 
@@ -493,7 +491,7 @@ impl HopStats {
 
     /// Share of replies that came from the primary responder
     pub fn get_primary_path_percentage(&self) -> f64 {
-        match self.addr.and_then(|addr| self.responders.get(&addr)) {
+        match self.primary() {
             Some(primary) => self.get_path_percentage(primary),
             None => 100.0, // If no frequency data, assume 100%
         }
@@ -562,22 +560,12 @@ impl HopStats {
     /// Values closer to 0.0 make the average more stable and less sensitive to spikes
     /// Typical values for network monitoring: 0.1-0.3
     pub fn set_ema_alpha(&mut self, alpha: f64) {
-        self.ema_alpha = utils::math::clamp_ratio(alpha);
+        self.ema_alpha = alpha.clamp(0.0, 1.0);
     }
 
     /// Mark this hop as containing the target destination
     pub fn mark_as_target(&mut self) {
         self.is_target = true;
-    }
-
-    /// Check if this hop has returned an ICMP error (like original MTR)
-    pub fn has_icmp_error(&self) -> bool {
-        self.icmp_error
-    }
-
-    /// Mark this hop as having an ICMP error
-    pub fn set_icmp_error(&mut self) {
-        self.icmp_error = true;
     }
 }
 
@@ -750,8 +738,8 @@ mod tests {
         assert_eq!(hop.loss_percent, 0.0); // still in flight, so not lost (as in mtr)
         assert_eq!(hop.in_flight(), 1);
 
-        hop.add_rtt(Duration::from_millis(100)); // This also calls increment_sent internally
-        assert_eq!(hop.sent, 1); // Should still be 1 since add_rtt doesn't increment sent
+        hop.add_rtt(Duration::from_millis(100));
+        assert_eq!(hop.sent, 1); // add_rtt answers the probe sent, it doesn't send one
         assert_eq!(hop.received, 1);
         assert_eq!(hop.loss_percent, 0.0); // 1 sent, 1 received = 0% loss
     }
@@ -877,7 +865,7 @@ mod tests {
         assert_eq!(hop.last_jitter, Some(Duration::from_millis(40))); // |150 - 110| = 40
                                                                       // Average of jitter values: (20 + 10 + 40) / 3 = 23.333... ms
         let expected_avg_ms = hop.jitter_avg.unwrap().as_millis() as u64;
-        assert_eq!(expected_avg_ms, 23); // Rounded to nearest ms
+        assert_eq!(expected_avg_ms, 23); // as_millis truncates
     }
 
     fn addr(last: u8) -> IpAddr {

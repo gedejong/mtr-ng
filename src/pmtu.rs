@@ -132,11 +132,6 @@ impl PathMtu {
         self.vanished.filter(|_| self.done)
     }
 
-    /// TTL of the hop that answered the largest probe
-    pub fn reached(&self) -> Option<u8> {
-        self.reached
-    }
-
     /// `router`, at `hop` if known, could not forward a probe of `size`: its next
     /// link takes `mtu` bytes (0 when it didn't say).
     pub fn too_big(&mut self, size: u16, router: IpAddr, hop: Option<u8>, mtu: u16) {

@@ -1,6 +1,6 @@
 use crate::args::Column;
 use crate::columns;
-use crate::geo::{self, Assessment, Inflation, Origin};
+use crate::geo::{self, Assessment, GeoFix, Inflation, Origin};
 use crate::hop_stats::FlowStats;
 use crate::icmp_ext::MplsLabel;
 use crate::mda::Mda;
@@ -9,9 +9,9 @@ use crate::privacy::{self, show};
 use crate::probe::Nat;
 use crate::record::Replay;
 use crate::tracer::Trace;
-use crate::utils::network;
 use crate::{metrics, topology, HopStats, MtrSession, Result};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
@@ -56,8 +56,8 @@ fn report_columns(columns: &[Column]) -> Vec<Column> {
 
 /// The header line and one line per probed hop, aligned however long the names
 /// are. With `mpls`, each hop is followed by the labels its router reported, as
-/// `mtr -e` prints them, and the interfaces it named, and by its `notes` (where the path MTU drops, how many
-/// branches it has). Distances are from `origin`.
+/// `mtr -e` prints them, and the interfaces it named; then always by its `notes`
+/// (`MtrSession::notes_after`). Distances are from `origin`.
 fn format_table(
     hops: &[HopStats],
     columns: &[Column],
@@ -118,10 +118,7 @@ fn align(cells: &[String], columns: &[Column], widths: &[usize]) -> String {
             line.push(' ');
         }
         let pad = " ".repeat(width.saturating_sub(cell.width()));
-        if matches!(
-            column,
-            Column::Host | Column::Asn | Column::AsName | Column::Prefix | Column::Geo
-        ) {
+        if column.is_text() {
             line.push_str(cell);
             line.push_str(&pad);
         } else {
@@ -142,10 +139,7 @@ fn geo_notes(
     inflation: Option<Inflation>,
     attribution: Option<&str>,
 ) -> Vec<String> {
-    if !columns
-        .iter()
-        .any(|c| matches!(c, Column::Geo | Column::Dist | Column::Stretch))
-    {
+    if !columns.iter().any(|c| c.is_location()) {
         return Vec::new();
     }
     let mut notes = Vec::new();
@@ -189,28 +183,20 @@ fn geo_notes(
             detour.direct_km
         ));
     }
-    let named: std::collections::BTreeSet<u16> = hops
-        .iter()
-        .filter(|hop| hop.geo.as_ref().is_some_and(|fix| fix.from_name.is_some()))
-        .map(|hop| u16::from(hop.hop))
-        .collect();
-    if !named.is_empty() {
-        notes.push(format!(
-            "Placed by the city code in the router's name: hop {}",
-            topology::ranges(&named)
-        ));
-    }
-    let measured: std::collections::BTreeSet<u16> = hops
-        .iter()
-        .filter(|hop| hop.geo.as_ref().is_some_and(|fix| fix.from_ipmap.is_some()))
-        .map(|hop| u16::from(hop.hop))
-        .collect();
-    if !measured.is_empty() {
-        notes.push(format!(
-            "Placed by RIPE IPmap: hop {}",
-            topology::ranges(&measured)
-        ));
-    }
+    let mut placed_by = |by: &str, placed: fn(&GeoFix) -> bool| {
+        let placed: BTreeSet<u16> = hops
+            .iter()
+            .filter(|hop| hop.geo.as_ref().is_some_and(placed))
+            .map(|hop| u16::from(hop.hop))
+            .collect();
+        if !placed.is_empty() {
+            notes.push(format!("Placed by {by}: hop {}", topology::ranges(&placed)));
+        }
+    };
+    placed_by("the city code in the router's name", |fix| {
+        fix.from_name.is_some()
+    });
+    placed_by("RIPE IPmap", |fix| fix.from_ipmap.is_some());
     if let Some(credit) = attribution {
         notes.push(format!("Locations: {credit}"));
     }
@@ -218,11 +204,7 @@ fn geo_notes(
 }
 
 fn host_label(hop: &HopStats, numeric: bool) -> String {
-    if numeric {
-        network::format_optional_ip(hop.addr)
-    } else {
-        network::format_hostname_with_fallback(hop.hostname.clone(), hop.addr)
-    }
+    columns::host(hop.hostname.as_deref(), hop.addr, !numeric)
 }
 
 /// Widest the report's route graph gets; names longer than their lane are cut.
@@ -242,9 +224,7 @@ fn json_ms(rtt: Option<Duration>) -> Value {
     })
 }
 
-/// One entry per probed hop, with mtr's field names (`count`, `Loss%`, `Snt`,
-/// `Wrst`, ...) so parsers written for `mtr --json` keep working. Extra addresses
-/// that answered for a hop are listed under `alternates`.
+/// An MPLS label stack entry, with mtr's keys.
 fn json_mpls(labels: &[MplsLabel]) -> Value {
     labels
         .iter()
@@ -252,8 +232,10 @@ fn json_mpls(labels: &[MplsLabel]) -> Value {
         .collect()
 }
 
-/// mtr's hub fields, plus our own. With more than one flow, `flows[f]` is the
-/// address flow `f` met here most often. `geo` holds the location, when known,
+/// One entry per probed hop, with mtr's field names (`count`, `Loss%`, `Snt`,
+/// `Wrst`, ...) so parsers written for `mtr --json` keep working, plus our own.
+/// Extra addresses that answered for a hop are listed under `alternates`. With
+/// more than one flow, `flows[f]` is the address flow `f` met here most often. `geo` holds the location, when known,
 /// with the distance from `origin` and the light-speed verdict.
 fn json_hubs(
     hops: &[HopStats],
@@ -326,7 +308,7 @@ fn json_hubs(
                 .map(|alt| {
                     let mut alternate = json!({
                         "ip": show(alt.addr),
-                        "host": alt.hostname.clone().filter(|_| !numeric).unwrap_or_else(|| show(alt.addr)),
+                        "host": columns::host(alt.hostname.as_deref(), Some(alt.addr), !numeric),
                         "replies": alt.replies,
                         "Last": json_ms(alt.last_rtt),
                         "Avg": json_ms(alt.avg_rtt()),
@@ -459,7 +441,7 @@ fn geojson(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Value {
             "title": format!("{}. {}", hop.hop, host_label(hop, numeric)),
             "hop": hop.hop,
             "host": host_label(hop, numeric),
-            "ip": addr.to_string(),
+            "ip": show(addr),
             "city": fix.city,
             "country": fix.country,
             "accuracy_km": fix.accuracy_km,
@@ -557,6 +539,9 @@ pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Resu
     let hops = &session.hops[..session.display_hop_count()];
     let origin = session.origin();
     let origin = origin.as_ref();
+    let attribution = session.geo_attribution();
+    let attribution = attribution.as_deref();
+    let inflation = session.inflation();
     let source = match (args.privacy_hops, &session.replayed) {
         (1.., _) => privacy::HIDDEN.to_string(),
         (0, Some(recorded)) => recorded.source.clone(),
@@ -578,11 +563,7 @@ pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Resu
                 "hubs": json_hubs(hops, args.numeric, args.wants_asn(), session.flows(), origin),
             }
         });
-        if let Some(geo) = json_geo(
-            session.geo_attribution().as_deref(),
-            origin,
-            session.inflation(),
-        ) {
+        if let Some(geo) = json_geo(attribution, origin, inflation) {
             report["report"]["mtr"]["geo"] = geo;
         }
         if let Some(path) = &args.replay {
@@ -602,11 +583,7 @@ pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Resu
         collection["target"] = json!(session.target);
         collection["start"] = json!(start.to_rfc3339());
         collection["simulated"] = json!(session.is_simulated());
-        if let Some(geo) = json_geo(
-            session.geo_attribution().as_deref(),
-            origin,
-            session.inflation(),
-        ) {
+        if let Some(geo) = json_geo(attribution, origin, inflation) {
             collection["geo"] = geo;
         }
         println!("{}", serde_json::to_string_pretty(&collection)?);
@@ -648,13 +625,7 @@ pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Resu
     for line in format_table(hops, &columns, args.numeric, args.mpls, &notes, origin) {
         println!("{line}");
     }
-    let notes = geo_notes(
-        hops,
-        &columns,
-        origin,
-        session.inflation(),
-        session.geo_attribution().as_deref(),
-    );
+    let notes = geo_notes(hops, &columns, origin, inflation, attribution);
     if !notes.is_empty() {
         println!();
         notes.iter().for_each(|note| println!("{note}"));

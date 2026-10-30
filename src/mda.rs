@@ -30,11 +30,11 @@ use std::{
 const MISS: f64 = 0.05;
 
 /// How long the branches one discovery found are trusted before the next
-pub const REDISCOVER_AFTER: Duration = Duration::from_secs(600);
+const REDISCOVER_AFTER: Duration = Duration::from_secs(600);
 
 /// Flows that must answer at a hop where `k` addresses answered before the chance
 /// that a (k+1)th branch went unmet falls to 5%, if balancers spread flows evenly.
-pub fn needed(k: usize) -> usize {
+fn needed(k: usize) -> usize {
     match k {
         0 => 0,
         _ => (k..)

@@ -3,9 +3,10 @@
 
 use crate::args::Column;
 use crate::asn::AsInfo;
-use crate::geo::{self, Assessment, Origin};
+use crate::geo::{self, Assessment, GeoFix, Origin};
 use crate::privacy;
 use crate::HopStats;
+use std::net::IpAddr;
 use std::time::Duration;
 
 /// An RTT in milliseconds with one decimal, as mtr shows it; `???` without a reply.
@@ -14,6 +15,29 @@ pub fn format_ms(rtt: Option<Duration>) -> String {
         || "???".to_string(),
         |rtt| format!("{:.1}", rtt.as_secs_f64() * 1000.0),
     )
+}
+
+/// `!` for a location the RTT rules out.
+fn mark(assessment: Option<Assessment>) -> &'static str {
+    match assessment.is_some_and(|a| a.impossible) {
+        true => "!",
+        false => "",
+    }
+}
+
+/// `fix`'s place, marked `!` when the `best` RTT rules it out as seen from `origin`.
+pub fn location(fix: &GeoFix, best: Option<Duration>, origin: Option<&Origin>) -> String {
+    let assessment = origin.and_then(|origin| geo::assess(fix, best, origin));
+    format!("{}{}", fix.place(), mark(assessment))
+}
+
+/// The host name when `names` are on and one is known, else the address, else `???`.
+pub fn host(name: Option<&str>, addr: Option<IpAddr>, names: bool) -> String {
+    match (name, addr) {
+        (Some(name), _) if names => name.to_string(),
+        (_, Some(addr)) => privacy::show(addr),
+        _ => "???".to_string(),
+    }
 }
 
 /// Routers a reply from hop `hop` crossed on the way back, and how many more
@@ -98,16 +122,22 @@ impl Column {
 
     /// True for the columns that hold one number per hop.
     pub fn is_numeric(self) -> bool {
-        !matches!(
-            self,
-            Column::Hop
-                | Column::Host
-                | Column::Asn
-                | Column::AsName
-                | Column::Prefix
-                | Column::Geo
-                | Column::Graph
-        )
+        !matches!(self, Column::Hop | Column::Graph) && !self.is_text()
+    }
+
+    /// Text, aligned left: the host, the AS columns and the location
+    pub fn is_text(self) -> bool {
+        self == Column::Host || self == Column::Geo || self.is_as()
+    }
+
+    /// The columns an AS lookup fills
+    pub fn is_as(self) -> bool {
+        matches!(self, Column::Asn | Column::AsName | Column::Prefix)
+    }
+
+    /// The columns a location fills
+    pub fn is_location(self) -> bool {
+        matches!(self, Column::Geo | Column::Dist | Column::Stretch)
     }
 
     /// Narrowest a numeric column gets, so the table doesn't shift as values change.
@@ -127,13 +157,6 @@ impl Column {
     pub fn value(self, hop: &HopStats, origin: Option<&Origin>) -> String {
         let ms = format_ms;
         let assessment = || hop.assess(origin);
-        let mark = |a: Option<Assessment>| {
-            if a.is_some_and(|a| a.impossible) {
-                "!"
-            } else {
-                ""
-            }
-        };
         let hidden = hop.addr.is_some_and(privacy::is_stand_in);
         match self {
             Column::Asn
@@ -160,7 +183,7 @@ impl Column {
             Column::Asn | Column::AsName | Column::Prefix if hop.addr.is_none() => String::new(),
             Column::Asn | Column::AsName | Column::Prefix => as_value(self, hop.asn.as_ref()),
             Column::Geo => match (&hop.geo, hop.addr) {
-                (Some(fix), _) => format!("{}{}", fix.place(), mark(assessment())),
+                (Some(fix), _) => location(fix, hop.best_rtt, origin),
                 (None, Some(_)) => "???".to_string(),
                 (None, None) => String::new(),
             },
@@ -180,11 +203,7 @@ impl Column {
             Column::Reach => hop.best_rtt.map_or("???".to_string(), |rtt| {
                 format!("{:.0}", geo::reach_km(rtt))
             }),
-            Column::Back => routers_back(
-                hop.addr
-                    .and_then(|addr| hop.responders.get(&addr)?.routers_back()),
-                hop.hop,
-            ),
+            Column::Back => routers_back(hop.primary().and_then(|r| r.routers_back()), hop.hop),
             Column::Hop | Column::Host | Column::Graph => String::new(),
         }
     }
@@ -225,6 +244,15 @@ mod tests {
                 "{column:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_host_is_its_name_when_names_are_on() {
+        let addr = Some(IpAddr::from([192, 0, 2, 1]));
+        assert_eq!(host(Some("r1.example"), addr, true), "r1.example");
+        assert_eq!(host(Some("r1.example"), addr, false), "192.0.2.1");
+        assert_eq!(host(None, addr, true), "192.0.2.1");
+        assert_eq!(host(None, None, true), "???");
     }
 
     #[test]

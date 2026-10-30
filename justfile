@@ -36,11 +36,6 @@ formats:
     cargo run -- --simulate --count 2 --report --show-all google.com
     cargo run -- --simulate --count 2 --report --numeric google.com
 
-# Run the comprehensive test suite
-test-all:
-    @echo "🚀 Running comprehensive test suite"
-    ./scripts/test.sh
-
 # Development build and test cycle
 dev:
     cargo build
@@ -102,9 +97,9 @@ bench:
     time cargo run --release -- --simulate --count 100 --interval 10 --report google.com > /dev/null
     @echo "✅ Benchmark completed"
 
-# Check for security vulnerabilities
+# Check dependencies for advisories, licences and sources (the cargo-deny jobs in CI)
 audit:
-    cargo audit
+    cargo deny check
 
 # The CI gate: formatting, clippy and tests
 ci: lint test
