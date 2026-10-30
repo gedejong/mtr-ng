@@ -125,16 +125,11 @@ pub struct Reply {
 /// matching replies to probes and timeouts are the tracer's job.
 pub trait Prober: Send {
     /// Send one probe with the given TTL (IPv4) or hop limit (IPv6) in `flow`
-    /// (below `MAX_FLOWS`), padded to `size` bytes with the IP header if given.
+    /// (below `MAX_FLOWS`), padded to `size` bytes with the IP header, though
+    /// never smaller than its headers and what tells it apart.
     /// Probes in one flow look alike to load balancers, so they follow one path.
     /// Returns its sequence number and the time it was sent.
-    fn send(
-        &mut self,
-        dst: IpAddr,
-        ttl: u8,
-        flow: u16,
-        size: Option<u16>,
-    ) -> io::Result<(u16, Instant)>;
+    fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16, size: u16) -> io::Result<(u16, Instant)>;
 
     /// The stream of replies. Can be taken once.
     fn take_replies(&mut self) -> Option<mpsc::UnboundedReceiver<Reply>>;
@@ -394,24 +389,13 @@ impl ProbeEngine {
 }
 
 impl Prober for ProbeEngine {
-    fn send(
-        &mut self,
-        dst: IpAddr,
-        ttl: u8,
-        flow: u16,
-        size: Option<u16>,
-    ) -> io::Result<(u16, Instant)> {
+    fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16, size: u16) -> io::Result<(u16, Instant)> {
         debug_assert!(flow < MAX_FLOWS);
         debug_assert_eq!(dst.is_ipv6(), self.ipv6, "one engine probes one family");
         let seq = self.alloc_seq();
         // Bytes after the IP header and the ICMP or UDP header
         let ip_header = if self.ipv6 { 40 } else { 20 };
-        let padded = |minimum: usize| {
-            size.map_or(minimum, |size| {
-                usize::from(size).saturating_sub(ip_header + 8)
-            })
-            .max(minimum)
-        };
+        let padded = |minimum: usize| usize::from(size).saturating_sub(ip_header + 8).max(minimum);
         let socket = self.udp.as_ref().map_or(&*self.socket, |udp| &udp.socket);
         if self.ipv6 {
             socket.set_unicast_hops_v6(ttl.into())?;
@@ -444,9 +428,7 @@ impl Prober for ProbeEngine {
         } else {
             ECHO_REQUEST
         };
-        let mut packet = echo_request(kind, id, seq, FLOW_CHECKSUM + flow).to_vec();
-        // Zeros add nothing to the checksum.
-        packet.resize(8 + padded(packet.len() - 8), 0);
+        let packet = echo_probe(kind, id, seq, FLOW_CHECKSUM + flow, padded(2));
 
         let to = match dst {
             IpAddr::V4(_) => SocketAddr::new(dst, 0),
@@ -1034,6 +1016,14 @@ fn echo_request(kind: u8, id: u16, seq: u16, checksum: u16) -> [u8; 10] {
     packet
 }
 
+/// An echo request with `payload` bytes after its header: the two that make the
+/// checksum `checksum`, then zeros, which add nothing to it.
+fn echo_probe(kind: u8, id: u16, seq: u16, checksum: u16, payload: usize) -> Vec<u8> {
+    let mut packet = echo_request(kind, id, seq, checksum).to_vec();
+    packet.resize(8 + payload.max(2), 0);
+    packet
+}
+
 fn ones_complement_add(a: u16, b: u16) -> u16 {
     let sum = u32::from(a) + u32::from(b);
     ((sum & 0xffff) + (sum >> 16)) as u16
@@ -1386,6 +1376,18 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn padding_keeps_the_checksum_and_never_cuts_the_sequence_bytes() {
+        let checksum = FLOW_CHECKSUM + 5;
+        // 64 bytes with the IP header, mtr's size, and 30, the least there is
+        for (payload, len) in [(64 - 20 - 8, 44), (0, 10), (2, 10)] {
+            let packet = echo_probe(ECHO_REQUEST, 0x1234, 40000, checksum, payload);
+            assert_eq!(packet.len(), len);
+            assert_eq!(packet[2..4], checksum.to_be_bytes());
+            assert_eq!(calculate_icmp_checksum(&packet), 0, "{payload} bytes");
         }
     }
 

@@ -32,9 +32,6 @@ use windows_sys::Win32::{
     },
 };
 
-/// Bytes of data in each echo request, as Windows' ping sends
-const PAYLOAD: [u8; 32] = [0; 32];
-
 /// Room for the reply: the reply structure, the data echoed back, and the
 /// quoted packet of an error, with plenty to spare
 const REPLY_WORDS: usize = 512;
@@ -61,13 +58,7 @@ impl IcmpApi {
 }
 
 impl Prober for IcmpApi {
-    fn send(
-        &mut self,
-        dst: IpAddr,
-        ttl: u8,
-        _flow: u16,
-        _size: Option<u16>,
-    ) -> io::Result<(u16, Instant)> {
+    fn send(&mut self, dst: IpAddr, ttl: u8, _flow: u16, size: u16) -> io::Result<(u16, Instant)> {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         let (source, tx) = (self.source, self.tx.clone());
@@ -77,7 +68,7 @@ impl Prober for IcmpApi {
             .stack_size(256 * 1024)
             .spawn(move || {
                 let start = Instant::now();
-                let answer = echo(source, dst, ttl);
+                let answer = echo(source, dst, ttl, size);
                 // The tracer measures from `sent_at`; the thread may have started late.
                 let received_at = sent_at + start.elapsed();
                 match answer {
@@ -133,10 +124,12 @@ impl Drop for Handle {
 /// Send one echo request with `ttl` and wait for what answers it: the kind of
 /// answer, who sent it, and the TTL it arrived with (IPv4 only). None when
 /// nothing answered in time or the answer is of no use.
+/// Send an echo request of `size` bytes with its IP header, and wait for the answer.
 fn echo(
     source: Option<IpAddr>,
     dst: IpAddr,
     ttl: u8,
+    size: u16,
 ) -> io::Result<Option<(IcmpResponseType, IpAddr, Option<u8>)>> {
     let handle = Handle::open(dst.is_ipv6())?;
     let options = IP_OPTION_INFORMATION {
@@ -147,11 +140,13 @@ fn echo(
         OptionsData: ptr::null_mut(),
     };
     let timeout = u32::try_from(PROBE_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
-    // u64 words keep the reply structures aligned.
-    let mut reply = [0u64; REPLY_WORDS];
-    let reply_size = u32::try_from(size_of::<[u64; REPLY_WORDS]>()).unwrap_or(u32::MAX);
-    let data = PAYLOAD.as_ptr().cast::<c_void>();
-    let data_size = PAYLOAD.len() as u16;
+    let headers = if dst.is_ipv6() { 40 + 8 } else { 20 + 8 };
+    let payload = vec![0u8; usize::from(size.saturating_sub(headers))];
+    // The reply holds the echoed data too; u64 words keep its structures aligned.
+    let mut reply = vec![0u64; REPLY_WORDS + payload.len().div_ceil(8)];
+    let reply_size = u32::try_from(reply.len() * size_of::<u64>()).unwrap_or(u32::MAX);
+    let data = payload.as_ptr().cast::<c_void>();
+    let data_size = payload.len() as u16;
 
     match dst {
         IpAddr::V4(v4) => {
@@ -266,7 +261,7 @@ mod tests {
     fn echo_to(addr: IpAddr) {
         let mut prober = IcmpApi::new(addr);
         let mut replies = prober.take_replies().unwrap();
-        let (seq, sent_at) = prober.send(addr, 64, 0, None).unwrap();
+        let (seq, sent_at) = prober.send(addr, 64, 0, 64).unwrap();
         drop(prober); // so that the channel closes if the probe's thread sends nothing
         let reply = replies.blocking_recv().expect("an answer");
         assert_eq!(reply.seq, seq);

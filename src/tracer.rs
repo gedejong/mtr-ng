@@ -219,9 +219,10 @@ fn send_round(
     in_flight: &mut HashMap<u16, InFlight>,
 ) {
     let mut s = session.lock().unwrap();
+    let size = s.args.psize;
     for hop in 0..s.num_hosts {
         let ordinal = s.sent(hop, flow);
-        match prober.send(target, (hop + 1) as u8, flow, None) {
+        match prober.send(target, (hop + 1) as u8, flow, size) {
             Ok((seq, sent_at)) => {
                 let purpose = Purpose::Hop { hop, flow, ordinal };
                 track(&mut s, in_flight, seq, InFlight { sent_at, purpose });
@@ -248,7 +249,7 @@ fn send_mtu_probe(
     let Some((ttl, size)) = s.mtu_probe(round) else {
         return;
     };
-    match prober.send(target, ttl, flow, Some(size)) {
+    match prober.send(target, ttl, flow, size) {
         Ok((seq, sent_at)) => {
             debug!("Sent a {size}-byte path MTU probe to TTL {ttl}");
             let purpose = Purpose::PathMtu { ttl, size };
@@ -395,6 +396,8 @@ mod tests {
         narrow: Option<(u8, u16)>,
         /// Past this TTL's router larger probes vanish without a word
         black_hole: Option<(u8, u16)>,
+        /// The size of every probe sent
+        sizes: Arc<Mutex<Vec<u16>>>,
         next_seq: u16,
         tx: mpsc::UnboundedSender<Reply>,
         rx: Option<mpsc::UnboundedReceiver<Reply>>,
@@ -411,6 +414,7 @@ mod tests {
                 fail_ttl: None,
                 narrow: None,
                 black_hole: None,
+                sizes: Arc::default(),
                 next_seq: 1,
                 tx,
                 rx: Some(rx),
@@ -424,8 +428,9 @@ mod tests {
             dst: IpAddr,
             ttl: u8,
             flow: u16,
-            size: Option<u16>,
+            size: u16,
         ) -> io::Result<(u16, Instant)> {
+            self.sizes.lock().unwrap().push(size);
             if Some(ttl) == self.fail_ttl {
                 return Err(io::Error::other("network is unreachable"));
             }
@@ -433,9 +438,8 @@ mod tests {
             self.next_seq += 1;
             let sent_at = Instant::now();
             let index = usize::from(ttl) - 1;
-            let beyond = |limit: Option<(u8, u16)>| {
-                limit.filter(|&(at, mtu)| ttl > at && size.is_some_and(|size| size > mtu))
-            };
+            let beyond =
+                |limit: Option<(u8, u16)>| limit.filter(|&(at, mtu)| ttl > at && size > mtu);
             if beyond(self.black_hole).is_some() {
                 return Ok((seq, sent_at));
             }
@@ -532,6 +536,18 @@ mod tests {
             s.hops[12].sent, 1,
             "TTLs past the target only in the first round"
         );
+    }
+
+    #[tokio::test]
+    async fn probes_have_the_size_asked_for() {
+        for (cli, size) in [(&["-c", "2"][..], 64), (&["-c", "2", "-s", "100"], 100)] {
+            let prober = FakeProber::new(twelve_hop_path());
+            let sizes = Arc::clone(&prober.sizes);
+            trace_with(prober, cli).await;
+            let sizes = sizes.lock().unwrap();
+            assert!(!sizes.is_empty());
+            assert!(sizes.iter().all(|&s| s == size), "{cli:?}: {sizes:?}");
+        }
     }
 
     #[tokio::test]

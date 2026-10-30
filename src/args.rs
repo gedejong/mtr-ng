@@ -95,6 +95,10 @@ impl Column {
     }
 }
 
+/// Largest `--psize` with `--pmtu`: IPv4 datagrams every link carries (RFC 791),
+/// so that small probes still reach the hops past a narrow link
+const PMTU_MAX_PSIZE: u16 = 576;
+
 /// The report formats besides the table. Each implies --report.
 #[derive(clap::Args, Debug, Clone)]
 #[group(skip)]
@@ -178,6 +182,18 @@ pub struct Args {
     /// Maximum number of hops (1-255)
     #[arg(short = 'M', long, default_value = "30", value_parser = clap::value_parser!(u8).range(1..))]
     pub max_hops: u8,
+
+    /// Size of each probe in bytes, IP header included, as in mtr (28-1500). A
+    /// probe never gets smaller than its headers and the bytes that tell it
+    /// apart. Some MPLS routers don't answer much smaller probes than the default
+    #[arg(
+        short = 's',
+        long,
+        value_name = "BYTES",
+        default_value = "64",
+        value_parser = clap::value_parser!(u16).range(28..=1500)
+    )]
+    pub psize: u16,
 
     /// Use IPv4 only
     #[arg(short = '4', conflicts_with = "ipv6")]
@@ -290,7 +306,7 @@ pub struct Args {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["simulate", "count", "interval", "max_hops", "ipv4", "ipv6", "flows", "pmtu", "protocol"]
+        conflicts_with_all = ["simulate", "count", "interval", "max_hops", "psize", "ipv4", "ipv6", "flows", "pmtu", "protocol"]
     )]
     pub replay: Option<PathBuf>,
 
@@ -386,6 +402,13 @@ impl Args {
                 "--interval {} is too short for real probes: each round sends one probe per hop. \
                  Use at least {MIN_INTERVAL_MS} ms (any value works with --simulate)",
                 self.interval
+            ));
+        }
+        if self.pmtu && self.psize > PMTU_MAX_PSIZE {
+            return Err(format!(
+                "--psize {} is too large for --pmtu, whose search needs the other probes \
+                 to cross every link: use at most {PMTU_MAX_PSIZE} bytes",
+                self.psize
             ));
         }
         #[cfg(windows)]
@@ -572,6 +595,24 @@ mod tests {
         assert_eq!(args.ema_alpha, 0.1);
         assert!(args.fields.is_none());
         assert!(!args.show_all);
+        assert_eq!(args.psize, 64, "mtr's default");
+    }
+
+    #[test]
+    fn psize_has_mtr_bounds_and_stays_small_for_pmtu() {
+        let parse = |cli: &[&str]| {
+            Args::try_parse_from(["mtr-ng"].iter().chain(cli).chain(&["example.com"]))
+        };
+        assert_eq!(parse(&["-s", "28"]).unwrap().psize, 28);
+        assert_eq!(parse(&["--psize", "1500"]).unwrap().psize, 1500);
+        assert!(parse(&["-s", "27"]).is_err());
+        assert!(parse(&["-s", "1501"]).is_err());
+        assert!(parse(&["--pmtu", "-s", "576"]).unwrap().validate().is_ok());
+        let error = parse(&["--pmtu", "-s", "577"])
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(error.contains("at most 576"), "{error}");
     }
 
     #[test]

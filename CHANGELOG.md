@@ -2,6 +2,10 @@
 
 Releases up to 0.3.0 are at [edejong-dbc/mtr-ng](https://github.com/edejong-dbc/mtr-ng/releases).
 
+## Unreleased
+
+- Probes are 64 bytes with their IP header, as mtr's are, instead of the fewest bytes that carry the sequence number (30 for ICMP over IPv4). Some MPLS routers send no Time Exceeded for such tiny probes, so whole stretches of a path stayed `???` where mtr showed routers. `-s`/`--psize BYTES` sets another size, from 28 to 1500, at most 576 with `--pmtu`. On Windows the echo requests have that size too, instead of Windows' 32 bytes of data.
+
 ## 0.6.0 - 2026-10-30
 
 Traces to keep and share: `--metrics` serves one to Prometheus, `--record` saves it and `--replay` plays it back, and `--privacy-hops` hides your own network first. `g` draws the routes the flows take, and mtr-ng shows the NATs on the path, the interfaces routers name, and with `--ipmap` where RIPE Atlas measured a router to be.

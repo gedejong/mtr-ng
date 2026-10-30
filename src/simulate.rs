@@ -209,19 +209,13 @@ impl Default for SimProber {
 
 impl Prober for SimProber {
     /// Must run inside a Tokio runtime: each reply is delivered by a timer task.
-    fn send(
-        &mut self,
-        dst: IpAddr,
-        ttl: u8,
-        flow: u16,
-        size: Option<u16>,
-    ) -> io::Result<(u16, Instant)> {
+    fn send(&mut self, dst: IpAddr, ttl: u8, flow: u16, size: u16) -> io::Result<(u16, Instant)> {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         let sent_at = Instant::now();
 
         let index = usize::from(ttl) - 1;
-        let too_big = ttl > 1 && size.is_some_and(|size| size > UPLINK_MTU);
+        let too_big = ttl > 1 && size > UPLINK_MTU;
         let reply = match PATH.get(index) {
             _ if too_big => Some((
                 IcmpResponseType::TooBig { mtu: UPLINK_MTU },

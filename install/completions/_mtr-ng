@@ -21,6 +21,8 @@ _mtr-ng() {
 '--interval=[Time between rounds in milliseconds (at least 100, except with --simulate)]:INTERVAL:_default' \
 '-M+[Maximum number of hops (1-255)]:MAX_HOPS:_default' \
 '--max-hops=[Maximum number of hops (1-255)]:MAX_HOPS:_default' \
+'-s+[Size of each probe in bytes, IP header included, as in mtr (28-1500). A probe never gets smaller than its headers and the bytes that tell it apart. Some MPLS routers don'\''t answer much smaller probes than the default]:BYTES:_default' \
+'--psize=[Size of each probe in bytes, IP header included, as in mtr (28-1500). A probe never gets smaller than its headers and the bytes that tell it apart. Some MPLS routers don'\''t answer much smaller probes than the default]:BYTES:_default' \
 '--geoip-mmdb=[Geolocation database in MaxMind'\''s format\: DB-IP City Lite or GeoLite2 City. Default\: the newest .mmdb in ~/.local/share/mtr-ng, then the usual system places]:PATH:_files' \
 '--privacy-hops=[Hide the first N hops\: their addresses, names, ASes and locations are neither shown, in the TUI or any report, nor looked up. For screenshots and reports that shouldn'\''t give away the network they were taken from]:N:_default' \
 '--origin=[Where you are, in degrees, for distances and the plausibility check. Default\: the first hop the database places in a city, with its uncertainty]:LAT,LON:_default' \
@@ -56,7 +58,7 @@ udp\:"UDP datagrams to port 33434 and up, one port per flow"
 tcp\:"TCP SYN probes (not implemented yet)"))' \
 '--metrics=[Serve the statistics for Prometheus at http\://ADDR/metrics while tracing. A bare port listens on 127.0.0.1. With --report and no --count, mtr-ng runs until stopped, then prints the report]:[ADDR:]PORT:_default' \
 '(--replay)--record=[Write what the trace sees to PATH as it happens, one JSON object per line, for --replay. PATH must not exist yet]:PATH:_files' \
-'(--simulate -c --count -i --interval -M --max-hops -4 -6 --flows --pmtu -P --protocol)--replay=[Play back a --record log instead of probing\: in the TUI at the pace it was recorded (see --replay-speed), with --report all at once. Sends nothing]:PATH:_files' \
+'(--simulate -c --count -i --interval -M --max-hops -s --psize -4 -6 --flows --pmtu -P --protocol)--replay=[Play back a --record log instead of probing\: in the TUI at the pace it was recorded (see --replay-speed), with --report all at once. Sends nothing]:PATH:_files' \
 '--replay-speed=[Play back this many times faster than recorded]:X:_default' \
 '--log-file=[Append debug logs to this file (level can be overridden with RUST_LOG)]:PATH:_files' \
 '(-6)-4[Use IPv4 only]' \

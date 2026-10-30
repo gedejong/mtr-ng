@@ -1,6 +1,7 @@
 complete -c mtr-ng -s c -l count -d 'Number of rounds to run (default: until quit; 10 in report mode, unless --metrics)' -r
 complete -c mtr-ng -s i -l interval -d 'Time between rounds in milliseconds (at least 100, except with --simulate)' -r
 complete -c mtr-ng -s M -l max-hops -d 'Maximum number of hops (1-255)' -r
+complete -c mtr-ng -s s -l psize -d 'Size of each probe in bytes, IP header included, as in mtr (28-1500). A probe never gets smaller than its headers and the bytes that tell it apart. Some MPLS routers don\'t answer much smaller probes than the default' -r
 complete -c mtr-ng -l geoip-mmdb -d 'Geolocation database in MaxMind\'s format: DB-IP City Lite or GeoLite2 City. Default: the newest .mmdb in ~/.local/share/mtr-ng, then the usual system places' -r -F
 complete -c mtr-ng -l privacy-hops -d 'Hide the first N hops: their addresses, names, ASes and locations are neither shown, in the TUI or any report, nor looked up. For screenshots and reports that shouldn\'t give away the network they were taken from' -r
 complete -c mtr-ng -l origin -d 'Where you are, in degrees, for distances and the plausibility check. Default: the first hop the database places in a city, with its uncertainty' -r
