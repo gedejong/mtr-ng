@@ -25,6 +25,14 @@ demo target="google.com":
     @echo "🎮 Starting interactive simulation (press 'q' to quit)"
     cargo run -- --simulate {{target}}
 
+# Record the README's demo, docs/demo.gif and docs/demo.mp4: real probes, macOS only (see TESTING.md)
+demo-video:
+    cargo build --release
+    python3 -I scripts/demo/record.py target/release target/demo
+    python3 -I scripts/demo/render.py target/demo target/demo/frames
+    ffmpeg -v error -y -framerate 10 -i target/demo/frames/%05d.png -c:v libx264 -preset slow -crf 20 -tune stillimage -pix_fmt yuv420p -movflags +faststart docs/demo.mp4
+    ffmpeg -v error -y -framerate 10 -i target/demo/frames/%05d.png -vf "mpdecimate,split[a][b];[a]palettegen=stats_mode=diff:max_colors=200[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" -fps_mode vfr docs/demo.gif
+
 # Fast simulation test for CI/development
 quick target="8.8.8.8":
     cargo run -- --simulate --count 1 --interval 100 --report {{target}}

@@ -2,6 +2,10 @@
 
 mtr-ng is My Traceroute (mtr) reimplemented in Rust. It probes every hop on the path to a host, round after round, and shows how each hop's loss, round-trip times and jitter change, in a terminal interface or as a report.
 
+![mtr-ng tracing the path to news.ycombinator.com, with captions that say what each key does](docs/demo.gif)
+
+The recording is a live trace from a home network, and `--privacy-hops 3` hides its first three hops. It is also available as an [MP4](docs/demo.mp4).
+
 ## Features
 
 ### Core Network Analysis
