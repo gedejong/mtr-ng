@@ -65,6 +65,28 @@ pub fn as_value(column: Column, asn: Option<&AsInfo>) -> String {
     known.unwrap_or("???").to_string()
 }
 
+/// What a column holds
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// The hop number
+    Hop,
+    /// Text, aligned left
+    Text,
+    /// A number per hop, aligned right
+    Number,
+    /// The RTT history, drawn
+    Graph,
+}
+
+/// What a column needs looked up
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lookup {
+    /// The AS (`-z`)
+    As,
+    /// The location (`--geo`)
+    Location,
+}
+
 impl Column {
     /// Short header, as mtr prints it.
     pub fn header(self) -> &'static str {
@@ -120,24 +142,72 @@ impl Column {
         }
     }
 
+    /// What the column holds, which decides how it is aligned
+    pub fn kind(self) -> Kind {
+        match self {
+            Column::Hop => Kind::Hop,
+            Column::Host | Column::Asn | Column::AsName | Column::Prefix | Column::Geo => {
+                Kind::Text
+            }
+            Column::Dist
+            | Column::Stretch
+            | Column::Reach
+            | Column::Back
+            | Column::Loss
+            | Column::Sent
+            | Column::Last
+            | Column::Avg
+            | Column::Ema
+            | Column::Jitter
+            | Column::JitterAvg
+            | Column::Best
+            | Column::Worst
+            | Column::Stdev => Kind::Number,
+            Column::Graph => Kind::Graph,
+        }
+    }
+
+    /// What has to be looked up to fill the column, besides the probes' answers
+    pub fn lookup(self) -> Option<Lookup> {
+        match self {
+            Column::Asn | Column::AsName | Column::Prefix => Some(Lookup::As),
+            Column::Geo | Column::Dist | Column::Stretch => Some(Lookup::Location),
+            Column::Hop
+            | Column::Host
+            | Column::Reach
+            | Column::Back
+            | Column::Loss
+            | Column::Sent
+            | Column::Last
+            | Column::Avg
+            | Column::Ema
+            | Column::Jitter
+            | Column::JitterAvg
+            | Column::Best
+            | Column::Worst
+            | Column::Stdev
+            | Column::Graph => None,
+        }
+    }
+
     /// True for the columns that hold one number per hop.
     pub fn is_numeric(self) -> bool {
-        !matches!(self, Column::Hop | Column::Graph) && !self.is_text()
+        self.kind() == Kind::Number
     }
 
     /// Text, aligned left: the host, the AS columns and the location
     pub fn is_text(self) -> bool {
-        self == Column::Host || self == Column::Geo || self.is_as()
+        self.kind() == Kind::Text
     }
 
     /// The columns an AS lookup fills
     pub fn is_as(self) -> bool {
-        matches!(self, Column::Asn | Column::AsName | Column::Prefix)
+        self.lookup() == Some(Lookup::As)
     }
 
     /// The columns a location fills
     pub fn is_location(self) -> bool {
-        matches!(self, Column::Geo | Column::Dist | Column::Stretch)
+        self.lookup() == Some(Lookup::Location)
     }
 
     /// Narrowest a numeric column gets, so the table doesn't shift as values change.
@@ -181,8 +251,8 @@ impl Column {
             Column::Stdev if hop.received == 0 => "???".to_string(),
             Column::Stdev => format!("{:.1}", hop.stddev_ms()),
             Column::Asn | Column::AsName | Column::Prefix if hop.addr.is_none() => String::new(),
-            Column::Asn | Column::AsName | Column::Prefix => as_value(self, hop.asn.as_ref()),
-            Column::Geo => match (&hop.geo, hop.addr) {
+            Column::Asn | Column::AsName | Column::Prefix => as_value(self, hop.asn()),
+            Column::Geo => match (hop.geo(), hop.addr) {
                 (Some(fix), _) => location(fix, hop.best_rtt, origin),
                 (None, Some(_)) => "???".to_string(),
                 (None, None) => String::new(),

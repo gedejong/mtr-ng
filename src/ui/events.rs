@@ -15,9 +15,8 @@ pub enum Action {
     ToggleScale,
     ToggleVisualization,
     CycleColors,
-    ToggleFlows,
-    ToggleMap,
-    ToggleRoutes,
+    /// Between the hop table and this view
+    ToggleView(View),
     ToggleMpls,
     OpenDetail,
     PreviousHop,
@@ -98,14 +97,19 @@ pub const TABLE_KEYS: &[Binding] = &[
         &[Char('f')],
         "f",
         "Hop table or flow matrix",
-        Action::ToggleFlows,
+        Action::ToggleView(View::Flows),
     ),
-    bind(&[Char('m')], "m", "Hop table or map", Action::ToggleMap),
+    bind(
+        &[Char('m')],
+        "m",
+        "Hop table or map",
+        Action::ToggleView(View::Map),
+    ),
     bind(
         &[Char('g')],
         "g",
         "Hop table or route graph",
-        Action::ToggleRoutes,
+        Action::ToggleView(View::Routes),
     ),
     bind(
         &[Char('e')],
@@ -184,6 +188,13 @@ pub const DETAIL_KEYS: &[Binding] = &[
     bind(&[Esc, Enter, Char('q')], "Esc", "Close", Action::Close),
 ];
 
+/// The keys of the overlays that list theirs under a heading, after the table's,
+/// in the help screen and the man page
+pub const KEY_SECTIONS: [(&str, &[Binding]); 2] = [
+    ("In the column chooser", COLUMN_KEYS),
+    ("In the hop details", DETAIL_KEYS),
+];
+
 const HELP_KEYS: &[Binding] = &[bind(
     &[Esc, Char('?'), Char('q')],
     "Esc",
@@ -246,9 +257,7 @@ pub fn apply(action: Action, ui: &mut UiState) -> Effect {
         Action::ToggleScale => ui.toggle_scale(),
         Action::ToggleVisualization => ui.toggle_visualization(),
         Action::CycleColors => ui.cycle_colors(),
-        Action::ToggleFlows => ui.toggle_view(View::Flows),
-        Action::ToggleMap => ui.toggle_view(View::Map),
-        Action::ToggleRoutes => ui.toggle_view(View::Routes),
+        Action::ToggleView(view) => ui.toggle_view(view),
         Action::ToggleMpls => ui.show_mpls = !ui.show_mpls,
         Action::OpenDetail => ui.open_detail(),
         Action::PreviousHop => ui.step_detail(-1),

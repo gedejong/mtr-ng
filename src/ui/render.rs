@@ -2,7 +2,7 @@
 //! in `map.rs`), RTT scale, and the help, column chooser, hop detail or About
 //! overlay.
 
-use super::events::{Binding, COLUMN_KEYS, DETAIL_KEYS, TABLE_KEYS};
+use super::events::{Binding, KEY_SECTIONS, TABLE_KEYS};
 use super::map::render_map;
 use super::state::{Mode, UiState, View};
 use super::visualization::{
@@ -10,10 +10,10 @@ use super::visualization::{
     ColorSupport, RttScale,
 };
 use crate::args::{Column, ProbeProtocol};
-use crate::columns::{self, format_ms};
+use crate::columns::{self, format_ms, Kind};
 use crate::geo::{self, GeoFix, Origin};
 use crate::hop_stats::ResponderStats;
-use crate::icmp_ext::{Interface, MplsLabel};
+use crate::icmp_ext::Extensions;
 use crate::privacy;
 use crate::probe::Nat;
 use crate::topology;
@@ -153,7 +153,7 @@ fn status_line(session: &MtrSession, hops: &[HopStats], ui: &UiState) -> Line<'s
 
     let rounds = session.hops.first().map_or(0, |hop| hop.sent);
     let mut facts = vec![format!("{} hops", hops.len()), format!("round {rounds}")];
-    match &session.mda {
+    match session.flow_plan.mda() {
         Some(mda) => facts.push(mda.status(session.last_ttl())),
         None if session.flows() > 1 => facts.push(format!("{} flows", session.flows())),
         None => {}
@@ -206,7 +206,7 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
     let names = shows_names(session, ui);
     let mut rows = Vec::new();
     for hop in hops.iter().filter(|hop| hop.sent > 0) {
-        let mut host = columns::host(hop.hostname.as_deref(), hop.addr, names);
+        let mut host = columns::host(hop.hostname(), hop.addr, names);
         if hop.has_multiple_paths() && hop.addr.is_some() {
             host = format!("{host} ({:.0}%)", hop.get_primary_path_percentage());
         }
@@ -216,12 +216,12 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
             kind: RowKind::Hop,
         });
         if ui.show_mpls {
-            rows.extend(extension_rows(hop, hop.mpls(), hop.interfaces()));
+            rows.extend(extension_rows(hop, hop.ext()));
         }
         for alt in hop.get_alternate_paths() {
             let host = format!(
                 "↳ {} ({:.0}%)",
-                columns::host(alt.hostname.as_deref(), Some(alt.addr), names),
+                columns::host(alt.info.hostname.as_deref(), Some(alt.addr), names),
                 hop.get_path_percentage(alt)
             );
             rows.push(HostRow {
@@ -230,7 +230,7 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
                 kind: RowKind::Alternate(alt),
             });
             if ui.show_mpls {
-                rows.extend(extension_rows(hop, &alt.mpls, &alt.interfaces));
+                rows.extend(extension_rows(hop, &alt.ext));
             }
         }
         rows.extend(
@@ -248,14 +248,8 @@ fn host_rows<'a>(session: &MtrSession, hops: &'a [HopStats], ui: &UiState) -> Ve
 }
 
 /// A row per label and interface, under the hop or alternate that reported them.
-fn extension_rows<'a>(
-    hop: &'a HopStats,
-    labels: &[MplsLabel],
-    interfaces: &[Interface],
-) -> Vec<HostRow<'a>> {
-    let labels = labels.iter().map(ToString::to_string);
-    labels
-        .chain(interfaces.iter().map(ToString::to_string))
+fn extension_rows<'a>(hop: &'a HopStats, ext: &Extensions) -> Vec<HostRow<'a>> {
+    ext.lines()
         .map(|text| HostRow {
             hop,
             host: format!("  {text}"),
@@ -270,9 +264,11 @@ fn cell_text(column: Column, row: &HostRow, origin: Option<&Origin>) -> String {
         (Column::Graph, _) => String::new(),
         (Column::Hop, RowKind::Hop) => format!("{}.", row.hop.hop),
         (_, RowKind::Hop) => column.value(row.hop, origin),
-        (Column::Geo, RowKind::Alternate(alt)) => alt.geo.as_ref().map_or(String::new(), |fix| {
-            columns::location(fix, alt.best_rtt, origin)
-        }),
+        (Column::Geo, RowKind::Alternate(alt)) => {
+            alt.info.geo.as_ref().map_or(String::new(), |fix| {
+                columns::location(fix, alt.best_rtt, origin)
+            })
+        }
         (Column::Last, RowKind::Alternate(alt)) => format_ms(alt.last_rtt),
         (Column::Avg, RowKind::Alternate(alt)) => format_ms(alt.avg_rtt()),
         (Column::Best, RowKind::Alternate(alt)) => format_ms(alt.best_rtt),
@@ -280,7 +276,7 @@ fn cell_text(column: Column, row: &HostRow, origin: Option<&Origin>) -> String {
             columns::routers_back(alt.routers_back(), row.hop.hop)
         }
         (_, RowKind::Alternate(alt)) if column.is_as() && !privacy::is_stand_in(alt.addr) => {
-            columns::as_value(column, alt.asn.as_ref())
+            columns::as_value(column, alt.info.asn.as_ref())
         }
         _ => String::new(),
     }
@@ -377,9 +373,9 @@ fn render_table(
     let widths = layout(columns, &natural, area.width);
     let columns = &columns[..widths.len()];
 
-    let header = Row::new(columns.iter().map(|&c| match c {
-        _ if c.is_text() || c == Column::Graph => Line::from(c.header()),
-        _ => right(c.header()),
+    let header = Row::new(columns.iter().map(|&c| match c.kind() {
+        Kind::Text | Kind::Graph => Line::from(c.header()),
+        Kind::Hop | Kind::Number => right(c.header()),
     }))
     .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -566,7 +562,7 @@ fn legend_spans(hop: &HopStats, names: bool, colors: ColorSupport) -> Vec<Span<'
             spans.push(Span::raw("  "));
         }
         spans.push(letter_span(letter, colors));
-        let host = columns::host(responder.hostname.as_deref(), Some(addr), names);
+        let host = columns::host(responder.info.hostname.as_deref(), Some(addr), names);
         spans.push(Span::raw(match letters.len() {
             1 => format!(" {host}"),
             _ => format!(" {host} ({:.0}%)", hop.get_path_percentage(responder)),
@@ -736,13 +732,13 @@ fn detail_lines(
     lines.extend(lettered_section(
         "MPLS labels",
         &responders,
-        |r| r.mpls.as_slice(),
+        |r| r.ext.mpls.as_slice(),
         ui.colors,
     ));
     lines.extend(lettered_section(
         "Interfaces (RFC 5837)",
         &responders,
-        |r| r.interfaces.as_slice(),
+        |r| r.ext.interfaces.as_slice(),
         ui.colors,
     ));
 
@@ -849,7 +845,7 @@ fn network_lines(
 ) -> Vec<Line<'static>> {
     let known: Vec<_> = letters
         .iter()
-        .filter_map(|&(letter, addr)| Some((letter, hop.responders[&addr].asn.as_ref()?)))
+        .filter_map(|&(letter, addr)| Some((letter, hop.responders[&addr].info.asn.as_ref()?)))
         .collect();
     if known.is_empty() {
         return Vec::new();
@@ -880,7 +876,7 @@ fn location_lines(
         .iter()
         .filter_map(|&(letter, addr)| {
             let responder = &hop.responders[&addr];
-            Some((letter, responder, responder.geo.as_ref()?))
+            Some((letter, responder, responder.info.geo.as_ref()?))
         })
         .collect();
     if placed.is_empty() {
@@ -957,11 +953,11 @@ fn responder_lines(
         .iter()
         .map(|&(letter, addr)| (letter, &hop.responders[&addr]))
         .collect();
-    let host = |r: &ResponderStats| match &r.hostname {
+    let host = |r: &ResponderStats| match &r.info.hostname {
         Some(name) if names => format!("{name} ({})", r.addr),
         _ => privacy::show(r.addr),
     };
-    let asn = |r: &ResponderStats| r.asn.as_ref().map(|a| format!("AS{}", a.number));
+    let asn = |r: &ResponderStats| r.info.asn.as_ref().map(|a| format!("AS{}", a.number));
     let flows_of = |r: &ResponderStats| {
         let met: BTreeSet<u16> = hop
             .flows
@@ -1097,9 +1093,10 @@ fn render_help(f: &mut Frame, area: Rect) {
     let heading =
         |text: &'static str| Line::from(text).style(Style::default().add_modifier(Modifier::BOLD));
     // One label width for all sections, or the paired table's own when it pairs
-    let mut label = [TABLE_KEYS, COLUMN_KEYS, DETAIL_KEYS]
+    let sections = KEY_SECTIONS.iter().map(|&(_, keys)| keys);
+    let mut label = std::iter::once(TABLE_KEYS)
+        .chain(sections)
         .map(label_width)
-        .into_iter()
         .max()
         .unwrap_or(0);
     let mut lines: Vec<Line> = binding_lines(TABLE_KEYS, label).collect();
@@ -1110,10 +1107,7 @@ fn render_help(f: &mut Frame, area: Rect) {
             label = label_width(TABLE_KEYS);
         }
     }
-    for (title, keys) in [
-        ("In the column chooser", COLUMN_KEYS),
-        ("In the hop details", DETAIL_KEYS),
-    ] {
+    for (title, keys) in KEY_SECTIONS {
         if usize::from(area.height) >= lines.len() + keys.len() + 4 {
             lines.push(Line::from(""));
             lines.push(heading(title));
@@ -1274,6 +1268,7 @@ fn render_chooser(f: &mut Frame, area: Rect, ui: &UiState) {
 mod tests {
     use super::*;
     use crate::geo::tests::{city, FakeGeo};
+    use crate::icmp_ext::MplsLabel;
     use crate::Args;
     use clap::Parser;
     use ratatui::{backend::TestBackend, Terminal};
@@ -1536,7 +1531,7 @@ mod tests {
         s.args.privacy_hops = 2;
         s.hops[0].set_hostname_for_addr(PATH[0].parse().unwrap(), "gw.home.example".into());
         s.redact();
-        assert_eq!(s.hops[0].hostname, None);
+        assert_eq!(s.hops[0].hostname(), None);
         let mut ui = UiState::new(&s.args);
         let text = screen(&s, &mut ui, 80, 12).join("\n");
         for hidden in ["192.168.1.1", "203.0.113.25", "0.0.0."] {
@@ -1671,7 +1666,8 @@ mod tests {
         let mut ui = UiState::new(&s.args);
         ui.mode = Mode::Help;
         let text = screen(&s, &mut ui, 100, 40).join("\n");
-        for binding in TABLE_KEYS.iter().chain(COLUMN_KEYS) {
+        let sections = KEY_SECTIONS.iter().flat_map(|&(_, keys)| keys);
+        for binding in TABLE_KEYS.iter().chain(sections) {
             assert!(text.contains(binding.help), "missing {}", binding.help);
         }
     }

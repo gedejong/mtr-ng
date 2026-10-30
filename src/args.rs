@@ -95,6 +95,67 @@ impl Column {
     }
 }
 
+/// The report formats besides the table. Each implies --report.
+#[derive(clap::Args, Debug, Clone)]
+#[group(skip)]
+pub struct FormatFlags {
+    /// Report as JSON, with mtr's field names (implies --report)
+    #[arg(short = 'j', long, conflicts_with = "csv")]
+    pub json: bool,
+
+    /// Report as CSV, one row per hop (implies --report)
+    #[arg(short = 'C', long)]
+    pub csv: bool,
+
+    /// Print the routes as a Graphviz graph instead of a table (implies --report).
+    /// Most useful with --flows
+    #[arg(long, conflicts_with_all = ["json", "csv"])]
+    pub dot: bool,
+
+    /// Print the routes as a Mermaid flowchart, which Markdown on GitHub, GitLab and
+    /// many wikis draws (implies --report). Most useful with --flows
+    #[arg(long, conflicts_with_all = ["json", "csv", "dot"])]
+    pub mermaid: bool,
+
+    /// Print the located hops and the path between them as GeoJSON, for map tools
+    /// (implies --report; needs a geolocation database, see --geo)
+    #[arg(long, conflicts_with_all = ["json", "csv", "dot", "mermaid"])]
+    pub geojson: bool,
+}
+
+/// A report format besides the table
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Json,
+    Csv,
+    Dot,
+    Mermaid,
+    GeoJson,
+}
+
+impl FormatFlags {
+    /// The format asked for, if any; the flags exclude each other.
+    pub fn chosen(&self) -> Option<Format> {
+        // Every field is named, so a new flag has to be given its format here
+        let &Self {
+            json,
+            csv,
+            dot,
+            mermaid,
+            geojson,
+        } = self;
+        [
+            (json, Format::Json),
+            (csv, Format::Csv),
+            (dot, Format::Dot),
+            (mermaid, Format::Mermaid),
+            (geojson, Format::GeoJson),
+        ]
+        .into_iter()
+        .find_map(|(set, format)| set.then_some(format))
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(name = "mtr-ng")]
 #[command(
@@ -130,28 +191,8 @@ pub struct Args {
     #[arg(short, long)]
     pub report: bool,
 
-    /// Report as JSON, with mtr's field names (implies --report)
-    #[arg(short = 'j', long, conflicts_with = "csv")]
-    pub json: bool,
-
-    /// Report as CSV, one row per hop (implies --report)
-    #[arg(short = 'C', long)]
-    pub csv: bool,
-
-    /// Print the routes as a Graphviz graph instead of a table (implies --report).
-    /// Most useful with --flows
-    #[arg(long, conflicts_with_all = ["json", "csv"])]
-    pub dot: bool,
-
-    /// Print the routes as a Mermaid flowchart, which Markdown on GitHub, GitLab and
-    /// many wikis draws (implies --report). Most useful with --flows
-    #[arg(long, conflicts_with_all = ["json", "csv", "dot"])]
-    pub mermaid: bool,
-
-    /// Print the located hops and the path between them as GeoJSON, for map tools
-    /// (implies --report; needs a geolocation database, see --geo)
-    #[arg(long, conflicts_with_all = ["json", "csv", "dot", "mermaid"])]
-    pub geojson: bool,
+    #[command(flatten)]
+    pub format: FormatFlags,
 
     /// Show IP addresses instead of hostnames
     #[arg(short, long)]
@@ -397,7 +438,7 @@ impl Args {
     /// that shows them. `--show-all` doesn't count, so it works without a database.
     pub fn wants_geo(&self) -> bool {
         let named = |fields: &Vec<Column>| fields.iter().any(|c| c.is_location());
-        self.geo || self.geojson || self.fields.as_ref().is_some_and(named)
+        self.geo || self.format.geojson || self.fields.as_ref().is_some_and(named)
     }
 
     /// AS numbers are looked up for `--aslookup`, or when a column shows them.

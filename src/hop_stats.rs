@@ -1,6 +1,6 @@
 use crate::asn::AsInfo;
 use crate::geo::{self, Assessment, GeoFix, Origin};
-use crate::icmp_ext::{Extensions, Interface, MplsLabel};
+use crate::icmp_ext::Extensions;
 use crate::privacy::StandIns;
 use crate::probe::Nat;
 use std::{
@@ -60,27 +60,32 @@ pub struct RttSpread {
     pub max: Duration,
 }
 
+/// What lookups found out about an address. The session holds the answers and
+/// copies them to every responder with that address (`MtrSession::refresh`).
+#[derive(Debug, Clone, Default)]
+pub struct AddrInfo {
+    pub hostname: Option<String>,
+    /// Origin AS, prefix and AS name, with `--aslookup`
+    pub asn: Option<AsInfo>,
+    /// Where it is: from the router's name, RIPE IPmap or the database
+    pub geo: Option<GeoFix>,
+}
+
 /// Statistics for one address that answered at this hop. With load balancing a
 /// hop can have several; the one with the most replies is the hop's primary.
 #[derive(Debug, Clone)]
 pub struct ResponderStats {
     pub addr: IpAddr,
-    pub hostname: Option<String>,
-    /// Origin AS, prefix and AS name, with `--aslookup`
-    pub asn: Option<AsInfo>,
+    pub info: AddrInfo,
     pub replies: usize,
     pub last_rtt: Option<Duration>,
     pub best_rtt: Option<Duration>,
     /// TTL of its latest reply on arrival, which hints at the return path's length
     pub reply_ttl: Option<u8>,
-    /// MPLS labels in its latest reply
-    pub mpls: Vec<MplsLabel>,
-    /// Interfaces its latest reply named (RFC 5837)
-    pub interfaces: Vec<Interface>,
+    /// What its latest reply appended: MPLS labels, interfaces
+    pub ext: Extensions,
     /// What a NAT did to the probe its latest error quoted
     pub nat: Option<Nat>,
-    /// Where it is: from the router's name, RIPE IPmap or the database
-    pub geo: Option<GeoFix>,
     rtt_sum_ns: u128,
 }
 
@@ -88,16 +93,13 @@ impl ResponderStats {
     fn new(addr: IpAddr) -> Self {
         Self {
             addr,
-            hostname: None,
-            asn: None,
+            info: AddrInfo::default(),
             replies: 0,
             last_rtt: None,
             best_rtt: None,
             reply_ttl: None,
-            mpls: Vec::new(),
-            interfaces: Vec::new(),
+            ext: Extensions::default(),
             nat: None,
-            geo: None,
             rtt_sum_ns: 0,
         }
     }
@@ -141,10 +143,6 @@ pub struct HopStats {
     pub hop: u8,
     /// Primary responder (the address with the most replies)
     pub addr: Option<IpAddr>,
-    pub hostname: Option<String>,
-    pub asn: Option<AsInfo>,
-    /// Where the primary responder is
-    pub geo: Option<GeoFix>,
     pub sent: usize,
     pub received: usize,
     pub last_rtt: Option<Duration>,
@@ -183,9 +181,6 @@ impl HopStats {
         Self {
             hop,
             addr: None,
-            hostname: None,
-            asn: None,
-            geo: None,
             sent: 0,
             received: 0,
             last_rtt: None,
@@ -287,7 +282,7 @@ impl HopStats {
     pub fn record_reply_details(&mut self, addr: IpAddr, ttl: Option<u8>, ext: Extensions) {
         if let Some(responder) = self.responders.get_mut(&addr) {
             responder.reply_ttl = ttl;
-            (responder.mpls, responder.interfaces) = (ext.mpls, ext.interfaces);
+            responder.ext = ext;
         }
     }
 
@@ -331,9 +326,6 @@ impl HopStats {
         };
         if switch {
             self.addr = Some(addr);
-            self.hostname = self.responders[&addr].hostname.clone();
-            self.asn = self.responders[&addr].asn.clone();
-            self.geo = self.responders[&addr].geo.clone();
         }
     }
 
@@ -395,25 +387,39 @@ impl HopStats {
         self.responders.get(&self.addr?)
     }
 
+    /// The primary responder's name.
+    pub fn hostname(&self) -> Option<&str> {
+        self.primary()?.info.hostname.as_deref()
+    }
+
+    /// The primary responder's AS.
+    pub fn asn(&self) -> Option<&AsInfo> {
+        self.primary()?.info.asn.as_ref()
+    }
+
+    /// Where the primary responder is.
+    pub fn geo(&self) -> Option<&GeoFix> {
+        self.primary()?.info.geo.as_ref()
+    }
+
     /// What a NAT did to the probe the primary responder's latest error quoted.
     pub fn nat(&self) -> Option<Nat> {
         self.primary()?.nat
     }
 
-    /// Interfaces the primary responder's latest reply named.
-    pub fn interfaces(&self) -> &[Interface] {
-        self.primary().map_or(&[], |r| &r.interfaces)
-    }
-
-    /// MPLS labels in the primary responder's latest reply.
-    pub fn mpls(&self) -> &[MplsLabel] {
-        self.primary().map_or(&[], |r| &r.mpls)
+    /// What the primary responder's latest reply appended.
+    pub fn ext(&self) -> &Extensions {
+        static NONE: Extensions = Extensions {
+            mpls: Vec::new(),
+            interfaces: Vec::new(),
+        };
+        self.primary().map_or(&NONE, |r| &r.ext)
     }
 
     /// How the primary responder's location squares with its best RTT, seen
     /// from `origin`.
     pub fn assess(&self, origin: Option<&Origin>) -> Option<Assessment> {
-        geo::assess(self.geo.as_ref()?, self.best_rtt, origin?)
+        geo::assess(self.geo()?, self.best_rtt, origin?)
     }
 
     /// Flows probed at this hop.
@@ -497,31 +503,36 @@ impl HopStats {
         }
     }
 
-    /// Set hostname for a specific address
+    /// Show what is known about `addr`, if it answered here.
+    pub fn set_info(&mut self, addr: IpAddr, info: &AddrInfo) {
+        if let Some(responder) = self.responders.get_mut(&addr) {
+            responder.info = info.clone();
+        }
+    }
+
+    #[cfg(test)]
+    fn info_mut(&mut self, addr: IpAddr) -> Option<&mut AddrInfo> {
+        self.responders.get_mut(&addr).map(|r| &mut r.info)
+    }
+
+    #[cfg(test)]
     pub fn set_hostname_for_addr(&mut self, addr: IpAddr, hostname: String) {
-        if Some(addr) == self.addr {
-            self.hostname = Some(hostname.clone());
-        }
-        if let Some(responder) = self.responders.get_mut(&addr) {
-            responder.hostname = Some(hostname);
+        if let Some(info) = self.info_mut(addr) {
+            info.hostname = Some(hostname);
         }
     }
 
-    pub fn set_geo_for_addr(&mut self, addr: IpAddr, fix: GeoFix) {
-        if Some(addr) == self.addr {
-            self.geo = Some(fix.clone());
-        }
-        if let Some(responder) = self.responders.get_mut(&addr) {
-            responder.geo = Some(fix);
-        }
-    }
-
+    #[cfg(test)]
     pub fn set_asn_for_addr(&mut self, addr: IpAddr, asn: AsInfo) {
-        if Some(addr) == self.addr {
-            self.asn = Some(asn.clone());
+        if let Some(info) = self.info_mut(addr) {
+            info.asn = Some(asn);
         }
-        if let Some(responder) = self.responders.get_mut(&addr) {
-            responder.asn = Some(asn);
+    }
+
+    #[cfg(test)]
+    pub fn set_geo_for_addr(&mut self, addr: IpAddr, fix: GeoFix) {
+        if let Some(info) = self.info_mut(addr) {
+            info.geo = Some(fix);
         }
     }
 
@@ -534,14 +545,35 @@ impl HopStats {
         }
         let mut stand_in = |addr| stand_ins.get(addr);
         self.addr = self.addr.map(&mut stand_in);
-        (self.hostname, self.asn, self.geo) = (None, None, None);
         self.responders = std::mem::take(&mut self.responders)
             .into_values()
-            .map(|mut responder| {
-                responder.addr = stand_in(responder.addr);
-                (responder.hostname, responder.asn, responder.geo) = (None, None, None);
-                responder.interfaces.clear();
-                (responder.addr, responder)
+            .map(|responder| {
+                // Every field is named, so a new one has to be decided on here
+                let ResponderStats {
+                    addr,
+                    info: _,
+                    replies,
+                    last_rtt,
+                    best_rtt,
+                    reply_ttl,
+                    ext,
+                    nat,
+                    rtt_sum_ns,
+                } = responder;
+                let addr = stand_in(addr);
+                let responder = ResponderStats {
+                    addr,
+                    info: AddrInfo::default(),
+                    replies,
+                    last_rtt,
+                    best_rtt,
+                    reply_ttl,
+                    ext: ext.redacted(),
+                    // `MtrSession::redact` hides the address a NAT gave
+                    nat,
+                    rtt_sum_ns,
+                };
+                (addr, responder)
             })
             .collect();
         for flow in self.flows.values_mut() {
@@ -581,7 +613,7 @@ mod tests {
         assert_eq!(hop.received, 0);
         assert_eq!(hop.loss_percent, 0.0);
         assert!(hop.addr.is_none());
-        assert!(hop.hostname.is_none());
+        assert!(hop.hostname().is_none());
         assert!(hop.last_rtt.is_none());
         assert!(hop.best_rtt.is_none());
         assert!(hop.worst_rtt.is_none());
@@ -687,7 +719,6 @@ mod tests {
         original.add_rtt(Duration::from_millis(150));
         original.increment_sent(0);
         original.addr = Some("192.168.1.3".parse().unwrap());
-        original.hostname = Some("gateway.local".to_string());
 
         let cloned = original.clone();
 
@@ -695,7 +726,6 @@ mod tests {
         assert_eq!(original.sent, cloned.sent);
         assert_eq!(original.received, cloned.received);
         assert_eq!(original.addr, cloned.addr);
-        assert_eq!(original.hostname, cloned.hostname);
         assert_eq!(original.last_rtt, cloned.last_rtt);
         assert_eq!(original.history, cloned.history);
     }
@@ -962,11 +992,14 @@ mod tests {
         hop.add_rtt_from_addr(addr(2), Duration::from_millis(20));
 
         assert_eq!(hop.addr, Some(addr(2)));
-        assert_eq!(hop.hostname, None, "B must not show A's name");
+        assert_eq!(hop.hostname(), None, "B must not show A's name");
         let alternates = hop.get_alternate_paths();
         assert_eq!(alternates.len(), 1);
         assert_eq!(alternates[0].addr, addr(1));
-        assert_eq!(alternates[0].hostname.as_deref(), Some("router-a.example"));
+        assert_eq!(
+            alternates[0].info.hostname.as_deref(),
+            Some("router-a.example")
+        );
         let primary = hop.get_primary_path_percentage();
         assert!((primary - 200.0 / 3.0).abs() < 1e-9, "{primary}");
     }

@@ -1,7 +1,7 @@
 use crate::args::{Flows, ProbeProtocol};
 use crate::asn::AsInfo;
 use crate::geo::{self, GeoFix, GeoSource, Inflation, Origin};
-use crate::icmp_ext::Extensions;
+use crate::hop_stats::AddrInfo;
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::privacy::{self, StandIns};
@@ -17,11 +17,11 @@ use hickory_resolver::{
 };
 
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, HashMap, HashSet},
     hash::Hash,
     net::IpAddr,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tracing::{debug, info, warn};
 
@@ -46,8 +46,8 @@ pub struct MtrSession {
     dns_names: HashMap<IpAddr, Option<String>>,
     /// Origin AS per address, with `--aslookup`; `None` while pending or unknown
     asns: HashMap<IpAddr, Option<AsInfo>>,
-    /// IPmap's locations, with `--ipmap`; `None` while pending or not sure enough
-    ipmap: HashMap<IpAddr, Option<GeoFix>>,
+    /// Addresses asked of IPmap, with `--ipmap`
+    ipmap: HashSet<IpAddr>,
     /// AS names per AS number; `None` while pending or unknown
     as_names: HashMap<u32, Option<String>>,
     /// The geolocation database, if there is one
@@ -56,12 +56,39 @@ pub struct MtrSession {
     locations: HashMap<IpAddr, Option<GeoFix>>,
     /// The path MTU search, with `--pmtu`
     pub pmtu: Option<PathMtu>,
-    /// The search for load-balanced branches, with `--flows auto`
-    pub mda: Option<Mda>,
+    /// How each round picks its flow
+    pub flow_plan: FlowPlan,
     /// Where `--record` writes what the session is told
     pub recorder: Option<Arc<Recorder>>,
     /// With `--replay`, the first line of the log
     pub replayed: Option<record::Start>,
+}
+
+/// How each round picks its flow
+#[derive(Debug, Clone)]
+pub enum FlowPlan {
+    /// Round mod n, with `--flows n`
+    Fixed(u16),
+    /// MDA-Lite chooses, with `--flows auto`
+    Auto(Mda),
+}
+
+impl FlowPlan {
+    /// The flow for round `round`, which probes up to `last_ttl`
+    pub fn next(&mut self, round: usize, last_ttl: u8) -> u16 {
+        match self {
+            Self::Fixed(n) => (round % usize::from(*n)) as u16,
+            Self::Auto(mda) => mda.next_flow(Instant::now(), last_ttl),
+        }
+    }
+
+    /// The search for load-balanced branches, with `--flows auto`
+    pub fn mda(&self) -> Option<&Mda> {
+        match self {
+            Self::Fixed(_) => None,
+            Self::Auto(mda) => Some(mda),
+        }
+    }
 }
 
 impl MtrSession {
@@ -111,7 +138,10 @@ impl MtrSession {
             hop.set_ema_alpha(args.ema_alpha);
         }
         let num_hosts = hops.len();
-        let mda = (args.flows == Flows::Auto).then(Mda::new);
+        let flow_plan = match args.flows {
+            Flows::Fixed(n) => FlowPlan::Fixed(n),
+            Flows::Auto => FlowPlan::Auto(Mda::new()),
+        };
         let recorder = match &args.record {
             Some(path) => {
                 let start = record::start(&args, target_addr);
@@ -132,11 +162,11 @@ impl MtrSession {
             dns_names: HashMap::new(),
             asns: HashMap::new(),
             as_names: HashMap::new(),
-            ipmap: HashMap::new(),
+            ipmap: HashSet::new(),
             geo_source: None,
             locations: HashMap::new(),
             pmtu: None,
-            mda,
+            flow_plan,
             recorder,
             replayed: None,
         })
@@ -144,10 +174,9 @@ impl MtrSession {
 
     /// The flows probed so far, for the flow matrix: 0 up to this
     pub fn flows(&self) -> u16 {
-        match (self.args.flows, &self.mda) {
-            (Flows::Fixed(n), _) => n,
-            (Flows::Auto, Some(mda)) => mda.width(),
-            (Flows::Auto, None) => 1,
+        match &self.flow_plan {
+            FlowPlan::Fixed(n) => *n,
+            FlowPlan::Auto(mda) => mda.width(),
         }
     }
 
@@ -164,8 +193,8 @@ impl MtrSession {
             notes.extend(pmtu.notes_after(hop));
         }
         notes.extend(
-            self.mda
-                .as_ref()
+            self.flow_plan
+                .mda()
                 .and_then(|mda| mda.note(hop, self.last_ttl())),
         );
         notes
@@ -203,13 +232,9 @@ impl MtrSession {
         if self.is_simulated() {
             // Names come with the made-up path; a simulation sends no lookups.
             let target = (self.target != self.target_addr.to_string()).then(|| self.target.clone());
-            self.dns_names.insert(self.target_addr, target);
-            self.dns_names
-                .extend(simulate::names().map(|(addr, name)| (addr, Some(name))));
-            if let Some(recorder) = &self.recorder {
-                for (&addr, name) in &self.dns_names {
-                    recorder.name(addr, name);
-                }
+            self.set_hostname(self.target_addr, target);
+            for (addr, name) in simulate::names() {
+                self.set_hostname(addr, Some(name));
             }
             if self.args.pmtu {
                 self.pmtu = Some(PathMtu::new(1500, self.target_addr.is_ipv6()));
@@ -353,7 +378,7 @@ impl MtrSession {
         self.hops[..self.display_hop_count()]
             .iter()
             .find_map(|hop| {
-                let fix = hop.geo.as_ref().filter(|fix| fix.is_city())?;
+                let fix = hop.geo().filter(|fix| fix.is_city())?;
                 Some(Origin {
                     lat: fix.lat,
                     lon: fix.lon,
@@ -372,7 +397,7 @@ impl MtrSession {
             .iter()
             .filter(|hop| origin.hop.is_none_or(|from| hop.hop > from))
             .filter_map(|hop| {
-                let fix = hop.geo.as_ref()?;
+                let fix = hop.geo()?;
                 let allowed = !hop.assess(Some(&origin))?.impossible;
                 allowed.then_some((hop.hop, (fix.lat, fix.lon)))
             })
@@ -398,7 +423,7 @@ impl MtrSession {
         for hop in self.hops.iter_mut().filter(|hop| hop.hop <= hidden) {
             hop.redact(&mut stand_ins);
         }
-        if let Some(mda) = self.mda.as_mut() {
+        if let FlowPlan::Auto(mda) = &mut self.flow_plan {
             mda.redact(hidden, &mut stand_ins);
         }
         if let Some(pmtu) = self.pmtu.as_mut() {
@@ -457,22 +482,31 @@ impl MtrSession {
     /// TTLs are no longer probed.
     /// Returns false if the response refers to a hop outside the table.
     pub fn apply_response(&mut self, response: &ProbeResponse) -> bool {
-        let index = response.hop;
+        // Every field is named, so a new one has to be stored here too
+        let &ProbeResponse {
+            hop: index,
+            ordinal,
+            source_addr: addr,
+            icmp_type,
+            rtt,
+            reply_ttl,
+            ref ext,
+            nat,
+        } = response;
         if let Some(recorder) = self.recorder.as_ref().filter(|_| index < self.hops.len()) {
             recorder.response(response);
         }
         let Some(hop) = self.hops.get_mut(index) else {
             return false;
         };
-        let addr = response.source_addr;
-        match response.icmp_type {
+        match icmp_type {
             IcmpResponseType::TimeExceeded => {
-                hop.record_reply(response.ordinal, Some(addr), response.rtt);
+                hop.record_reply(ordinal, Some(addr), rtt);
             }
             IcmpResponseType::EchoReply
             | IcmpResponseType::PortUnreachable
             | IcmpResponseType::DestinationUnreachable => {
-                hop.record_reply(response.ordinal, Some(addr), response.rtt);
+                hop.record_reply(ordinal, Some(addr), rtt);
                 hop.mark_as_target();
                 if index + 1 < self.num_hosts {
                     info!("Path ends at hop {} ({})", index + 1, addr);
@@ -482,28 +516,35 @@ impl MtrSession {
             // Only path MTU probes are large enough; the tracer hands these on.
             IcmpResponseType::TooBig { .. } => return true,
         }
-        let ext = Extensions {
-            mpls: response.mpls.clone(),
-            interfaces: response.interfaces.clone(),
-        };
-        self.hops[index].record_reply_details(addr, response.reply_ttl, ext);
+        self.hops[index].record_reply_details(addr, reply_ttl, ext.clone());
         // An echo reply quotes nothing, so it shows no NAT either way.
-        if response.icmp_type != IcmpResponseType::EchoReply {
-            self.hops[index].set_nat(addr, response.nat);
+        if icmp_type != IcmpResponseType::EchoReply {
+            self.hops[index].set_nat(addr, nat);
         }
-        if self.is_hidden(index + 1) {
-            return true;
-        }
-        if let Some(Some(name)) = self.dns_names.get(&addr) {
-            self.hops[index].set_hostname_for_addr(addr, name.clone());
-        }
-        if let Some(Some(asn)) = self.asns.get(&addr) {
-            self.hops[index].set_asn_for_addr(addr, asn.clone());
-        }
-        if let Some(fix) = self.locate(addr) {
-            self.hops[index].set_geo_for_addr(addr, fix);
+        if !self.is_hidden(index + 1) {
+            let info = self.info(addr);
+            self.hops[index].set_info(addr, &info);
         }
         true
+    }
+
+    /// What lookups found out about `addr` so far.
+    fn info(&mut self, addr: IpAddr) -> AddrInfo {
+        AddrInfo {
+            hostname: self.dns_names.get(&addr).cloned().flatten(),
+            asn: self.asns.get(&addr).cloned().flatten(),
+            geo: self.locate(addr),
+        }
+    }
+
+    /// Show what is known about `addr` at every hop where it answered, except
+    /// the hops `--privacy-hops` hides.
+    fn refresh(&mut self, addr: IpAddr) {
+        let info = self.info(addr);
+        let hidden = usize::from(self.args.privacy_hops);
+        for hop in self.hops.iter_mut().skip(hidden) {
+            hop.set_info(addr, &info);
+        }
     }
 
     /// True the first time an address is seen: the caller should look it up.
@@ -527,19 +568,12 @@ impl MtrSession {
                 .then(|| geo::names::locate(name))
                 .flatten()
                 .filter(|fix| !ruled_out(fix) || database.as_ref().is_none_or(ruled_out));
-            if let Some(fix) = &named {
-                self.locations.insert(addr, Some(fix.clone()));
-            }
-            for hop in &mut self.hops {
-                if hop.responders.contains_key(&addr) {
-                    hop.set_hostname_for_addr(addr, name.clone());
-                    if let Some(fix) = &named {
-                        hop.set_geo_for_addr(addr, fix.clone());
-                    }
-                }
+            if let Some(fix) = named {
+                self.locations.insert(addr, Some(fix));
             }
         }
         self.dns_names.insert(addr, name);
+        self.refresh(addr);
     }
 
     /// Start the statistics over, keeping what is known about the path itself.
@@ -576,14 +610,8 @@ impl MtrSession {
             }
             info
         });
-        if let Some(asn) = &asn {
-            for hop in &mut self.hops {
-                if hop.responders.contains_key(&addr) {
-                    hop.set_asn_for_addr(addr, asn.clone());
-                }
-            }
-        }
         self.asns.insert(addr, asn);
+        self.refresh(addr);
     }
 
     /// True the first time AS `number` is seen: the caller should look up its name.
@@ -598,16 +626,15 @@ impl MtrSession {
         }
         self.as_names.insert(number, name.clone());
         let Some(name) = name else { return };
+        let mut named = Vec::new();
         for (&addr, info) in &mut self.asns {
-            let Some(info) = info.as_mut().filter(|i| i.number == number) else {
-                continue;
-            };
-            info.name = Some(name.clone());
-            for hop in &mut self.hops {
-                if hop.responders.contains_key(&addr) {
-                    hop.set_asn_for_addr(addr, info.clone());
-                }
+            if let Some(info) = info.as_mut().filter(|i| i.number == number) {
+                info.name = Some(name.clone());
+                named.push(addr);
             }
+        }
+        for addr in named {
+            self.refresh(addr);
         }
     }
 
@@ -617,7 +644,7 @@ impl MtrSession {
         self.args.ipmap
             && !self.is_simulated()
             && crate::asn::is_public(addr)
-            && first_time(&mut self.ipmap, addr)
+            && self.ipmap.insert(addr)
     }
 
     /// Store IPmap's answer for `addr` and place it there, unless a city code in
@@ -627,7 +654,6 @@ impl MtrSession {
         if let Some(recorder) = &self.recorder {
             recorder.ipmap(addr, &fix);
         }
-        self.ipmap.insert(addr, fix.clone());
         let Some(fix) = fix else { return };
         let current = self.locations.get(&addr).cloned().flatten();
         let keep = current.as_ref().is_some_and(|current| {
@@ -637,12 +663,8 @@ impl MtrSession {
         if keep {
             return;
         }
-        self.locations.insert(addr, Some(fix.clone()));
-        for hop in &mut self.hops {
-            if hop.responders.contains_key(&addr) {
-                hop.set_geo_for_addr(addr, fix.clone());
-            }
-        }
+        self.locations.insert(addr, Some(fix));
+        self.refresh(addr);
     }
 
     /// Count a probe sent to hop `index` (from 0) in `flow`. Returns its number
@@ -671,7 +693,9 @@ impl MtrSession {
         match event {
             Event::Sent { hop, flow, .. } => {
                 if let Some(index) = index(hop) {
-                    self.args.flows = record::flows_with(self.args.flows, flow);
+                    if let FlowPlan::Fixed(n) = &mut self.flow_plan {
+                        *n = record::flows_with(*n, flow);
+                    }
                     self.sent(index, flow);
                 }
             }
@@ -682,8 +706,7 @@ impl MtrSession {
                 kind,
                 rtt_ms,
                 reply_ttl,
-                mpls,
-                interfaces,
+                ext,
                 nat,
             } => {
                 let Some(index) = index(hop) else { return };
@@ -696,8 +719,7 @@ impl MtrSession {
                     icmp_type: kind.into(),
                     rtt,
                     reply_ttl,
-                    mpls,
-                    interfaces,
+                    ext,
                     nat,
                 });
             }
@@ -764,6 +786,7 @@ fn first_time<K: Hash + Eq, V>(map: &mut HashMap<K, Option<V>>, key: K) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::icmp_ext::Extensions;
     use clap::Parser;
 
     #[tokio::test]
@@ -793,8 +816,7 @@ mod tests {
             icmp_type: kind,
             rtt: Duration::from_millis(10),
             reply_ttl: None,
-            mpls: Vec::new(),
-            interfaces: Vec::new(),
+            ext: Extensions::default(),
             nat: None,
         }
     }
@@ -968,11 +990,8 @@ mod tests {
             session.apply_response(&response(ttl, IcmpResponseType::TimeExceeded, from));
         }
 
-        assert_eq!(session.hops[0].geo, None, "private: never looked up");
-        assert_eq!(
-            session.hops[1].geo.as_ref().map(GeoFix::place),
-            Some("US".into())
-        );
+        assert_eq!(session.hops[0].geo(), None, "private: never looked up");
+        assert_eq!(session.hops[1].geo().map(GeoFix::place), Some("US".into()));
         let origin = session.origin().unwrap();
         assert_eq!(
             (origin.hop, origin.lat),
@@ -991,19 +1010,16 @@ mod tests {
         let one = IpAddr::from([1, 1, 1, 1]);
         session.set_hostname(one, Some("adm-b3-link.ip.twelve99.net".into()));
         session.apply_response(&response(3, IcmpResponseType::TimeExceeded, [1, 1, 1, 1]));
-        let fix = session.hops[3].geo.clone().unwrap();
+        let fix = session.hops[3].geo().cloned().unwrap();
         assert_eq!(
             (fix.place(), fix.from_name.as_deref()),
             ("Amsterdam, NL".into(), Some("adm"))
         );
-        assert_eq!(session.hops[3].responders[&one].geo, Some(fix));
+        assert_eq!(session.hops[3].responders[&one].info.geo, Some(fix));
         assert!(!session.hops[3].assess(Some(&origin)).unwrap().impossible);
         session.set_hostname(one, Some("dns.example".into()));
         assert_eq!(
-            session.hops[3]
-                .geo
-                .as_ref()
-                .and_then(|f| f.from_name.as_deref()),
+            session.hops[3].geo().and_then(|f| f.from_name.as_deref()),
             Some("adm"),
             "a name without a code changes nothing"
         );
@@ -1011,7 +1027,7 @@ mod tests {
         let eight = IpAddr::from([8, 8, 8, 8]);
         session.set_hostname(eight, Some("sng-b7-link.ip.twelve99.net".into()));
         assert_eq!(
-            session.hops[2].geo.as_ref().map(GeoFix::place),
+            session.hops[2].geo().map(GeoFix::place),
             Some("Amsterdam, NL".into())
         );
 
@@ -1048,19 +1064,19 @@ mod tests {
         // The database put a router 10 ms away in California; IPmap measured it
         let nine = IpAddr::from([9, 9, 9, 9]);
         session.set_ipmap(nine, Some(measured("Rotterdam", 51.92, 4.48)));
-        let fix = session.hops[1].geo.clone().unwrap();
+        let fix = session.hops[1].geo().cloned().unwrap();
         assert_eq!(
             (fix.place(), fix.from_ipmap),
             ("Rotterdam, NL".into(), Some(45))
         );
-        assert_eq!(session.hops[1].responders[&nine].geo, Some(fix));
+        assert_eq!(session.hops[1].responders[&nine].info.geo, Some(fix));
 
         // A city code in the name goes first, and stays first
         let one = IpAddr::from([1, 1, 1, 1]);
         session.set_hostname(one, Some("adm-b3-link.ip.twelve99.net".into()));
         session.set_ipmap(one, Some(measured("Utrecht", 52.09, 5.12)));
         assert_eq!(
-            session.hops[2].geo.as_ref().unwrap().from_name.as_deref(),
+            session.hops[2].geo().unwrap().from_name.as_deref(),
             Some("adm")
         );
 
@@ -1072,7 +1088,7 @@ mod tests {
         };
         session.set_ipmap(eight, Some(far));
         assert_eq!(
-            session.hops[0].geo.as_ref().map(GeoFix::place),
+            session.hops[0].geo().map(GeoFix::place),
             Some("Amsterdam, NL".into())
         );
         assert_eq!(

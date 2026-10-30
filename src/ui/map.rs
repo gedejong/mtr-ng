@@ -157,7 +157,7 @@ pub fn render_map(
     let origin = session.origin();
     let (located, ruled_out): (Vec<(&HopStats, &GeoFix)>, Vec<_>) = shown
         .iter()
-        .filter_map(|&hop| Some((hop, hop.geo.as_ref()?)))
+        .filter_map(|&hop| Some((hop, hop.geo()?)))
         .partition(|(hop, _)| !hop.assess(origin.as_ref()).is_some_and(|a| a.impossible));
     let ruled_out: BTreeSet<u16> = ruled_out
         .iter()
@@ -187,7 +187,7 @@ pub fn render_map(
 
     let unplaced: BTreeSet<u16> = shown
         .iter()
-        .filter(|hop| hop.geo.is_none())
+        .filter(|hop| hop.geo().is_none())
         .map(|hop| u16::from(hop.hop))
         .collect();
     let mut key = vec!["●n hop n".to_string()];

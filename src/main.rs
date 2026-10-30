@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 /// then starts the async runtime.
 fn main() -> Result<()> {
     let mut args = Args::parse();
-    args.report |= args.json || args.csv || args.dot || args.mermaid || args.geojson;
+    args.report |= args.format.chosen().is_some();
     if let Err(message) = args.validate() {
         Args::command()
             .error(clap::error::ErrorKind::ValueValidation, message)

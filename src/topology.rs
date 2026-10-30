@@ -115,7 +115,7 @@ fn name(hop: &HopStats, addr: IpAddr, numeric: bool) -> String {
     let name = hop
         .responders
         .get(&addr)
-        .and_then(|r| r.hostname.as_deref());
+        .and_then(|r| r.info.hostname.as_deref());
     columns::host(name, Some(addr), !numeric)
 }
 

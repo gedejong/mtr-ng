@@ -6,7 +6,7 @@ use clap::{CommandFactory, ValueEnum};
 use mtr_ng::{
     args::Column,
     geo,
-    ui::events::{COLUMN_KEYS, DETAIL_KEYS, TABLE_KEYS},
+    ui::events::{KEY_SECTIONS, TABLE_KEYS},
     Args,
 };
 use std::io::{self, Write};
@@ -210,11 +210,8 @@ pub fn render(out: &mut impl Write) -> io::Result<()> {
     man.render_options_section(out)?;
 
     writeln!(out, ".SH KEYS")?;
-    for (heading, keys) in [
-        (None, TABLE_KEYS),
-        (Some("In the column chooser"), COLUMN_KEYS),
-        (Some("In the hop details"), DETAIL_KEYS),
-    ] {
+    let sections = KEY_SECTIONS.map(|(heading, keys)| (Some(heading), keys));
+    for (heading, keys) in std::iter::once((None, TABLE_KEYS)).chain(sections) {
         if let Some(heading) = heading {
             writeln!(out, ".SS {heading}")?;
         }

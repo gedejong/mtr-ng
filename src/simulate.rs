@@ -3,7 +3,7 @@
 //! (flows, timeouts, loss) without sockets or privileges.
 
 use crate::geo::{GeoFix, GeoSource};
-use crate::icmp_ext::{Interface, MplsLabel, Role};
+use crate::icmp_ext::{Extensions, Interface, MplsLabel, Role};
 use crate::probe::{IcmpResponseType, Nat, Prober, Reply};
 use std::{
     io,
@@ -283,8 +283,10 @@ impl Prober for SimProber {
                 seq,
                 received_at: sent_at + rtt,
                 ttl: Some(reply_ttl),
-                mpls: mpls.into_iter().collect(),
-                interfaces,
+                ext: Extensions {
+                    mpls: mpls.into_iter().collect(),
+                    interfaces,
+                },
                 nat,
             };
             let tx = self.tx.clone();
@@ -337,10 +339,10 @@ mod tests {
         assert_eq!(diamond.responders.len(), 2, "one router per flow");
         assert!(diamond.flows.values().all(|f| f.responders.len() == 1));
         assert_eq!(
-            diamond.hostname.as_deref().map(|n| n.starts_with("core-2")),
+            diamond.hostname().map(|n| n.starts_with("core-2")),
             Some(true)
         );
-        let labels = &diamond.responders[&diamond.addr.unwrap()].mpls;
+        let labels = &diamond.responders[&diamond.addr.unwrap()].ext.mpls;
         assert_eq!(labels.first().map(|l| l.label), Some(24005));
 
         assert_eq!(s.hops[5].received, 0, "silent router");

@@ -1,8 +1,8 @@
-use crate::args::Column;
+use crate::args::{Column, Format};
 use crate::columns;
 use crate::geo::{self, Assessment, GeoFix, Inflation, Origin};
 use crate::hop_stats::FlowStats;
-use crate::icmp_ext::MplsLabel;
+use crate::icmp_ext::Extensions;
 use crate::mda::Mda;
 use crate::pmtu::PathMtu;
 use crate::privacy::{self, show};
@@ -101,8 +101,7 @@ fn format_table(
     for (hop, row) in hops.iter().zip(&rows) {
         lines.push(align(row, columns, &widths));
         if mpls {
-            lines.extend(hop.mpls().iter().map(|label| format!("       {label}")));
-            lines.extend(hop.interfaces().iter().map(|i| format!("       {i}")));
+            lines.extend(hop.ext().lines().map(|line| format!("       {line}")));
         }
         lines.extend(notes(hop.hop).iter().map(|note| format!("       {note}")));
     }
@@ -186,7 +185,7 @@ fn geo_notes(
     let mut placed_by = |by: &str, placed: fn(&GeoFix) -> bool| {
         let placed: BTreeSet<u16> = hops
             .iter()
-            .filter(|hop| hop.geo.as_ref().is_some_and(placed))
+            .filter(|hop| hop.geo().is_some_and(placed))
             .map(|hop| u16::from(hop.hop))
             .collect();
         if !placed.is_empty() {
@@ -204,7 +203,7 @@ fn geo_notes(
 }
 
 fn host_label(hop: &HopStats, numeric: bool) -> String {
-    columns::host(hop.hostname.as_deref(), hop.addr, !numeric)
+    columns::host(hop.hostname(), hop.addr, !numeric)
 }
 
 /// Widest the report's route graph gets; names longer than their lane are cut.
@@ -225,11 +224,18 @@ fn json_ms(rtt: Option<Duration>) -> Value {
 }
 
 /// An MPLS label stack entry, with mtr's keys.
-fn json_mpls(labels: &[MplsLabel]) -> Value {
-    labels
-        .iter()
-        .map(|l| json!({"label": l.label, "tc": l.tc, "s": l.bottom, "ttl": l.ttl}))
-        .collect()
+/// `ext` under `MPLS` (with mtr's field names) and `interfaces`, if any
+fn json_ext(entry: &mut Value, ext: &Extensions) {
+    let Extensions { mpls, interfaces } = ext;
+    if !mpls.is_empty() {
+        entry["MPLS"] = mpls
+            .iter()
+            .map(|l| json!({"label": l.label, "tc": l.tc, "s": l.bottom, "ttl": l.ttl}))
+            .collect();
+    }
+    if !interfaces.is_empty() {
+        entry["interfaces"] = json!(interfaces);
+    }
 }
 
 /// One entry per probed hop, with mtr's field names (`count`, `Loss%`, `Snt`,
@@ -263,24 +269,19 @@ fn json_hubs(
                 "JAvg": json_ms(hop.jitter_avg),
             });
             if asn && hop.addr.is_some_and(|addr| !privacy::is_stand_in(addr)) {
-                hub["ASN"] = json!(columns::as_value(Column::Asn, hop.asn.as_ref()));
-                if let Some(info) = &hop.asn {
+                hub["ASN"] = json!(columns::as_value(Column::Asn, hop.asn()));
+                if let Some(info) = hop.asn() {
                     hub["prefix"] = json!(info.prefix);
                     hub["as_name"] = json!(info.name);
                 }
             }
-            if !hop.mpls().is_empty() {
-                hub["MPLS"] = json_mpls(hop.mpls());
-            }
-            if !hop.interfaces().is_empty() {
-                hub["interfaces"] = json!(hop.interfaces());
-            }
+            json_ext(&mut hub, hop.ext());
             match hop.nat() {
                 Some(Nat::Source(addr)) => hub["nat"] = json!({ "source": show(addr) }),
                 Some(Nat::Checksum) => hub["nat"] = json!({ "checksum_changed": true }),
                 None => {}
             }
-            if let Some(fix) = &hop.geo {
+            if let Some(fix) = hop.geo() {
                 let assessment = hop.assess(origin);
                 hub["geo"] = json!({
                     "city": fix.city,
@@ -308,18 +309,13 @@ fn json_hubs(
                 .map(|alt| {
                     let mut alternate = json!({
                         "ip": show(alt.addr),
-                        "host": columns::host(alt.hostname.as_deref(), Some(alt.addr), !numeric),
+                        "host": columns::host(alt.info.hostname.as_deref(), Some(alt.addr), !numeric),
                         "replies": alt.replies,
                         "Last": json_ms(alt.last_rtt),
                         "Avg": json_ms(alt.avg_rtt()),
                         "Best": json_ms(alt.best_rtt),
                     });
-                    if !alt.mpls.is_empty() {
-                        alternate["MPLS"] = json_mpls(&alt.mpls);
-                    }
-                    if !alt.interfaces.is_empty() {
-                        alternate["interfaces"] = json!(alt.interfaces);
-                    }
+                    json_ext(&mut alternate, &alt.ext);
                     alternate
                 })
                 .collect();
@@ -340,7 +336,30 @@ fn csv_field(text: &str) -> String {
     }
 }
 
-const CSV_HEADER: &str = "hop,host,ip,asn,prefix,as_name,loss_pct,sent,last_ms,avg_ms,ema_ms,best_ms,worst_ms,stdev_ms,jitter_ms,jitter_avg_ms,location,lat,lon,dist_km,stretch,impossible";
+const CSV_HEADER: [&str; 22] = [
+    "hop",
+    "host",
+    "ip",
+    "asn",
+    "prefix",
+    "as_name",
+    "loss_pct",
+    "sent",
+    "last_ms",
+    "avg_ms",
+    "ema_ms",
+    "best_ms",
+    "worst_ms",
+    "stdev_ms",
+    "jitter_ms",
+    "jitter_avg_ms",
+    "location",
+    "lat",
+    "lon",
+    "dist_km",
+    "stretch",
+    "impossible",
+];
 
 /// A header row, then one row per probed hop. Empty fields mean no reply, or no
 /// ASN or location.
@@ -352,10 +371,11 @@ fn csv_rows(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Vec<St
     };
     let rows = hops.iter().filter(|hop| hop.sent > 0).map(|hop| {
         let stdev = (hop.received > 0).then(|| format!("{:.3}", hop.stddev_ms()));
-        let fix = hop.geo.as_ref();
-        let asn = hop.asn.as_ref();
+        let fix = hop.geo();
+        let asn = hop.asn();
         let assessment = hop.assess(origin);
-        [
+        // A field per header, or this doesn't compile
+        let fields: [String; CSV_HEADER.len()] = [
             hop.hop.to_string(),
             csv_field(&host_label(hop, numeric)),
             hop.addr.map(show).unwrap_or_default(),
@@ -387,12 +407,10 @@ fn csv_rows(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Vec<St
             assessment
                 .map(|a| a.impossible.to_string())
                 .unwrap_or_default(),
-        ]
-        .join(",")
+        ];
+        fields.join(",")
     });
-    std::iter::once(CSV_HEADER.to_string())
-        .chain(rows)
-        .collect()
+    std::iter::once(CSV_HEADER.join(",")).chain(rows).collect()
 }
 
 /// What the hubs' `geo` objects rest on: whose locations they are and where
@@ -432,7 +450,7 @@ fn geojson(hops: &[HopStats], numeric: bool, origin: Option<&Origin>) -> Value {
     let mut features = Vec::new();
     let mut stops = Vec::new();
     for hop in hops.iter().filter(|hop| hop.sent > 0) {
-        let (Some(fix), Some(addr)) = (&hop.geo, hop.addr) else {
+        let (Some(fix), Some(addr)) = (hop.geo(), hop.addr) else {
             continue;
         };
         let assessment = hop.assess(origin);
@@ -548,59 +566,55 @@ pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Resu
         (0, None) => gethostname::gethostname().to_string_lossy().into_owned(),
     };
 
-    if args.json {
-        let mut report = json!({
-            "report": {
-                "mtr": {
-                    "src": source,
-                    "dst": session.target,
-                    "dst_addr": session.target_addr.to_string(),
-                    "tests": session.hops.first().map_or(0, |hop| hop.sent),
-                    "start": start.to_rfc3339(),
-                    "simulated": session.is_simulated(),
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-                "hubs": json_hubs(hops, args.numeric, args.wants_asn(), session.flows(), origin),
+    if let Some(format) = args.format.chosen() {
+        match format {
+            Format::Json => {
+                let mut report = json!({
+                    "report": {
+                        "mtr": {
+                            "src": source,
+                            "dst": session.target,
+                            "dst_addr": session.target_addr.to_string(),
+                            "tests": session.hops.first().map_or(0, |hop| hop.sent),
+                            "start": start.to_rfc3339(),
+                            "simulated": session.is_simulated(),
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                        "hubs": json_hubs(hops, args.numeric, args.wants_asn(), session.flows(), origin),
+                    }
+                });
+                if let Some(geo) = json_geo(attribution, origin, inflation) {
+                    report["report"]["mtr"]["geo"] = geo;
+                }
+                if let Some(path) = &args.replay {
+                    report["report"]["mtr"]["replay"] = json!(path.display().to_string());
+                }
+                if let Some(pmtu) = &session.pmtu {
+                    report["report"]["pmtu"] = json_pmtu(pmtu);
+                }
+                if let Some(mda) = session.flow_plan.mda() {
+                    report["report"]["mda"] = json_mda(mda, session.last_ttl());
+                }
+                println!("{}", serde_json::to_string_pretty(&report)?);
             }
-        });
-        if let Some(geo) = json_geo(attribution, origin, inflation) {
-            report["report"]["mtr"]["geo"] = geo;
+            Format::GeoJson => {
+                let mut collection = geojson(hops, args.numeric, origin);
+                collection["target"] = json!(session.target);
+                collection["start"] = json!(start.to_rfc3339());
+                collection["simulated"] = json!(session.is_simulated());
+                if let Some(geo) = json_geo(attribution, origin, inflation) {
+                    collection["geo"] = geo;
+                }
+                println!("{}", serde_json::to_string_pretty(&collection)?);
+            }
+            Format::Csv => {
+                for line in csv_rows(hops, args.numeric, origin) {
+                    println!("{line}");
+                }
+            }
+            Format::Dot => print!("{}", topology::to_dot(hops, &source, args.numeric)),
+            Format::Mermaid => print!("{}", topology::to_mermaid(hops, &source, args.numeric)),
         }
-        if let Some(path) = &args.replay {
-            report["report"]["mtr"]["replay"] = json!(path.display().to_string());
-        }
-        if let Some(pmtu) = &session.pmtu {
-            report["report"]["pmtu"] = json_pmtu(pmtu);
-        }
-        if let Some(mda) = &session.mda {
-            report["report"]["mda"] = json_mda(mda, session.last_ttl());
-        }
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
-    }
-    if args.geojson {
-        let mut collection = geojson(hops, args.numeric, origin);
-        collection["target"] = json!(session.target);
-        collection["start"] = json!(start.to_rfc3339());
-        collection["simulated"] = json!(session.is_simulated());
-        if let Some(geo) = json_geo(attribution, origin, inflation) {
-            collection["geo"] = geo;
-        }
-        println!("{}", serde_json::to_string_pretty(&collection)?);
-        return Ok(());
-    }
-    if args.csv {
-        for line in csv_rows(hops, args.numeric, origin) {
-            println!("{line}");
-        }
-        return Ok(());
-    }
-    if args.dot {
-        print!("{}", topology::to_dot(hops, &source, args.numeric));
-        return Ok(());
-    }
-    if args.mermaid {
-        print!("{}", topology::to_mermaid(hops, &source, args.numeric));
         return Ok(());
     }
 
@@ -644,7 +658,7 @@ pub async fn run_report(mut session: MtrSession, replay: Option<Replay>) -> Resu
             }
         }
     }
-    if let Some(mda) = &session.mda {
+    if let Some(mda) = session.flow_plan.mda() {
         println!();
         for line in mda.summary(session.last_ttl()) {
             println!("{line}");
@@ -695,6 +709,7 @@ fn json_pmtu(pmtu: &PathMtu) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::icmp_ext::MplsLabel;
     use std::net::IpAddr;
 
     fn no_notes(_: u8) -> Vec<String> {
@@ -1078,7 +1093,10 @@ mod tests {
         let gateway = IpAddr::from([192, 168, 1, 1]);
         hops[0].set_hostname_for_addr(gateway, "a,\"b\"".to_string());
         let rows = csv_rows(&hops, false, None);
-        assert_eq!(rows[0], CSV_HEADER);
+        assert_eq!(
+            rows[0],
+            "hop,host,ip,asn,prefix,as_name,loss_pct,sent,last_ms,avg_ms,ema_ms,best_ms,worst_ms,stdev_ms,jitter_ms,jitter_avg_ms,location,lat,lon,dist_km,stretch,impossible"
+        );
         assert_eq!(
             rows[1],
             r#"1,"a,""b""",192.168.1.1,,,,0.0,3,3.000,2.000,1.290,1.000,3.000,1.000,1.000,1.000,,,,,,"#

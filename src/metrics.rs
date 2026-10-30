@@ -292,10 +292,10 @@ pub fn render(session: &MtrSession, format: Format) -> String {
     for hop in hops {
         for r in responders(hop) {
             let mut labels = vec![("hop", hop.hop.to_string()), ("addr", r.addr.to_string())];
-            if let Some(name) = &r.hostname {
+            if let Some(name) = &r.info.hostname {
                 labels.push(("host", name.clone()));
             }
-            if let Some(asn) = &r.asn {
+            if let Some(asn) = &r.info.asn {
                 labels.push(("asn", asn.number.to_string()));
                 if let Some(prefix) = &asn.prefix {
                     labels.push(("prefix", prefix.clone()));

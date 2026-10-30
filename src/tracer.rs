@@ -8,11 +8,10 @@
 //! probe for the path MTU search, whose answers go to that search instead of the
 //! hop statistics. Reverse DNS runs off this path.
 
-use crate::args::Flows;
 use crate::mda::Mda;
 use crate::probe::{self, IcmpResponseType, ProbeResponse, Prober, Reply};
 use crate::record::Replay;
-use crate::session::{MtrSession, DEFAULT_REPORT_CYCLES};
+use crate::session::{FlowPlan, MtrSession, DEFAULT_REPORT_CYCLES};
 use crate::Result;
 use hickory_resolver::proto::rr::RData;
 use std::{
@@ -71,17 +70,26 @@ impl Trace {
 
 /// A probe on the wire, waiting for its reply.
 struct InFlight {
-    hop: usize,
-    flow: u16,
-    ordinal: u64,
     sent_at: Instant,
+    purpose: Purpose,
 }
 
-/// A path MTU probe on the wire
-struct MtuProbe {
-    ttl: u8,
-    size: u16,
-    sent_at: Instant,
+/// What a probe was sent for.
+#[derive(Debug, Clone, Copy)]
+enum Purpose {
+    /// A round's probe to hop `hop` (from 0), its `ordinal`th there
+    Hop { hop: usize, flow: u16, ordinal: u64 },
+    /// A path MTU probe of `size` bytes
+    PathMtu { ttl: u8, size: u16 },
+}
+
+/// Remember a probe until its reply. Sequence numbers wrap: a hop probe still
+/// waiting under the same number never got an answer.
+fn track(s: &mut MtrSession, in_flight: &mut HashMap<u16, InFlight>, seq: u16, probe: InFlight) {
+    match in_flight.insert(seq, probe).map(|old| old.purpose) {
+        Some(Purpose::Hop { hop, ordinal, .. }) => s.lost(hop, ordinal),
+        Some(Purpose::PathMtu { .. }) | None => {}
+    }
 }
 
 /// Run the trace until `--count` rounds are done (10 in report mode, forever in the
@@ -99,14 +107,13 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
     let finish_discovery = args.report && args.count.is_none();
     let discovering = || {
         let s = session.lock().unwrap();
-        s.mda.as_ref().is_some_and(Mda::discovering)
+        s.flow_plan.mda().is_some_and(Mda::discovering)
     };
     let mut replies = prober
         .take_replies()
         .ok_or_else(|| anyhow::anyhow!("prober has no reply stream"))?;
 
     let mut in_flight: HashMap<u16, InFlight> = HashMap::new();
-    let mut mtu_in_flight: HashMap<u16, MtuProbe> = HashMap::new();
     let mut dns = JoinSet::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(args.interval.max(1)));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -115,7 +122,7 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
 
     loop {
         let sending = rounds.is_none_or(|n| round < n) || finish_discovery && discovering();
-        if !sending && in_flight.is_empty() && mtu_in_flight.is_empty() {
+        if !sending && in_flight.is_empty() {
             break;
         }
         tokio::select! {
@@ -123,38 +130,42 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
             // MTU probe's size) see every answer that has arrived.
             biased;
             Some(reply) = replies.recv() => {
-                if let Some(probe) = mtu_in_flight.remove(&reply.seq) {
-                    mtu_answered(&session, &probe, &reply);
-                    continue;
-                }
-                if matches!(reply.kind, IcmpResponseType::TooBig { .. }) {
-                    continue; // a small probe can't be too big; let it time out
-                }
                 let Some(probe) = in_flight.remove(&reply.seq) else {
                     continue; // late (already timed out) or not from this run
                 };
+                let (hop, flow, ordinal) = match probe.purpose {
+                    Purpose::PathMtu { ttl, size } => {
+                        mtu_answered(&session, ttl, size, &reply);
+                        continue;
+                    }
+                    // A small probe can't be too big; let it time out
+                    Purpose::Hop { .. } if matches!(reply.kind, IcmpResponseType::TooBig { .. }) => {
+                        in_flight.insert(reply.seq, probe);
+                        continue;
+                    }
+                    Purpose::Hop { hop, flow, ordinal } => (hop, flow, ordinal),
+                };
                 let rtt = reply.received_at.saturating_duration_since(probe.sent_at);
-                debug!("Reply seq={} ttl={} from {} rtt={rtt:?} reply_ttl={:?} mpls={:?}", reply.seq, probe.hop + 1, reply.source, reply.ttl, reply.mpls);
+                debug!("Reply seq={} ttl={} from {} rtt={rtt:?} reply_ttl={:?} mpls={:?}", reply.seq, hop + 1, reply.source, reply.ttl, reply.ext.mpls);
                 let response = ProbeResponse {
-                    hop: probe.hop,
-                    ordinal: Some(probe.ordinal),
+                    hop,
+                    ordinal: Some(ordinal),
                     source_addr: reply.source,
                     icmp_type: reply.kind,
                     rtt,
                     reply_ttl: reply.ttl,
-                    mpls: reply.mpls,
-                    interfaces: reply.interfaces,
+                    ext: reply.ext,
                     nat: reply.nat,
                 };
                 let (name, asn, ipmap, resolver) = {
                     let mut s = session.lock().unwrap();
                     s.apply_response(&response);
-                    if let Some(mda) = s.mda.as_mut() {
-                        mda.answered(probe.flow, (probe.hop + 1) as u8, reply.source);
+                    if let FlowPlan::Auto(mda) = &mut s.flow_plan {
+                        mda.answered(flow, (hop + 1) as u8, reply.source);
                     }
                     s.notify();
                     // Hidden hops (--privacy-hops) are never looked up
-                    let shown = !s.is_hidden(probe.hop + 1);
+                    let shown = !s.is_hidden(hop + 1);
                     let name = shown && !s.args.numeric && s.want_lookup(reply.source);
                     let asn = shown && s.want_asn(reply.source);
                     let ipmap = shown && s.want_ipmap(reply.source);
@@ -174,20 +185,15 @@ pub async fn run(session: Shared, mut prober: Box<dyn Prober>) -> Result<()> {
                 let flow = {
                     let mut s = session.lock().unwrap();
                     let last_ttl = s.last_ttl();
-                    match (s.args.flows, s.mda.as_mut()) {
-                        (_, Some(mda)) => mda.next_flow(Instant::now(), last_ttl),
-                        (Flows::Fixed(n), None) => (round % usize::from(n)) as u16,
-                        (Flows::Auto, None) => 0,
-                    }
+                    s.flow_plan.next(round, last_ttl)
                 };
                 send_round(&session, prober.as_mut(), target, flow, &mut in_flight);
-                send_mtu_probe(&session, prober.as_mut(), target, flow, round, &mut mtu_in_flight);
+                send_mtu_probe(&session, prober.as_mut(), target, flow, round, &mut in_flight);
                 round += 1;
                 debug!("Sent round {round}");
             }
             _ = sweep.tick() => {
                 expire(&session, &mut in_flight, timeout);
-                expire_mtu_probes(&session, &mut mtu_in_flight, timeout);
             }
         }
     }
@@ -217,16 +223,8 @@ fn send_round(
         let ordinal = s.sent(hop, flow);
         match prober.send(target, (hop + 1) as u8, flow, None) {
             Ok((seq, sent_at)) => {
-                let probe = InFlight {
-                    hop,
-                    flow,
-                    ordinal,
-                    sent_at,
-                };
-                if let Some(old) = in_flight.insert(seq, probe) {
-                    // Sequence numbers wrapped onto a probe that never got an answer
-                    s.lost(old.hop, old.ordinal);
-                }
+                let purpose = Purpose::Hop { hop, flow, ordinal };
+                track(&mut s, in_flight, seq, InFlight { sent_at, purpose });
             }
             Err(e) => {
                 debug!("Sending to TTL {} failed: {e}", hop + 1);
@@ -244,7 +242,7 @@ fn send_mtu_probe(
     target: IpAddr,
     flow: u16,
     round: usize,
-    in_flight: &mut HashMap<u16, MtuProbe>,
+    in_flight: &mut HashMap<u16, InFlight>,
 ) {
     let mut s = session.lock().unwrap();
     let Some((ttl, size)) = s.mtu_probe(round) else {
@@ -253,7 +251,8 @@ fn send_mtu_probe(
     match prober.send(target, ttl, flow, Some(size)) {
         Ok((seq, sent_at)) => {
             debug!("Sent a {size}-byte path MTU probe to TTL {ttl}");
-            in_flight.insert(seq, MtuProbe { ttl, size, sent_at });
+            let purpose = Purpose::PathMtu { ttl, size };
+            track(&mut s, in_flight, seq, InFlight { sent_at, purpose });
         }
         Err(e) if probe::is_too_big(&e) => {
             debug!("This machine won't send {size} bytes to the target: {e}");
@@ -266,11 +265,11 @@ fn send_mtu_probe(
     }
 }
 
-/// Hand the answer to a path MTU probe to the search.
-fn mtu_answered(session: &Shared, probe: &MtuProbe, reply: &Reply) {
+/// Hand the answer to a path MTU probe of `size` bytes to TTL `ttl` to the search.
+fn mtu_answered(session: &Shared, ttl: u8, size: u16, reply: &Reply) {
     debug!(
-        "Path MTU probe of {} bytes to TTL {}: {:?} from {}",
-        probe.size, probe.ttl, reply.kind, reply.source
+        "Path MTU probe of {size} bytes to TTL {ttl}: {:?} from {}",
+        reply.kind, reply.source
     );
     let mut s = session.lock().unwrap();
     let hop = s.hop_of(reply.source);
@@ -278,53 +277,41 @@ fn mtu_answered(session: &Shared, probe: &MtuProbe, reply: &Reply) {
         return;
     };
     match reply.kind {
-        IcmpResponseType::TooBig { mtu } => pmtu.too_big(probe.size, reply.source, hop, mtu),
+        IcmpResponseType::TooBig { mtu } => pmtu.too_big(size, reply.source, hop, mtu),
         IcmpResponseType::TimeExceeded
         | IcmpResponseType::EchoReply
-        | IcmpResponseType::PortUnreachable => pmtu.arrived(probe.size, probe.ttl),
+        | IcmpResponseType::PortUnreachable => pmtu.arrived(size, ttl),
         IcmpResponseType::DestinationUnreachable => {}
     }
     s.notify();
 }
 
-/// Path MTU probes that waited longer than `timeout` vanished, if the hop they
-/// went to answers small probes.
-fn expire_mtu_probes(session: &Shared, in_flight: &mut HashMap<u16, MtuProbe>, timeout: Duration) {
-    let now = Instant::now();
-    let expired: Vec<MtuProbe> = in_flight
-        .extract_if(|_, p| now.duration_since(p.sent_at) >= timeout)
-        .map(|(_, probe)| probe)
-        .collect();
-    if expired.is_empty() {
-        return;
-    }
-    let mut s = session.lock().unwrap();
-    for probe in expired {
-        let answers = s
-            .hops
-            .get(usize::from(probe.ttl) - 1)
-            .is_some_and(|hop| hop.received > 0);
-        debug!("Path MTU probe of {} bytes vanished", probe.size);
-        if let (true, Some(pmtu)) = (answers, s.pmtu.as_mut()) {
-            pmtu.lost(probe.size, probe.ttl);
-        }
-    }
-    s.notify();
-}
-
-/// Count probes that have waited longer than `timeout` as lost.
+/// Count probes that have waited longer than `timeout` as lost. A path MTU probe
+/// vanished, if the hop it went to answers small probes.
 fn expire(session: &Shared, in_flight: &mut HashMap<u16, InFlight>, timeout: Duration) {
     let now = Instant::now();
-    let expired: Vec<InFlight> = in_flight
+    let expired: Vec<Purpose> = in_flight
         .extract_if(|_, p| now.duration_since(p.sent_at) >= timeout)
-        .map(|(_, probe)| probe)
+        .map(|(_, probe)| probe.purpose)
         .collect();
     if expired.is_empty() {
         return;
     }
     let mut s = session.lock().unwrap();
-    for probe in expired {
-        s.lost(probe.hop, probe.ordinal);
+    for purpose in expired {
+        match purpose {
+            Purpose::Hop { hop, ordinal, .. } => s.lost(hop, ordinal),
+            Purpose::PathMtu { ttl, size } => {
+                let answers = s
+                    .hops
+                    .get(usize::from(ttl) - 1)
+                    .is_some_and(|hop| hop.received > 0);
+                debug!("Path MTU probe of {size} bytes vanished");
+                if let (true, Some(pmtu)) = (answers, s.pmtu.as_mut()) {
+                    pmtu.lost(size, ttl);
+                }
+            }
+        }
     }
     s.notify();
 }
@@ -383,7 +370,7 @@ async fn reverse_lookup(session: Shared, resolver: hickory_resolver::TokioResolv
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::icmp_ext::MplsLabel;
+    use crate::icmp_ext::{Extensions, MplsLabel};
     use crate::probe::{Nat, Reply};
     use crate::Args;
     use clap::Parser;
@@ -477,8 +464,10 @@ mod tests {
                     seq,
                     received_at: sent_at + Duration::from_millis(u64::from(hops)),
                     ttl: Some(64 - hops),
-                    mpls: mpls.into_iter().collect(),
-                    interfaces: Vec::new(),
+                    ext: Extensions {
+                        mpls: mpls.into_iter().collect(),
+                        interfaces: Vec::new(),
+                    },
                     nat: self
                         .nat
                         .filter(|&(at, _)| ttl >= at && kind == IcmpResponseType::TimeExceeded)
@@ -591,7 +580,7 @@ mod tests {
     async fn flows_auto_finds_every_branch_then_probes_one_flow_per_branch() {
         let s = trace_with(balanced(), &["-c", "41", "--flows", "auto"]).await;
 
-        let mda = s.mda.as_ref().unwrap();
+        let mda = s.flow_plan.mda().unwrap();
         assert!(!mda.discovering());
         assert_eq!(s.flows(), 21, "four branches take 21 flows to be sure of");
         let hop5 = &s.hops[4];
@@ -614,7 +603,7 @@ mod tests {
     async fn a_report_without_a_count_lets_discovery_finish() {
         let s = trace_with(balanced(), &["-r", "--flows", "auto"]).await;
 
-        assert!(!s.mda.as_ref().unwrap().discovering());
+        assert!(!s.flow_plan.mda().unwrap().discovering());
         assert_eq!(s.hops[0].sent, 22, "21 flows, then one round of the cover");
     }
 
@@ -631,9 +620,12 @@ mod tests {
         let s = trace(prober).await;
 
         let hop3 = &s.hops[2].responders[&router(3).unwrap()];
-        assert_eq!(hop3.mpls, [label]);
+        assert_eq!(hop3.ext.mpls, [label]);
         assert_eq!(hop3.reply_ttl, Some(61));
-        assert!(s.hops[1].responders[&router(2).unwrap()].mpls.is_empty());
+        assert!(s.hops[1].responders[&router(2).unwrap()]
+            .ext
+            .mpls
+            .is_empty());
     }
 
     /// A log path of its own for each test, removed first
@@ -683,7 +675,7 @@ mod tests {
             let mut responders: Vec<_> = hop
                 .responders
                 .values()
-                .map(|r| (r.addr, r.replies, r.reply_ttl, r.mpls.clone(), r.nat))
+                .map(|r| (r.addr, r.replies, r.reply_ttl, r.ext.mpls.clone(), r.nat))
                 .collect();
             responders.sort_by_key(|r| r.0);
             responders

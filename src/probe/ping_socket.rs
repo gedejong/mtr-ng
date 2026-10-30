@@ -11,6 +11,7 @@
 use super::recvmsg::{read, set_option, Message};
 use super::{echo_fields, IcmpReply, IcmpResponseType};
 use super::{ECHO_REQUEST, ECHO_REQUEST_V6, MAX_MTU, RECEIVE_POLL};
+use crate::icmp_ext::Extensions;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io,
@@ -108,7 +109,7 @@ fn wait(fd: RawFd, timeout: Duration) -> io::Result<()> {
 
 impl Message<'_> {
     fn reply(&self, ipv6: bool) -> Option<IcmpReply> {
-        let echo = self.data.get(..8)?;
+        let echo = self.data.first_chunk()?;
         let (kind, source) = match &self.error {
             None => {
                 let echo_reply = if ipv6 { 129 } else { 0 };
@@ -145,8 +146,7 @@ impl Message<'_> {
             // The error queue hands back the probe as it was sent, not the quote.
             quote: None,
             ttl: self.ttl,
-            mpls: Vec::new(),
-            interfaces: Vec::new(),
+            ext: Extensions::default(),
         })
     }
 }

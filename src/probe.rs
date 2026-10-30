@@ -18,7 +18,7 @@ use std::{
 };
 
 use crate::args::ProbeProtocol;
-use crate::icmp_ext::{extensions, extensions_v6, Extensions, Interface, MplsLabel};
+use crate::icmp_ext::{extensions, extensions_v6, Extensions};
 
 #[cfg(windows)]
 mod icmp_api;
@@ -100,10 +100,8 @@ pub struct ProbeResponse {
     pub rtt: Duration,
     /// TTL or hop limit of the reply as it arrived
     pub reply_ttl: Option<u8>,
-    /// MPLS labels the router quoted (RFC 4950)
-    pub mpls: Vec<MplsLabel>,
-    /// Interfaces the router named (RFC 5837)
-    pub interfaces: Vec<Interface>,
+    /// What the router appended to its error
+    pub ext: Extensions,
     /// What a NAT did to the probe, if the router's quote shows it
     pub nat: Option<Nat>,
 }
@@ -117,10 +115,8 @@ pub struct Reply {
     pub received_at: Instant,
     /// TTL or hop limit of the reply as it arrived
     pub ttl: Option<u8>,
-    /// MPLS labels quoted in a Time Exceeded or Destination Unreachable
-    pub mpls: Vec<MplsLabel>,
-    /// Interfaces named in one (RFC 5837)
-    pub interfaces: Vec<Interface>,
+    /// What the router appended to a Time Exceeded or Destination Unreachable
+    pub ext: Extensions,
     /// What a NAT did to the probe, if the quote shows it
     pub nat: Option<Nat>,
 }
@@ -153,8 +149,7 @@ struct IcmpReply {
     /// The rest of the quote, in an error
     quote: Option<Quote>,
     ttl: Option<u8>,
-    mpls: Vec<MplsLabel>,
-    interfaces: Vec<Interface>,
+    ext: Extensions,
 }
 
 /// The probe an ICMP message answers, as far as it shows it
@@ -596,8 +591,7 @@ impl Ours {
             seq,
             received_at,
             ttl: reply.ttl,
-            mpls: reply.mpls,
-            interfaces: reply.interfaces,
+            ext: reply.ext,
             nat,
         })
     }
@@ -850,7 +844,7 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
         _ => return None,
     };
     let (probe, quote) = if kind == IcmpResponseType::EchoReply {
-        (echo_fields(icmp), None)
+        (echo_fields(icmp.first_chunk()?), None)
     } else {
         // 8-byte ICMP header, then the quoted IP header and the first 8 bytes of our probe
         let inner = &icmp[8..];
@@ -859,7 +853,8 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
             return None;
         }
         let source = Ipv4Addr::new(inner[12], inner[13], inner[14], inner[15]);
-        quoted(inner[9], &inner[inner_ihl..], ECHO_REQUEST, source.into())?
+        let probe = inner[inner_ihl..].first_chunk()?;
+        quoted(inner[9], probe, ECHO_REQUEST, source.into())?
     };
     let ext = match kind {
         IcmpResponseType::EchoReply => Extensions::default(),
@@ -871,8 +866,7 @@ fn parse_icmpv4(buf: &[u8]) -> Option<IcmpReply> {
         probe,
         quote,
         ttl: Some(buf[8]),
-        mpls: ext.mpls,
-        interfaces: ext.interfaces,
+        ext,
     })
 }
 
@@ -896,14 +890,15 @@ fn parse_icmpv6(buf: &[u8], source: IpAddr, hop_limit: Option<u8>) -> Option<Icm
         _ => return None,
     };
     let (probe, quote) = if kind == IcmpResponseType::EchoReply {
-        (echo_fields(buf), None)
+        (echo_fields(buf.first_chunk()?), None)
     } else {
         // 8-byte ICMPv6 header, then the 40-byte quoted IPv6 header and our probe
         let inner = buf.get(8..8 + 40 + 8)?;
         let source = <[u8; 16]>::try_from(&inner[8..24]).ok()?;
+        let probe = inner[40..].first_chunk()?;
         quoted(
             inner[6],
-            &inner[40..],
+            probe,
             ECHO_REQUEST_V6,
             Ipv6Addr::from(source).into(),
         )?
@@ -918,13 +913,12 @@ fn parse_icmpv6(buf: &[u8], source: IpAddr, hop_limit: Option<u8>) -> Option<Icm
         probe,
         quote,
         ttl: hop_limit,
-        mpls: ext.mpls,
-        interfaces: ext.interfaces,
+        ext,
     })
 }
 
 /// Identifier and sequence number of an echo request or reply
-fn echo_fields(echo: &[u8]) -> Quoted {
+fn echo_fields(echo: &[u8; 8]) -> Quoted {
     Quoted::Echo {
         id: u16::from_be_bytes([echo[4], echo[5]]),
         seq: u16::from_be_bytes([echo[6], echo[7]]),
@@ -936,7 +930,7 @@ fn echo_fields(echo: &[u8]) -> Quoted {
 /// header, and the rest of the quote.
 fn quoted(
     protocol: u8,
-    quoted: &[u8],
+    quoted: &[u8; 8],
     echo_request: u8,
     source: IpAddr,
 ) -> Option<(Quoted, Option<Quote>)> {
@@ -1095,7 +1089,7 @@ mod tests {
         assert_eq!(r.kind, IcmpResponseType::EchoReply);
         assert_eq!(r.source, IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!((r.probe, r.ttl), (echo_of(0x1234, 40000), Some(57)));
-        assert!(r.mpls.is_empty());
+        assert!(r.ext.mpls.is_empty());
     }
 
     #[test]
@@ -1338,7 +1332,12 @@ mod tests {
         p.extend_from_slice(&entry.to_be_bytes());
         let r = parse_icmpv4(&p).unwrap();
         assert_eq!(r.probe, echo_of(0x1234, 40005));
-        let labels: Vec<_> = r.mpls.iter().map(|l| (l.label, l.bottom, l.ttl)).collect();
+        let labels: Vec<_> = r
+            .ext
+            .mpls
+            .iter()
+            .map(|l| (l.label, l.bottom, l.ttl))
+            .collect();
         assert_eq!(labels, [(24005, true, 1)]);
     }
 

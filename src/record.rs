@@ -16,7 +16,7 @@
 use crate::args::{Args, Flows, ProbeProtocol};
 use crate::asn::AsInfo;
 use crate::geo::GeoFix;
-use crate::icmp_ext::{Interface, MplsLabel};
+use crate::icmp_ext::Extensions;
 use crate::privacy::{self, StandIns};
 use crate::probe::{IcmpResponseType, Nat, ProbeResponse, MAX_FLOWS};
 use crate::session::MtrSession;
@@ -94,10 +94,8 @@ pub enum Event {
         rtt_ms: f64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_ttl: Option<u8>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        mpls: Vec<MplsLabel>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        interfaces: Vec<Interface>,
+        #[serde(flatten)]
+        ext: Extensions,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nat: Option<Nat>,
     },
@@ -243,11 +241,22 @@ impl Recorder {
     }
 
     pub fn response(&self, response: &ProbeResponse) {
-        let Some(probe) = response.ordinal else {
+        // Every field is named, so a new one has to be recorded here too
+        let ProbeResponse {
+            hop,
+            ordinal,
+            source_addr,
+            icmp_type,
+            rtt,
+            reply_ttl,
+            ext,
+            nat,
+        } = response;
+        let Some(probe) = *ordinal else {
             return;
         };
-        let hop = response.hop + 1;
-        let kind = match response.icmp_type {
+        let hop = hop + 1;
+        let kind = match icmp_type {
             IcmpResponseType::EchoReply => Answer::EchoReply,
             IcmpResponseType::TimeExceeded => Answer::TimeExceeded,
             IcmpResponseType::PortUnreachable => Answer::PortUnreachable,
@@ -258,17 +267,15 @@ impl Recorder {
         self.write(Event::Reply {
             hop: hop as u8,
             probe,
-            from: self.show(hop, response.source_addr),
+            from: self.show(hop, *source_addr),
             kind,
-            rtt_ms: response.rtt.as_nanos() as f64 / 1e6,
-            reply_ttl: response.reply_ttl,
-            mpls: response.mpls.clone(),
-            // Their names and addresses would give the hop away
-            interfaces: match hidden {
-                true => Vec::new(),
-                false => response.interfaces.clone(),
+            rtt_ms: rtt.as_nanos() as f64 / 1e6,
+            reply_ttl: *reply_ttl,
+            ext: match hidden {
+                true => ext.redacted(),
+                false => ext.clone(),
             },
-            nat: response.nat.map(|nat| self.show_nat(nat)),
+            nat: nat.map(|nat| self.show_nat(nat)),
         });
     }
 
@@ -410,11 +417,11 @@ impl Replay {
     }
 }
 
-/// The flows a replay shows, now that `flow` turned up.
-pub fn flows_with(flows: Flows, flow: u16) -> Flows {
-    match flows {
-        Flows::Fixed(n) if flow < MAX_FLOWS => Flows::Fixed(n.max(flow + 1)),
-        other => other,
+/// The flows a replay shows, `n` until now, now that `flow` turned up.
+pub fn flows_with(n: u16, flow: u16) -> u16 {
+    match flow < MAX_FLOWS {
+        true => n.max(flow + 1),
+        false => n,
     }
 }
 
@@ -439,8 +446,7 @@ mod tests {
             icmp_type: IcmpResponseType::TimeExceeded,
             rtt: Duration::from_millis(5),
             reply_ttl: Some(62),
-            mpls: Vec::new(),
-            interfaces: Vec::new(),
+            ext: Extensions::default(),
             nat: None,
         }
     }
@@ -465,8 +471,7 @@ mod tests {
                 kind: Answer::TimeExceeded,
                 rtt_ms: 12.345678,
                 reply_ttl: Some(61),
-                mpls: Vec::new(),
-                interfaces: Vec::new(),
+                ext: Extensions::default(),
                 nat: None,
             },
         };
@@ -479,6 +484,22 @@ mod tests {
         assert_eq!(back.event, line.event);
         let reset: Line = serde_json::from_str(r#"{"t":3,"event":"reset"}"#).unwrap();
         assert_eq!(reset.event, Event::Reset);
+    }
+
+    #[test]
+    fn extensions_sit_between_the_reply_ttl_and_the_nat() {
+        let lines = [
+            r#"{"t":0.03,"event":"reply","hop":5,"probe":0,"from":"198.51.100.51","kind":"time_exceeded","rtt_ms":14.6,"reply_ttl":251,"mpls":[{"label":24017,"tc":0,"bottom":true,"ttl":1}],"nat":{"source":"198.51.100.77"}}"#,
+            r#"{"t":0.04,"event":"reply","hop":7,"probe":0,"from":"203.0.113.7","kind":"time_exceeded","rtt_ms":23.5,"reply_ttl":247,"mpls":[{"label":24005,"tc":0,"bottom":true,"ttl":1}],"interfaces":[{"role":"incoming","index":531,"addr":"203.0.113.6","name":"et-0/0/2.100","mtu":9192}]}"#,
+        ];
+        for text in lines {
+            let line: Line = serde_json::from_str(text).unwrap();
+            let Event::Reply { ref ext, .. } = line.event else {
+                panic!("{text}");
+            };
+            assert_eq!(ext.mpls.len(), 1);
+            assert_eq!(serde_json::to_string(&line).unwrap(), text);
+        }
     }
 
     #[tokio::test]
@@ -523,13 +544,13 @@ mod tests {
         let hop2 = &s.hops[1];
         assert_eq!((hop2.sent, hop2.received), (2, 1));
         assert_eq!(hop2.loss_percent, 50.0);
-        assert_eq!(hop2.hostname.as_deref(), Some("core-1.example"));
-        let asn = hop2.asn.as_ref().unwrap();
+        assert_eq!(hop2.hostname(), Some("core-1.example"));
+        let asn = hop2.asn().unwrap();
         assert_eq!(asn.number, 64500);
         assert_eq!(asn.prefix.as_deref(), Some("198.51.100.0/24"));
         assert_eq!(asn.name.as_deref(), Some("EXAMPLE"));
         assert_eq!(hop2.responders[&core].reply_ttl, Some(62));
-        assert_eq!(hop2.geo, Some(measured));
+        assert_eq!(hop2.geo(), Some(&measured));
         assert_eq!(
             text.matches(r#""event":"ipmap""#).count(),
             1,

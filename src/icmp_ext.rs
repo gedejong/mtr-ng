@@ -12,13 +12,38 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// What a router appended to an ICMP error.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Extensions {
+    /// MPLS labels (RFC 4950)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mpls: Vec<MplsLabel>,
+    /// Interfaces the router named (RFC 5837)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<Interface>,
 }
 
 impl Extensions {
+    /// What a hidden hop (`--privacy-hops`) may keep: the labels, but not the
+    /// interfaces, whose names and addresses would give it away.
+    pub fn redacted(&self) -> Self {
+        // Every field is named, so a new one has to be decided on here
+        let Self {
+            mpls,
+            interfaces: _,
+        } = self;
+        Self {
+            mpls: mpls.clone(),
+            interfaces: Vec::new(),
+        }
+    }
+
+    /// A line per label, then per interface, for `-e`
+    pub fn lines(&self) -> impl Iterator<Item = String> + '_ {
+        let Self { mpls, interfaces } = self;
+        let labels = mpls.iter().map(ToString::to_string);
+        labels.chain(interfaces.iter().map(ToString::to_string))
+    }
+
     /// Just one MPLS label, for tests
     #[cfg(test)]
     pub fn mpls_only(label: MplsLabel) -> Self {

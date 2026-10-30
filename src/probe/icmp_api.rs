@@ -9,6 +9,7 @@
 //! the thread times the call with `Instant` instead.
 
 use super::{source_address, IcmpResponseType, Prober, Reply};
+use crate::icmp_ext::Extensions;
 use crate::tracer::PROBE_TIMEOUT;
 use socket2::SockAddr;
 use std::{
@@ -87,8 +88,7 @@ impl Prober for IcmpApi {
                             seq,
                             received_at,
                             ttl: reply_ttl,
-                            mpls: Vec::new(),
-                            interfaces: Vec::new(),
+                            ext: Extensions::default(),
                             nat: None,
                         });
                     }
